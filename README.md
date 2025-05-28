@@ -1,5 +1,5 @@
 # Not complete
-# TaoHash Mining Proxy
+# TaoHash Validator Proxy
 
 A Bitcoin mining proxy for TaoHash validators.
 
