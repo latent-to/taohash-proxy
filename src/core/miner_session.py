@@ -74,6 +74,7 @@ class MinerSession:
         self.pool_init_data = {
             "extranonce1": None,
             "extranonce2_size": None,
+            "subscription_ids": None,
             "initial_difficulty": None,
             "initial_job": None,
         }
@@ -174,6 +175,7 @@ class MinerSession:
             # Pool session data
             self.pool_init_data["extranonce1"] = self.pool_session.extranonce1
             self.pool_init_data["extranonce2_size"] = self.pool_session.extranonce2_size
+            self.pool_init_data["subscription_ids"] = self.pool_session.subscription_ids
 
             await self._process_pool_init_messages()
             logger.info(f"[{self.miner_id}] Pool connection established")
@@ -355,16 +357,14 @@ class MinerSession:
             return
 
         if (
-            self.pool_init_data["extranonce1"]
+            self.pool_init_data["extranonce1"] is not None
             and self.pool_init_data["extranonce2_size"]
+            and self.pool_init_data["subscription_ids"]
         ):
             response = {
                 "id": msg_id,
                 "result": [
-                    [
-                        ["mining.notify", "ae6812eb4cd7735a302a8a9dd95cf71f"],
-                        ["mining.set_difficulty", "b4b6693b72a50c7116db18d6497cac52"],
-                    ],
+                    self.pool_init_data["subscription_ids"],
                     self.pool_init_data["extranonce1"],
                     self.pool_init_data["extranonce2_size"],
                 ],
@@ -474,18 +474,12 @@ class MinerSession:
             return
 
         extranonce1 = self.pool_session.extranonce1 if self.pool_session else None
-        if not extranonce1:
-            logger.error(f"[{self.miner_id}] No extranonce1 available")
-            await self._send_to_miner(
-                {"id": msg_id, "result": False, "error": [20, "Invalid session", None]}
-            )
-            return
 
         # Calculate actual difficulty
         actual_difficulty = 0.0
         block_hash = ""
 
-        if job_data and extranonce1 and extranonce2 and ntime and nonce:
+        if job_data and extranonce2 and ntime and nonce:
             try:
                 actual_difficulty, block_hash = calculate_share_difficulty(
                     job=job_data,
