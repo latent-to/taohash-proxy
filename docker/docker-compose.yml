@@ -20,7 +20,8 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
     restart: unless-stopped
     depends_on:
-      - clickhouse
+      clickhouse:
+        condition: service_healthy
 
   api:
     build:
@@ -40,7 +41,8 @@ services:
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
     restart: unless-stopped
     depends_on:
-      - clickhouse
+      clickhouse:
+        condition: service_healthy
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
