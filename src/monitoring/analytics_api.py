@@ -100,11 +100,9 @@ async def handle_top_workers(request: web.Request) -> web.Response:
         SELECT 
             worker,
             count() as total_shares,
-            sum(accepted) as accepted_shares,
             sum(pool_difficulty * 4294967296) / 86400 as hashrate,
             max(actual_difficulty) as best_share,
-            avg(actual_difficulty / pool_difficulty) as avg_luck,
-            sum(accepted) / count() as accept_rate
+            avg(actual_difficulty / pool_difficulty) as avg_luck
         FROM shares
         WHERE ts > now() - INTERVAL 24 HOUR
         GROUP BY worker
@@ -119,11 +117,9 @@ async def handle_top_workers(request: web.Request) -> web.Response:
             workers.append({
                 "worker": row[0],
                 "total_shares": int(row[1]),
-                "accepted_shares": int(row[2]),
-                "hashrate": float(row[3] or 0),
-                "best_share": float(row[4] or 0),
-                "avg_luck": float(row[5] or 1),
-                "accept_rate": float(row[6] or 0)
+                "hashrate": float(row[2] or 0),
+                "best_share": float(row[3] or 0),
+                "avg_luck": float(row[4] or 1)
             })
         
         return web.json_response(workers)
@@ -168,14 +164,8 @@ async def handle_share_query(request: web.Request) -> web.Response:
     if min_diff:
         where_clauses.append("actual_difficulty >= %(min_diff)s")
         params["min_diff"] = float(min_diff)
-    
-    accepted = request.rel_url.query.get("accepted")
-    if accepted == "1":
-        where_clauses.append("accepted = 1")
-    elif accepted == "0":
-        where_clauses.append("accepted = 0")
-    
-    limit = min(int(request.rel_url.query.get("limit", PAGE_SIZE)), 1000)
+    requested_limit = int(request.rel_url.query.get("limit", PAGE_SIZE))
+    limit = requested_limit if requested_limit > 10000 else min(requested_limit, 10000)
     offset = int(request.rel_url.query.get("offset", 0))
     
     where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
@@ -191,9 +181,6 @@ async def handle_share_query(request: web.Request) -> web.Response:
             worker,
             pool_difficulty,
             actual_difficulty,
-            accepted,
-            reject_reason,
-            job_id,
             block_hash
         FROM shares
         WHERE {where_clause}
@@ -214,10 +201,7 @@ async def handle_share_query(request: web.Request) -> web.Response:
                 "worker": row[1],
                 "pool_difficulty": float(row[2]),
                 "actual_difficulty": float(row[3]),
-                "accepted": bool(row[4]),
-                "reject_reason": row[5] or "",
-                "job_id": row[6],
-                "block_hash": row[7]
+                "block_hash": row[4]
             })
         
         agg_query = f"""

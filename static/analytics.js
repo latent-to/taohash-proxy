@@ -3,6 +3,8 @@
 // State management
 let currentResults = [];
 let currentOffset = 0;
+let totalResultCount = 0;
+let pendingExportFormat = null;
 const LIMIT = 100;
 
 // Initialize on page load
@@ -24,8 +26,19 @@ function initializeEventListeners() {
   document.getElementById('resetForm').addEventListener('click', resetForm);
   
   // Export buttons
-  document.getElementById('exportCsv').addEventListener('click', () => exportResults('csv'));
-  document.getElementById('exportJson').addEventListener('click', () => exportResults('json'));
+  document.getElementById('exportCsv').addEventListener('click', () => showExportModal('csv'));
+  document.getElementById('exportJson').addEventListener('click', () => showExportModal('json'));
+  
+  // Modal buttons
+  document.getElementById('confirmExport').addEventListener('click', handleExportConfirm);
+  document.getElementById('cancelExport').addEventListener('click', hideExportModal);
+  
+  // Close modal on outside click
+  document.getElementById('exportModal').addEventListener('click', (e) => {
+    if (e.target.id === 'exportModal') {
+      hideExportModal();
+    }
+  });
   
   // Load more button
   document.getElementById('loadMoreBtn').addEventListener('click', loadMore);
@@ -76,7 +89,6 @@ async function loadTopWorkers() {
         <td>${worker.worker}</td>
         <td>${formatHashrate(worker.hashrate)}</td>
         <td>${formatNumber(worker.total_shares)}</td>
-        <td>${(worker.accept_rate * 100).toFixed(1)}%</td>
         <td>${formatDifficulty(worker.best_share)}</td>
         <td>${worker.avg_luck.toFixed(2)}x</td>
       `;
@@ -84,7 +96,7 @@ async function loadTopWorkers() {
     });
   } catch (error) {
     console.error('Error loading top workers:', error);
-    document.getElementById('workersBody').innerHTML = '<tr><td colspan="6" class="error">Failed to load</td></tr>';
+    document.getElementById('workersBody').innerHTML = '<tr><td colspan="5" class="error">Failed to load</td></tr>';
   }
 }
 
@@ -98,6 +110,7 @@ async function queryShares() {
     const data = await response.json();
     
     currentResults = data.shares;
+    totalResultCount = data.total_count;
     displayResults(data);
     
     document.getElementById('resultsSection').style.display = 'block';
@@ -202,16 +215,13 @@ function appendResults(shares) {
   shares.forEach(share => {
     const row = document.createElement('tr');
     const luck = share.actual_difficulty / share.pool_difficulty;
-    const statusClass = share.accepted ? 'accepted' : 'rejected';
-    
     row.innerHTML = `
       <td>${formatTimestamp(share.ts)}</td>
       <td>${share.worker}</td>
       <td>${formatDifficulty(share.pool_difficulty)}</td>
       <td>${formatDifficulty(share.actual_difficulty)}</td>
       <td class="luck-${luck >= 10 ? 'high' : luck >= 1 ? 'normal' : 'low'}">${luck.toFixed(2)}x</td>
-      <td class="status-${statusClass}">${share.accepted ? 'Accepted' : 'Rejected'}</td>
-      <td class="mono">${share.job_id.substring(0, 8)}...</td>
+      <td class="mono">${share.block_hash ? share.block_hash.substring(0, 8) + '...' : 'N/A'}</td>
     `;
     tbody.appendChild(row);
   });
@@ -227,20 +237,61 @@ function resetForm() {
   setDefaultTimeRange();
 }
 
-function exportResults(format) {
+function showExportModal(format) {
   if (!currentResults.length) {
     alert('No results to export');
     return;
   }
   
+  pendingExportFormat = format;
+  document.getElementById('visibleCount').textContent = currentResults.length;
+  document.getElementById('totalCount').textContent = totalResultCount;
+  document.getElementById('exportModal').style.display = 'flex';
+}
+
+function hideExportModal() {
+  document.getElementById('exportModal').style.display = 'none';
+  pendingExportFormat = null;
+}
+
+async function handleExportConfirm() {
+  const exportOption = document.querySelector('input[name="exportOption"]:checked').value;
+  
+  if (exportOption === 'visible') {
+    exportData(currentResults, pendingExportFormat);
+  } else {
+    // Export all matching records
+    try {
+      const params = buildQueryParams();
+      params.limit = 999999999; // No limit for export
+      params.offset = 0;
+      
+      const response = await fetch('/analytics/shares?' + new URLSearchParams(params));
+      const data = await response.json();
+      
+      if (data.error) {
+        alert('Error fetching all records: ' + data.error);
+        return;
+      }
+      
+      exportData(data.shares, pendingExportFormat);
+    } catch (error) {
+      alert('Error exporting all records: ' + error.message);
+    }
+  }
+  
+  hideExportModal();
+}
+
+function exportData(data, format) {
   let content, mimeType, filename;
   
   if (format === 'csv') {
-    content = convertToCSV(currentResults);
+    content = convertToCSV(data);
     mimeType = 'text/csv';
     filename = `shares_${new Date().toISOString()}.csv`;
   } else {
-    content = JSON.stringify(currentResults, null, 2);
+    content = JSON.stringify(data, null, 2);
     mimeType = 'application/json';
     filename = `shares_${new Date().toISOString()}.json`;
   }
