@@ -10,10 +10,15 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+import json
 
 from ..utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+ERROR_JOB_NOT_FOUND = 21
+ERROR_DUPLICATE_SHARE = 22
+ERROR_LOW_DIFFICULTY = 23
 
 
 @dataclass
@@ -42,12 +47,48 @@ class MinerStats:
     accepted: int = 0
     rejected: int = 0
     difficulty: float = 1.0
+    pool_difficulty: float = 0.0
     recent_shares: deque = field(default_factory=lambda: deque(maxlen=100))
     highest_difficulty: float = 0.0
     last_share_difficulty: float = 0.0
+    pool_name: str = "unknown"
+
+    rejected_stale: int = 0
+    rejected_duplicate: int = 0
+    rejected_low_diff: int = 0
+    rejected_other: int = 0
+
+    last_hashrate: float = 0.0
+    last_hashrate_time: float = 0.0
+
+    def _categorize_rejection(self, error: Optional[str]) -> None:
+        if not error:
+            self.rejected_other += 1
+            return
+            
+        try:
+            error_data = json.loads(error)
+            if isinstance(error_data, list) and len(error_data) > 0:
+                error_code = error_data[0]
+                error_msg = error_data[1] if len(error_data) > 1 else ""
+                
+                if error_code == ERROR_JOB_NOT_FOUND:
+                    self.rejected_stale += 1
+                elif error_code == ERROR_DUPLICATE_SHARE:
+                    self.rejected_duplicate += 1
+                elif error_code == ERROR_LOW_DIFFICULTY:
+                    self.rejected_low_diff += 1
+                elif isinstance(error_msg, str) and "above target" in error_msg.lower():
+                    self.rejected_low_diff += 1
+                else:
+                    self.rejected_other += 1
+            else:
+                self.rejected_other += 1
+        except:
+            self.rejected_other += 1
 
     def record_share(
-        self, accepted: bool, difficulty: float, pool: str, error: Optional[str] = None
+        self, accepted: bool, difficulty: float, share_difficulty: float, pool: str, error: Optional[str] = None
     ) -> None:
         """
         Record a submitted share and its result.
@@ -55,6 +96,7 @@ class MinerStats:
         Args:
             accepted (bool): Whether the share was accepted by the pool
             difficulty (float): Difficulty level of the share
+            share_difficulty (float): Share difficulty level
             pool (str): Name of the pool
             error (Optional[str]): Error message if the share was rejected
         """
@@ -64,14 +106,15 @@ class MinerStats:
             logger.debug(f"Accepted share from {self.ip} at difficulty {difficulty}")
         else:
             self.rejected += 1
+            self._categorize_rejection(error)
             logger.debug(
                 f"Rejected share from {self.ip} at difficulty {difficulty} with error {error}"
             )
 
-        self.last_share_difficulty = difficulty
-        if difficulty > self.highest_difficulty:
-            self.highest_difficulty = difficulty
-            logger.info(f"New highest difficulty for {self.ip}: {difficulty}")
+        self.last_share_difficulty = share_difficulty
+        if share_difficulty > self.highest_difficulty:
+            self.highest_difficulty = share_difficulty
+            logger.info(f"New highest difficulty for {self.ip}: {share_difficulty}")
 
 
     def update_difficulty(self, difficulty: float) -> None:
@@ -88,23 +131,30 @@ class MinerStats:
         """
         Calculate estimated hashrate based on recent shares.
 
-        Uses the standard formula: hashrate = (sum of difficulties * 2^32) / timespan
+        Uses a sliding 5-minute window with the formula:
+        hashrate = (sum of difficulties * 2^32) / 300 seconds
 
         Returns:
             float: Estimated hashrate in hashes per second
         """
         if not self.recent_shares:
             return 0.0
+        
         now = time.time()
-        # Drop entries older than 300s
-        while self.recent_shares and now - self.recent_shares[0][0] > 300:
-            self.recent_shares.popleft()
-        if len(self.recent_shares) < 2:
+        five_min_ago = now - 300
+        
+        recent = [(t, d) for t, d in self.recent_shares if t > five_min_ago]
+        
+        if not recent:
             return 0.0
-        first, last = self.recent_shares[0][0], self.recent_shares[-1][0]
-        span = max(last - first, 1e-6)
-        total_hashes = sum(diff * (2**32) for _, diff in self.recent_shares)
-        return total_hashes / span
+        
+        if len(recent) < 10:
+            return 0.0
+            
+        time_span = 300.0
+        total_hashes = sum(diff * (2**32) for _, diff in recent)
+        
+        return total_hashes / time_span
 
 
 class StatsManager:
@@ -120,20 +170,21 @@ class StatsManager:
         self.miners: dict[str, MinerStats] = {}
         logger.info("StatsManager initialized")
 
-    def register_miner(self, peer: tuple[str, int]) -> MinerStats:
+    def register_miner(self, peer: tuple[str, int], pool_name: str = "unknown") -> MinerStats:
         """
         Register a new miner connection and create its statistics tracker.
 
         Args:
             peer: (ip, port) tuple from socket connection
+            pool_name: Name of the pool this miner is connected to
 
         Returns:
             MinerStats: Newly created statistics object for this miner
         """
         key = f"{peer[0]}:{peer[1]}"
-        stats = MinerStats(ip=peer[0])
+        stats = MinerStats(ip=peer[0], pool_name=pool_name)
         self.miners[key] = stats
-        logger.debug(f"Registered miner: {key}")
+        logger.debug(f"Registered miner: {key} on pool {pool_name}")
         return stats
 
     def unregister_miner(self, peer: tuple[str, int]) -> None:
@@ -163,9 +214,17 @@ class StatsManager:
                     "accepted": s.accepted,
                     "rejected": s.rejected,
                     "difficulty": s.difficulty,
+                    "pool_difficulty": s.pool_difficulty,
                     "hashrate": s.get_hashrate(),
                     "highest_difficulty": s.highest_difficulty,
                     "last_share_difficulty": s.last_share_difficulty,
+                    "pool": s.pool_name,
+                    "rejected_breakdown": {
+                        "stale": s.rejected_stale,
+                        "duplicate": s.rejected_duplicate,
+                        "low_diff": s.rejected_low_diff,
+                        "other": s.rejected_other,
+                    },
                 }
             )
         return stats
