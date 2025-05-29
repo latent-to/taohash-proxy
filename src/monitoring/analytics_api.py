@@ -181,7 +181,8 @@ async def handle_share_query(request: web.Request) -> web.Response:
             worker,
             pool_difficulty,
             actual_difficulty,
-            block_hash
+            block_hash,
+            pool_requested_difficulty
         FROM shares
         WHERE {where_clause}
         ORDER BY ts DESC
@@ -201,7 +202,8 @@ async def handle_share_query(request: web.Request) -> web.Response:
                 "worker": row[1],
                 "pool_difficulty": float(row[2]),
                 "actual_difficulty": float(row[3]),
-                "block_hash": row[4]
+                "block_hash": row[4],
+                "pool_requested_difficulty": float(row[5]) if len(row) > 5 else 0
             })
         
         agg_query = f"""
