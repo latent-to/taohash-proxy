@@ -62,6 +62,7 @@ class StatsDB:
                 pool_difficulty Float32,
                 actual_difficulty Float32,
                 block_hash String,
+                pool_requested_difficulty Float32 DEFAULT 0,
                 INDEX idx_worker (worker) TYPE bloom_filter GRANULARITY 1,
                 INDEX idx_ts (ts) TYPE minmax GRANULARITY 1
             )
@@ -69,6 +70,8 @@ class StatsDB:
             PARTITION BY toYYYYMM(ts)
             ORDER BY (worker, ts)
             SETTINGS index_granularity = 8192""",
+            # Migration: Add pool_requested_difficulty column
+            """ALTER TABLE shares ADD COLUMN IF NOT EXISTS pool_requested_difficulty Float32 DEFAULT 0""",
             # Worker stats materialized view
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_stats_mv
             ENGINE = AggregatingMergeTree()
@@ -222,6 +225,7 @@ class StatsDB:
 
         try:
             block_hash_reversed = block_hash[::-1] if block_hash else ""
+            pool_requested_diff = kwargs.get("pool_requested_difficulty", 0)
 
             data = [
                 [
@@ -231,6 +235,7 @@ class StatsDB:
                     pool_difficulty,
                     actual_difficulty,
                     block_hash_reversed,
+                    pool_requested_diff,
                 ]
             ]
 
@@ -244,6 +249,7 @@ class StatsDB:
                     "pool_difficulty",
                     "actual_difficulty",
                     "block_hash",
+                    "pool_requested_difficulty",
                 ],
             )
 
