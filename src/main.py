@@ -80,45 +80,60 @@ async def handle_reload_request(request: web.Request) -> web.Response:
         return web.Response(status=500, text=str(e))
 
 
-def create_miner_handler(pool_config: dict):
-    """Create a handler function for a specific pool configuration."""
-    async def handle_new_miner(
-        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """
-        Fired on each TCP connection from a miner.  We:
-          1) Instantiate a MinerSession with the specific pool config
-          2) Track it in active_sessions
-          3) Schedule its run() as a background task
-          4) On completion, clean up stats + the session set
-        """
-        miner_address = writer.get_extra_info("peername")
-        pool_name = f"{pool_config['host']}:{pool_config['port']}"
-        logger.info(f"➕ Miner connected: {miner_address} → {pool_name}")
-
-        session = MinerSession(
-            reader,
-            writer,
-            pool_config["host"],
-            pool_config["port"],
-            pool_config["user"],
-            pool_config["pass"],
-            stats_manager,
-        )
-        
-        session.db = stats_db
-
-        active_sessions.add(session)
-        task = asyncio.create_task(session.run())
-
-        def _on_done(_: Any) -> None:
-            active_sessions.discard(session)
-            stats_manager.unregister_miner(miner_address)
-            logger.info(f"➖ Miner disconnected: {miner_address}")
-
-        task.add_done_callback(_on_done)
+async def handle_new_miner(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    """
+    Fired on each TCP connection from a miner.  We:
+      1) Instantiate a MinerSession with the current pool config from global config
+      2) Track it in active_sessions
+      3) Schedule its run() as a background task
+      4) On completion, clean up stats + the session set
+    """
+    miner_address = writer.get_extra_info("peername")
     
-    return handle_new_miner
+    local_addr = writer.get_extra_info("sockname")
+    local_port = local_addr[1] if local_addr else None
+    
+    pool_config = None
+    pool_label = None
+    for pool_name, pool_cfg in config["pools"].items():
+        if pool_cfg.get("proxy_port", INTERNAL_PROXY_PORT) == local_port:
+            pool_config = pool_cfg
+            pool_label = pool_name
+            break
+    
+    if not pool_config:
+        logger.error(f"❌ No pool config found for port {local_port}")
+        writer.close()
+        await writer.wait_closed()
+        return
+    
+    pool_name = f"{pool_config['host']}:{pool_config['port']}"
+    logger.info(f"➕ Miner connected: {miner_address} → {pool_name}")
+
+    session = MinerSession(
+        reader,
+        writer,
+        pool_config["host"],
+        pool_config["port"],
+        pool_config["user"],
+        pool_config["pass"],
+        stats_manager,
+        pool_label,
+    )
+    
+    session.db = stats_db
+
+    active_sessions.add(session)
+    task = asyncio.create_task(session.run())
+
+    def _on_done(_: Any) -> None:
+        active_sessions.discard(session)
+        stats_manager.unregister_miner(miner_address)
+        logger.info(f"➖ Miner disconnected: {miner_address}")
+
+    task.add_done_callback(_on_done)
 
 
 async def start_reload_api() -> web.TCPSite:
@@ -180,11 +195,10 @@ async def main() -> None:
     # Start a server for each pool configuration
     servers = []
     for pool_name, pool_config in config["pools"].items():
-        handler = create_miner_handler(pool_config)
         proxy_port = pool_config.get("proxy_port", INTERNAL_PROXY_PORT)
         
         server = await asyncio.start_server(
-            handler,
+            handle_new_miner,
             "0.0.0.0",
             proxy_port,
         )
