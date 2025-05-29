@@ -165,15 +165,14 @@ async function updateData() {
       return;
     }
     
-    // Fetch pool info
-    const poolResponse = await fetch('/api/pool');
-    const poolInfo = await poolResponse.json();
+    const poolsResponse = await fetch('/api/pools');
+    const poolsInfo = await poolsResponse.json();
     
     // Update last refresh time
     document.getElementById('lastRefreshed').textContent = new Date().toLocaleTimeString();
     
-    // Update pool information
-    updatePoolInfo(poolInfo);
+    // Update pools information
+    updatePoolsInfo(poolsInfo);
     
     // Calculate summary statistics
     updateSummaryStats(minerStats);
@@ -192,43 +191,56 @@ async function updateData() {
   }
 }
 
-// Update pool information
-function updatePoolInfo(poolInfo) {
-  document.getElementById('poolUrl').textContent = poolInfo.url || 'Not connected';
-  document.getElementById('poolUser').textContent = poolInfo.user || 'N/A';
+// Update pools information
+function updatePoolsInfo(poolsInfo) {
+  const container = document.getElementById('poolsContainer');
+  container.innerHTML = '';
   
-  // Format the connection time
-  if (poolInfo.connected_since) {
-    const connectedDate = new Date(poolInfo.connected_since * 1000);
-    const now = new Date();
-    const diffSeconds = Math.floor((now - connectedDate) / 1000);
+  // Create a card for each pool
+  for (const [poolName, poolData] of Object.entries(poolsInfo)) {
+    const card = document.createElement('div');
+    card.className = 'pool-card';
     
-    let timeString;
-    if (diffSeconds < 60) {
-      timeString = `${diffSeconds} seconds`;
-    } else if (diffSeconds < 3600) {
-      timeString = `${Math.floor(diffSeconds / 60)} minutes`;
-    } else if (diffSeconds < 86400) {
-      timeString = `${Math.floor(diffSeconds / 3600)} hours`;
-    } else {
-      timeString = `${Math.floor(diffSeconds / 86400)} days`;
-    }
+    const isActive = poolData.connected_miners > 0;
     
-    document.getElementById('poolConnectionTime').textContent = `${timeString} ago`;
+    card.innerHTML = `
+      <div class="pool-header">
+        <h3>${poolName.toUpperCase()}</h3>
+        <span class="pool-status ${isActive ? 'active' : 'inactive'}">
+          ${isActive ? 'Active' : 'Idle'}
+        </span>
+      </div>
+      <div class="pool-details">
+        <div class="pool-detail">
+          <span class="detail-label">Address:</span>
+          <span class="detail-value">${poolData.host}:${poolData.port}</span>
+        </div>
+        <div class="pool-detail">
+          <span class="detail-label">Proxy Port:</span>
+          <span class="detail-value">${poolData.proxy_port}</span>
+        </div>
+        <div class="pool-detail">
+          <span class="detail-label">User:</span>
+          <span class="detail-value">${poolData.user}</span>
+        </div>
+        <div class="pool-stats">
+          <div class="pool-stat">
+            <span class="stat-value">${poolData.connected_miners}</span>
+            <span class="stat-label">Miners</span>
+          </div>
+          <div class="pool-stat">
+            <span class="stat-value">${formatHashrate(poolData.total_hashrate)}</span>
+            <span class="stat-label">Hashrate</span>
+          </div>
+          <div class="pool-stat">
+            <span class="stat-value">${poolData.total_accepted}</span>
+            <span class="stat-label">Accepted</span>
+          </div>
+        </div>
+      </div>
+    `;
     
-    // Update connection status
-    const statusElement = document.querySelector('.pool-status');
-    statusElement.textContent = 'Connected';
-    statusElement.style.backgroundColor = 'rgba(26, 218, 187, 0.2)';
-    statusElement.style.color = 'var(--secondary)';
-  } else {
-    document.getElementById('poolConnectionTime').textContent = 'N/A';
-    
-    // Update connection status
-    const statusElement = document.querySelector('.pool-status');
-    statusElement.textContent = 'Disconnected';
-    statusElement.style.backgroundColor = 'rgba(255, 76, 91, 0.2)';
-    statusElement.style.color = 'var(--danger)';
+    container.appendChild(card);
   }
 }
 
@@ -323,8 +335,15 @@ function updateMinersTable(data) {
     
     // Worker/Miner name
     const nameCell = document.createElement('td');
-    nameCell.textContent = miner.worker || miner.miner;
+    const fullName = miner.worker || miner.miner;
+    nameCell.textContent = truncateMiner(fullName);
+    nameCell.title = fullName; // Show full name on hover
     row.appendChild(nameCell);
+    
+    // Pool
+    const poolCell = document.createElement('td');
+    poolCell.textContent = miner.pool || 'unknown';
+    row.appendChild(poolCell);
     
     // Hashrate
     const hashrateCell = document.createElement('td');
@@ -336,9 +355,25 @@ function updateMinersTable(data) {
     acceptedCell.textContent = miner.accepted;
     row.appendChild(acceptedCell);
     
-    // Rejected shares
+    // Rejected shares with breakdown on hover
     const rejectedCell = document.createElement('td');
+    rejectedCell.style.position = 'relative';
+    rejectedCell.style.cursor = 'help';
     rejectedCell.textContent = miner.rejected;
+    
+    // Add tooltip if there are rejections
+    if (miner.rejected > 0 && miner.rejected_breakdown) {
+      const tooltip = document.createElement('div');
+      tooltip.className = 'rejection-tooltip';
+      tooltip.innerHTML = `
+        <div>Stale: ${miner.rejected_breakdown.stale}</div>
+        <div>Duplicate: ${miner.rejected_breakdown.duplicate}</div>
+        <div>Low Diff: ${miner.rejected_breakdown.low_diff}</div>
+        <div>Other: ${miner.rejected_breakdown.other}</div>
+      `;
+      rejectedCell.appendChild(tooltip);
+    }
+    
     row.appendChild(rejectedCell);
     
     // Acceptance rate
@@ -354,15 +389,23 @@ function updateMinersTable(data) {
     rateCell.appendChild(badge);
     row.appendChild(rateCell);
     
-    // Pool difficulty
+    // Pool requested difficulty
+    const poolDiffCell = document.createElement('td');
+    poolDiffCell.textContent = formatDifficulty(miner.pool_difficulty || 0);
+    poolDiffCell.title = (miner.pool_difficulty || 0).toFixed(2); // Show exact value on hover
+    row.appendChild(poolDiffCell);
+    
+    // Miner difficulty (effective)
     const difficultyCell = document.createElement('td');
-    difficultyCell.textContent = miner.difficulty.toFixed(2);
+    difficultyCell.textContent = formatDifficulty(miner.difficulty);
+    difficultyCell.title = miner.difficulty.toFixed(2); // Show exact value on hover
     row.appendChild(difficultyCell);
     
     // Last share difficulty
     const lastShareCell = document.createElement('td');
     if (miner.last_share_difficulty > 0) {
-      lastShareCell.textContent = miner.last_share_difficulty.toFixed(2);
+      lastShareCell.textContent = formatDifficulty(miner.last_share_difficulty);
+      lastShareCell.title = miner.last_share_difficulty.toFixed(2); // Show exact value on hover
       
       // Highlight if last share was better than pool difficulty
       if (miner.last_share_difficulty > miner.difficulty * 1.1) {
@@ -377,7 +420,8 @@ function updateMinersTable(data) {
     // Highest difficulty
     const highestCell = document.createElement('td');
     if (miner.highest_difficulty > 0) {
-      highestCell.textContent = miner.highest_difficulty.toFixed(2);
+      highestCell.textContent = formatDifficulty(miner.highest_difficulty);
+      highestCell.title = miner.highest_difficulty.toFixed(2); // Show exact value on hover
       
       // Always highlight the highest difficulty
       highestCell.style.color = 'var(--accent)';
@@ -393,7 +437,11 @@ function updateMinersTable(data) {
 
 // Helper function to format hashrate
 function formatHashrate(hashrate) {
-  if (hashrate >= 1e12) {
+  if (hashrate >= 1e18) {
+    return (hashrate / 1e18).toFixed(2) + ' EH/s';
+  } else if (hashrate >= 1e15) {
+    return (hashrate / 1e15).toFixed(2) + ' PH/s';
+  } else if (hashrate >= 1e12) {
     return (hashrate / 1e12).toFixed(2) + ' TH/s';
   } else if (hashrate >= 1e9) {
     return (hashrate / 1e9).toFixed(2) + ' GH/s';
@@ -404,4 +452,34 @@ function formatHashrate(hashrate) {
   } else {
     return hashrate.toFixed(2) + ' H/s';
   }
+}
+
+// Helper function to format difficulty with K, M, B suffixes
+function formatDifficulty(diff) {
+  if (!diff || diff === 0) return '0';
+  
+  if (diff >= 1e12) {
+    return (diff / 1e12).toFixed(2) + 'T';
+  } else if (diff >= 1e9) {
+    return (diff / 1e9).toFixed(2) + 'B';
+  } else if (diff >= 1e6) {
+    return (diff / 1e6).toFixed(2) + 'M';
+  } else if (diff >= 1e3) {
+    return (diff / 1e3).toFixed(2) + 'K';
+  } else {
+    return diff.toFixed(2);
+  }
+}
+
+// Helper function to truncate long miner names
+function truncateMiner(minerName) {
+  if (!minerName) return '-';
+  
+  // If the name is short enough, return as-is
+  if (minerName.length <= 27) {
+    return minerName;
+  }
+  
+  // Take first 12 and last 12 characters with ... in between
+  return minerName.substring(0, 12) + '...' + minerName.substring(minerName.length - 12);
 } 

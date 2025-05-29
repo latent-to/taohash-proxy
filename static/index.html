@@ -22,24 +22,10 @@
       </div>
     </header>
 
-    <div class="pool-info-card">
-      <div class="pool-header">
-        <h2>Current Mining Pool</h2>
-        <span class="pool-status">Connected</span>
-      </div>
-      <div class="pool-details">
-        <div class="pool-detail">
-          <span class="detail-label">Pool:</span>
-          <span class="detail-value" id="poolUrl">-</span>
-        </div>
-        <div class="pool-detail">
-          <span class="detail-label">Username:</span>
-          <span class="detail-value" id="poolUser">-</span>
-        </div>
-        <div class="pool-detail">
-          <span class="detail-label">Connection:</span>
-          <span class="detail-value" id="poolConnectionTime">-</span>
-        </div>
+    <div class="pools-section">
+      <h2>Mining Pools</h2>
+      <div id="poolsContainer" class="pools-grid">
+        <!-- Pool cards will be dynamically inserted here -->
       </div>
     </div>
 
@@ -78,11 +64,13 @@
           <thead>
             <tr>
               <th>Miner</th>
+              <th>Pool</th>
               <th>Hashrate</th>
               <th>Accepted</th>
               <th>Rejected</th>
               <th>Accept Rate</th>
-              <th>Difficulty</th>
+              <th>Pool Req</th>
+              <th>Miner Diff</th>
               <th>Last Share</th>
               <th>Highest</th>
             </tr>
