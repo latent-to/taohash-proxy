@@ -218,6 +218,7 @@ function appendResults(shares) {
     row.innerHTML = `
       <td>${formatTimestamp(share.ts)}</td>
       <td>${share.worker}</td>
+      <td>${formatDifficulty(share.pool_requested_difficulty || share.pool_difficulty)}</td>
       <td>${formatDifficulty(share.pool_difficulty)}</td>
       <td>${formatDifficulty(share.actual_difficulty)}</td>
       <td class="luck-${luck >= 10 ? 'high' : luck >= 1 ? 'normal' : 'low'}">${luck.toFixed(2)}x</td>
@@ -332,7 +333,11 @@ function formatTimestamp(ts) {
 }
 
 function formatHashrate(hashrate) {
-  if (hashrate >= 1e12) {
+  if (hashrate >= 1e18) {
+    return (hashrate / 1e18).toFixed(2) + ' EH/s';
+  } else if (hashrate >= 1e15) {
+    return (hashrate / 1e15).toFixed(2) + ' PH/s';
+  } else if (hashrate >= 1e12) {
     return (hashrate / 1e12).toFixed(2) + ' TH/s';
   } else if (hashrate >= 1e9) {
     return (hashrate / 1e9).toFixed(2) + ' GH/s';

@@ -92,12 +92,28 @@ h1 {
   margin-left: 4px;
 }
 
-/* Pool information card */
-.pool-info-card {
-  background-color: var(--card-bg);
+/* Pools section */
+.pools-section {
+  margin-bottom: 2rem;
+}
+
+.pools-section h2 {
+  margin: 0 0 1rem 0;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--muted-text);
+}
+
+.pools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.pool-card {
+  background: var(--card-bg);
   border-radius: 8px;
-  padding: 20px;
-  margin-bottom: 30px;
+  padding: 1.5rem;
   box-shadow: 0 4px 16px rgba(0,0,0,0.15);
   border: 1px solid var(--border);
 }
@@ -106,45 +122,54 @@ h1 {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 15px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
 }
 
-.pool-header h2 {
-  font-size: 18px;
-  color: var(--muted-text);
+.pool-header h3 {
   margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--light-text);
 }
 
 .pool-status {
-  background-color: rgba(26, 218, 187, 0.2);
-  color: var(--secondary);
   padding: 4px 10px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
 }
 
+.pool-status.active {
+  background-color: rgba(26, 218, 187, 0.2);
+  color: var(--secondary);
+}
+
+.pool-status.inactive {
+  background-color: rgba(128, 128, 128, 0.2);
+  color: #888;
+}
+
 .pool-details {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-  gap: 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
 }
 
 .pool-detail {
   display: flex;
+  gap: 0.5rem;
   align-items: center;
+  font-size: 0.875rem;
 }
 
 .detail-label {
-  font-weight: 600;
-  margin-right: 8px;
   color: var(--muted-text);
   min-width: 80px;
 }
 
 .detail-value {
+  color: var(--light-text);
   font-family: monospace;
   background-color: var(--hover);
   padding: 4px 8px;
@@ -154,6 +179,33 @@ h1 {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--primary);
+}
+
+.pool-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.pool-stat {
+  text-align: center;
+}
+
+.pool-stat .stat-value {
+  display: block;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.pool-stat .stat-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted-text);
+  margin-top: 0.25rem;
 }
 
 .summary-stats {
@@ -279,4 +331,34 @@ footer {
   .charts-row {
     flex-direction: column;
   }
+}
+
+/* Rejection tooltip */
+.rejection-tooltip {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 10;
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 0.2s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  margin-bottom: 4px;
+}
+
+.rejection-tooltip div {
+  padding: 2px 0;
+  color: var(--muted-text);
+}
+
+td:hover .rejection-tooltip {
+  visibility: visible;
+  opacity: 1;
 } 
