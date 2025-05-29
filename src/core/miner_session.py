@@ -29,6 +29,16 @@ class MinerSession:
     difficulty, and enforces minimum difficulty requirements.
     """
 
+    def _get_worker_name(self) -> str:
+        """Extract worker name from username (part after last dot)."""
+        if not self.stats.worker_name:
+            return ""
+        
+        parts = self.stats.worker_name.split('.')
+        if len(parts) > 1:
+            return parts[-1]
+        return self.stats.worker_name
+
     def __init__(
         self,
         miner_reader: asyncio.StreamReader,
@@ -38,6 +48,7 @@ class MinerSession:
         pool_user: str,
         pool_pass: str,
         stats_manager: StatsManager,
+        pool_label: str = "unknown",
     ):
         """
         Initialize miner session.
@@ -58,10 +69,12 @@ class MinerSession:
         self.pool_user = pool_user
         self.pool_pass = pool_pass
         self.min_difficulty: Optional[int] = None
+        self.pool_difficulty: Optional[float] = None
 
         self.peer = miner_writer.get_extra_info("peername")
         self.miner_id = f"{self.peer[0]}:{self.peer[1]}" if self.peer else "unknown"
-        self.stats = stats_manager.register_miner(self.peer)
+        self.pool_label = pool_label
+        self.stats = stats_manager.register_miner(self.peer, pool_label)
         self.pool_session: Optional[PoolSession] = None
         self.pending_calls: dict[int, Any] = {}
 
@@ -201,8 +214,11 @@ class MinerSession:
 
             if method == "mining.set_difficulty":
                 try:
-                    self.pool_init_data["initial_difficulty"] = float(msg["params"][0])
-                    logger.debug(f"[{self.miner_id}] Got initial difficulty from pool")
+                    pool_diff = float(msg["params"][0])
+                    self.pool_init_data["initial_difficulty"] = pool_diff
+                    self.pool_difficulty = pool_diff
+                    self.stats.pool_difficulty = pool_diff
+                    logger.debug(f"[{self.miner_id}] Got initial difficulty from pool: {pool_diff}")
                 except (ValueError, TypeError, IndexError):
                     pass
 
@@ -462,7 +478,11 @@ class MinerSession:
         nonce = params[4] if len(params) > 4 else ""
         version = params[5] if len(params) > 5 else None
 
-        logger.info(f"[{self.miner_id}] Share submission for job {job_id}")
+        worker_name = self._get_worker_name()
+        if worker_name:
+            logger.info(f"[{self.miner_id}] {worker_name} - Share submission for job {job_id}")
+        else:
+            logger.info(f"[{self.miner_id}] Share submission for job {job_id}")
 
         # Get job data
         job_data = self.jobs.get_job(job_id)
@@ -503,8 +523,9 @@ class MinerSession:
                         "block_hash": block_hash,
                         "actual_difficulty": actual_difficulty,
                         "pool_difficulty": self.stats.difficulty,
+                        "pool_requested_difficulty": self.pool_difficulty,
                     }
-                    logger.info(
+                    logger.debug(
                         f"[{self.miner_id}] Calculated difficulty={actual_difficulty:.2f}"
                     )
             except Exception as e:
@@ -623,6 +644,9 @@ class MinerSession:
         except (ValueError, TypeError):
             return
 
+        self.pool_difficulty = pool_diff
+        self.stats.pool_difficulty = pool_diff
+
         # Apply min difficulty if set
         effective_diff = pool_diff
         if self.min_difficulty is not None:
@@ -679,7 +703,12 @@ class MinerSession:
         if isinstance(pending_data, dict) and pending_data.get("method") == "submit":
             result = message.get("result")
             error = message.get("error")
-            accepted = result is True and error is None
+            reject_reason = message.get("reject-reason")
+            
+            if error is None and reject_reason:
+                error = [23, reject_reason]  # 23 (low difficulty) as default code
+            
+            accepted = result is True and error is None and reject_reason is None
 
             # Insert receipt to ClickHouse
             if accepted and self.db:
@@ -697,6 +726,7 @@ class MinerSession:
                         extranonce2=pending_data.get("extranonce2", ""),
                         ntime=pending_data.get("ntime", ""),
                         nonce=pending_data.get("nonce", ""),
+                        pool_requested_difficulty=pending_data.get("pool_requested_difficulty"),
                     )
                 except Exception as e:
                     logger.error(f"Failed to insert share: {e}")
@@ -704,16 +734,32 @@ class MinerSession:
             self.stats.record_share(
                 accepted=accepted,
                 difficulty=pending_data["pool_difficulty"],
+                share_difficulty=pending_data["actual_difficulty"],
                 pool=f"{self.pool_host}:{self.pool_port}",
                 error=json.dumps(error) if error else None,
             )
 
             self.stats.last_share_difficulty = pending_data["actual_difficulty"]
 
-            logger.info(
-                f"[{self.miner_id}] Share {'accepted' if accepted else 'rejected'}: "
-                f"diff={pending_data['actual_difficulty']:.2f}"
-            )
+            worker_name = self._get_worker_name()
+            worker_prefix = f"{worker_name} - " if worker_name else ""
+            
+            if accepted:
+                logger.info(
+                    f"[{self.miner_id}] {worker_prefix}Share accepted: "
+                    f"diff={pending_data['actual_difficulty']:.2f}"
+                )
+            else:
+                reason = "unknown"
+                if error:
+                    if isinstance(error, list) and len(error) > 1:
+                        reason = error[1]
+                elif reject_reason:
+                    reason = reject_reason
+                logger.info(
+                    f"[{self.miner_id}] {worker_prefix}Share rejected ({reason}): "
+                    f"diff={pending_data['actual_difficulty']:.2f}"
+                )
 
         await self._send_to_miner(message)
 
@@ -800,14 +846,17 @@ class MinerSession:
 
     def _on_state_change(self, old_state: MinerState, new_state: MinerState):
         """Callback for state changes."""
+        worker_name = self._get_worker_name()
+        worker_prefix = f"{worker_name} - " if worker_name else ""
+        
         logger.info(
-            f"[{self.miner_id}] State change: {old_state.name} -> {new_state.name}"
+            f"[{self.miner_id}] {worker_prefix}State change: {old_state.name} -> {new_state.name}"
         )
 
         if new_state == MinerState.ACTIVE:
-            logger.info(f"[{self.miner_id}] Miner is now actively mining")
+            logger.info(f"[{self.miner_id}] {worker_prefix}Miner is now actively mining")
         elif new_state == MinerState.ERROR:
-            logger.warning(f"[{self.miner_id}] Miner entered error state")
+            logger.warning(f"[{self.miner_id}] {worker_prefix}Miner entered error state")
 
     async def _cleanup(self):
         """
