@@ -212,4 +212,4 @@ replicate.yaml
 *.ipynb
 
 # Config files
-*.config.toml
+config.toml
