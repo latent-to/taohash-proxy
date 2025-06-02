@@ -69,7 +69,8 @@ class StatsDB:
             ENGINE = MergeTree()
             PARTITION BY toYYYYMM(ts)
             ORDER BY (worker, ts)
-            SETTINGS index_granularity = 8192""",
+            TTL ts + INTERVAL 2 DAY TO VOLUME 'cold'
+            SETTINGS index_granularity = 8192, storage_policy = 'tiered'""",
             # Migration: Add pool_requested_difficulty column
             """ALTER TABLE shares ADD COLUMN IF NOT EXISTS pool_requested_difficulty Float32 DEFAULT 0""",
             # Worker stats materialized view
