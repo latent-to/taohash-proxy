@@ -52,10 +52,14 @@ services:
       - "9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse-storage.xml:/etc/clickhouse-server/config.d/storage.xml
     environment:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET_ENDPOINT=https://${AWS_S3_BUCKET}.s3.amazonaws.com/clickhouse/
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
       interval: 5s

@@ -1,0 +1,24 @@
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <default/>
+            <s3_disk>
+                <type>s3</type>
+                <endpoint from_env="AWS_S3_BUCKET_ENDPOINT"/>
+                <use_environment_credentials>true</use_environment_credentials>
+            </s3_disk>
+        </disks>
+        <policies>
+            <tiered>
+                <volumes>
+                    <hot>
+                        <disk>default</disk>
+                    </hot>
+                    <cold>
+                        <disk>s3_disk</disk>
+                    </cold>
+                </volumes>
+            </tiered>
+        </policies>
+    </storage_configuration>
+</clickhouse>
