@@ -210,3 +210,6 @@ replicate.yaml
 
 # Notebooks
 *.ipynb
+
+# Config files
+*.config.toml
