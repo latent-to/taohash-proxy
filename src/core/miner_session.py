@@ -322,6 +322,13 @@ class MinerSession:
             return
 
         log_stratum_message(logger, message, prefix=f"[{self.miner_id}] From miner")
+        
+        # Support for ASIC boost miners
+        if method in ["mining.configure", "mining.extranonce.subscribe"]:
+            handler = handlers.get(method)
+            if handler:
+                await handler(message, msg_id)
+            return
 
         # Transition enforcement
         if not await self.state_machine.can_handle_message(method):
@@ -433,12 +440,21 @@ class MinerSession:
         """
         Send initial difficulty and job after successful authorization.
 
-        Uses effective difficulty (min of pool/miner requirements) and
+        Uses effective difficulty (max of pool/miner requirements) and
         forwards any cached initial job from pool.
         """
-        effective_diff = self.pool_init_data["initial_difficulty"] or 1024
+        pool_diff = self.pool_init_data["initial_difficulty"] or 1024
+        effective_diff = pool_diff
         if self.min_difficulty is not None:
-            effective_diff = self.min_difficulty
+            effective_diff = max(pool_diff, self.min_difficulty)
+            if pool_diff > self.min_difficulty:
+                logger.info(
+                    f"[{self.miner_id}] Initial: Pool diff {pool_diff} > min diff {self.min_difficulty}, using pool diff"
+                )
+            else:
+                logger.info(
+                    f"[{self.miner_id}] Initial: Pool diff {pool_diff} < min diff {self.min_difficulty}, using min diff"
+                )
 
         self.stats.update_difficulty(effective_diff)
         await self._send_to_miner(
@@ -647,10 +663,17 @@ class MinerSession:
         self.pool_difficulty = pool_diff
         self.stats.pool_difficulty = pool_diff
 
-        # Apply min difficulty if set
         effective_diff = pool_diff
         if self.min_difficulty is not None:
-            effective_diff = self.min_difficulty
+            effective_diff = max(pool_diff, self.min_difficulty)
+            if pool_diff > self.min_difficulty:
+                logger.info(
+                    f"[{self.miner_id}] Pool diff {pool_diff} > min diff {self.min_difficulty}, using pool diff"
+                )
+            else:
+                logger.info(
+                    f"[{self.miner_id}] Pool diff {pool_diff} < min diff {self.min_difficulty}, using min diff"
+                )
 
         if effective_diff != self.stats.difficulty:
             logger.info(
