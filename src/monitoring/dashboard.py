@@ -12,6 +12,7 @@ Key features:
 """
 
 import os
+import toml
 from typing import Union
 from aiohttp import web
 
@@ -91,8 +92,6 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
             JSON with {url, user, connected_since}
         """
         try:
-            import toml
-
             config_dir = os.path.join(project_root, "config")
             config_path = os.path.join(config_dir, "config.toml")
 
