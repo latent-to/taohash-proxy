@@ -29,15 +29,6 @@ class MinerSession:
     difficulty, and enforces minimum difficulty requirements.
     """
 
-    def _get_worker_name(self) -> str:
-        """Extract worker name from username (part after last dot)."""
-        if not self.stats.worker_name:
-            return ""
-        
-        parts = self.stats.worker_name.split('.')
-        if len(parts) > 1:
-            return parts[-1]
-        return self.stats.worker_name
 
     def __init__(
         self,
@@ -493,12 +484,7 @@ class MinerSession:
         ntime = params[3] if len(params) > 3 else ""
         nonce = params[4] if len(params) > 4 else ""
         version = params[5] if len(params) > 5 else None
-
-        worker_name = self._get_worker_name()
-        if worker_name:
-            logger.info(f"[{self.miner_id}] {worker_name} - Share submission for job {job_id}")
-        else:
-            logger.info(f"[{self.miner_id}] Share submission for job {job_id}")
+        logger.info(f"[{self.miner_id}] {worker_name} - Share submission for job {job_id}")
 
         # Get job data
         job_data = self.jobs.get_job(job_id)
@@ -729,7 +715,7 @@ class MinerSession:
             reject_reason = message.get("reject-reason")
             
             if error is None and reject_reason:
-                error = [23, reject_reason]  # 23 (low difficulty) as default code
+                error = [23, reject_reason]  # 23 (low difficulty)
             
             accepted = result is True and error is None and reject_reason is None
 
@@ -740,16 +726,11 @@ class MinerSession:
                         miner=self.miner_id,
                         worker=pending_data["worker"],
                         pool=f"{self.pool_host}:{self.pool_port}",
-                        job_id=pending_data["job_id"],
                         pool_difficulty=pending_data["pool_difficulty"],
                         actual_difficulty=pending_data["actual_difficulty"],
                         block_hash=pending_data.get("block_hash", ""),
-                        accepted=accepted,
-                        reject_reason=json.dumps(error) if error else "",
-                        extranonce2=pending_data.get("extranonce2", ""),
-                        ntime=pending_data.get("ntime", ""),
-                        nonce=pending_data.get("nonce", ""),
                         pool_requested_difficulty=pending_data.get("pool_requested_difficulty"),
+                        pool_label=self.pool_label,
                     )
                 except Exception as e:
                     logger.error(f"Failed to insert share: {e}")
@@ -763,13 +744,11 @@ class MinerSession:
             )
 
             self.stats.last_share_difficulty = pending_data["actual_difficulty"]
-
-            worker_name = self._get_worker_name()
-            worker_prefix = f"{worker_name} - " if worker_name else ""
+            worker_name = pending_data.get("worker", "unknown")
             
             if accepted:
                 logger.info(
-                    f"[{self.miner_id}] {worker_prefix}Share accepted: "
+                    f"[{self.miner_id}] {worker_name} - Share accepted: "
                     f"diff={pending_data['actual_difficulty']:.2f}"
                 )
             else:
@@ -780,7 +759,7 @@ class MinerSession:
                 elif reject_reason:
                     reason = reject_reason
                 logger.info(
-                    f"[{self.miner_id}] {worker_prefix}Share rejected ({reason}): "
+                    f"[{self.miner_id}] {worker_name} - Share rejected ({reason}): "
                     f"diff={pending_data['actual_difficulty']:.2f}"
                 )
 
@@ -869,7 +848,7 @@ class MinerSession:
 
     def _on_state_change(self, old_state: MinerState, new_state: MinerState):
         """Callback for state changes."""
-        worker_name = self._get_worker_name()
+        worker_name = self.stats.worker_name or "auto"
         worker_prefix = f"{worker_name} - " if worker_name else ""
         
         logger.info(
