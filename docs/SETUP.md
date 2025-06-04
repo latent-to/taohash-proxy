@@ -211,13 +211,24 @@ The following ports need to be accessible:
 
 **Security Note:** Mining ports (3331/3332) must be open to all IPs for miners to connect. Dashboard and API ports should be restricted to trusted IPs only. 
 
-#### Local Server (Ubuntu/Debian with ufw)
+2. **Local Server (Ubuntu/Debian with ufw)**
 ```bash
 sudo ufw allow 3331/tcp comment "TaoHash normal diff"
 sudo ufw allow 3332/tcp comment "TaoHash high diff"
 sudo ufw allow 5000/tcp comment "TaoHash dashboard"
 sudo ufw allow 8888/tcp comment "TaoHash API"
 ```
+
+### IMPORTANT: Static IP (Required)
+
+- If you are a validator and using EC2 to host your proxy, you need to make sure that you allocate an elastic IP and associate it with your instance. 
+- This is mandatory as the miners require a static address to connect to your pools. 
+- Not doing so will disrupt operations and you will stop recieving hashrate.
+
+#### Elastic IP allocation
+- Navigate to `Elastic IPs` through the sidebar in your instance
+- Select `Allocate Elastic IP address` and complete the setup. 
+- Select the created IP and allocate it to your instance. This address will be used when adding commitments. 
 
 ## Configuration
 
