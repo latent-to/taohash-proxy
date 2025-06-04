@@ -1,16 +1,16 @@
 :root {
-  --primary: #00B9B9;
-  --secondary: #1ADABB;
-  --dark: #121212;
-  --dark-accent: #1E1E1E;
+  --primary: #4ECDC4;
+  --secondary: #52D9D0;
+  --dark: #0A1628;
+  --dark-accent: #162236;
   --light-text: #FFFFFF;
-  --muted-text: #EEEEEE;
-  --card-bg: #1E1E1E;
-  --hover: #252525;
-  --border: #333333;
-  --danger: #FF4C5B;
-  --warning: #FFC107;
-  --accent: #00B9B9;
+  --muted-text: #B8C5D6;
+  --card-bg: #162236;
+  --hover: #1A2940;
+  --border: rgba(78, 205, 196, 0.15);
+  --danger: #FF6B6B;
+  --warning: #FFE66D;
+  --accent: #4ECDC4;
 }
 
 * {
@@ -24,8 +24,6 @@ body {
   background-color: var(--dark);
   color: var(--light-text);
   line-height: 1.6;
-  background-image: radial-gradient(circle at 50% 0%, rgba(0, 185, 185, 0.1) 0%, transparent 75%);
-  background-attachment: fixed;
   min-height: 100vh;
 }
 
@@ -330,6 +328,9 @@ footer {
   }
   .charts-row {
     flex-direction: column;
+  }
+  .dashboard-bottom-section {
+    flex-direction: column !important;
   }
 }
 
