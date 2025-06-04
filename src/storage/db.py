@@ -40,7 +40,6 @@ class StatsDB:
             version = result.result_rows[0][0]
             logger.info(f"Connected to ClickHouse server version: {version}")
 
-            # Create tables
             await self._create_tables()
 
             return True
@@ -53,7 +52,6 @@ class StatsDB:
     def _get_schema_statements(self):
         """Return schema statements as a list of SQL strings."""
         return [
-            # Main shares table - simplified syntax that works
             """CREATE TABLE IF NOT EXISTS shares (
                 ts DateTime DEFAULT now(),
                 miner String,
@@ -63,6 +61,7 @@ class StatsDB:
                 actual_difficulty Float32,
                 block_hash String,
                 pool_requested_difficulty Float32 DEFAULT 0,
+                pool_label String DEFAULT 'unknown',
                 INDEX idx_worker (worker) TYPE bloom_filter GRANULARITY 1,
                 INDEX idx_ts (ts) TYPE minmax GRANULARITY 1
             )
@@ -71,44 +70,45 @@ class StatsDB:
             ORDER BY (worker, ts)
             TTL ts + INTERVAL 2 DAY TO VOLUME 'cold'
             SETTINGS index_granularity = 8192, storage_policy = 'tiered'""",
-            # Migration: Add pool_requested_difficulty column
-            """ALTER TABLE shares ADD COLUMN IF NOT EXISTS pool_requested_difficulty Float32 DEFAULT 0""",
             # Worker stats materialized view
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_stats_mv
             ENGINE = AggregatingMergeTree()
             PARTITION BY toYYYYMM(ts)
-            ORDER BY (worker, ts)
+            ORDER BY (worker, pool_label, ts)
             AS
             SELECT
                 toStartOfMinute(ts) as ts,
                 worker,
-                miner,
+                pool_label,
+                anyLastState(miner) as latest_miner,
                 countState() as share_count,
                 sumState(pool_difficulty) as total_pool_difficulty,
                 sumState(actual_difficulty) as total_actual_difficulty,
                 maxState(actual_difficulty) as max_difficulty
             FROM shares
-            GROUP BY ts, worker, miner""",
+            GROUP BY ts, worker, pool_label""",
             # Pool stats materialized view
             """CREATE MATERIALIZED VIEW IF NOT EXISTS pool_stats_mv
             ENGINE = AggregatingMergeTree()
             PARTITION BY toYYYYMM(ts)
-            ORDER BY ts
+            ORDER BY (pool_label, ts)
             AS
             SELECT
                 toStartOfMinute(ts) as ts,
+                pool_label,
                 uniqState(worker) as unique_workers,
                 countState() as total_shares,
                 sumState(pool_difficulty) as sum_pool_difficulty,
                 sumState(actual_difficulty) as sum_actual_difficulty,
                 maxState(actual_difficulty) as max_actual_difficulty
             FROM shares
-            GROUP BY ts""",
+            GROUP BY ts, pool_label""",
             # Worker stats views
             """CREATE VIEW IF NOT EXISTS worker_stats_5m AS
             SELECT
                 worker,
-                miner,
+                pool_label,
+                anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
                 sumMerge(total_actual_difficulty) as actual_difficulty_sum,
@@ -116,11 +116,12 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 300 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 5 MINUTE
-            GROUP BY worker, miner""",
+            GROUP BY worker, pool_label""",
             """CREATE VIEW IF NOT EXISTS worker_stats_60m AS
             SELECT
                 worker,
-                miner,
+                pool_label,
+                anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
                 sumMerge(total_actual_difficulty) as actual_difficulty_sum,
@@ -128,11 +129,12 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 3600 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 60 MINUTE
-            GROUP BY worker, miner""",
+            GROUP BY worker, pool_label""",
             """CREATE VIEW IF NOT EXISTS worker_stats_24h AS
             SELECT
                 worker,
-                miner,
+                pool_label,
+                anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
                 sumMerge(total_actual_difficulty) as actual_difficulty_sum,
@@ -140,10 +142,11 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 86400 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 24 HOUR
-            GROUP BY worker, miner""",
+            GROUP BY worker, pool_label""",
             # Pool stats views
             """CREATE VIEW IF NOT EXISTS pool_stats_5m AS
             SELECT
+                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -151,9 +154,11 @@ class StatsDB:
                 maxMerge(max_actual_difficulty) as max_difficulty,
                 sumMerge(sum_pool_difficulty) * 4294967296 / 300 as hashrate
             FROM pool_stats_mv
-            WHERE ts > now() - INTERVAL 5 MINUTE""",
+            WHERE ts > now() - INTERVAL 5 MINUTE
+            GROUP BY pool_label""",
             """CREATE VIEW IF NOT EXISTS pool_stats_60m AS
             SELECT
+                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -161,9 +166,11 @@ class StatsDB:
                 maxMerge(max_actual_difficulty) as max_difficulty,
                 sumMerge(sum_pool_difficulty) * 4294967296 / 3600 as hashrate
             FROM pool_stats_mv
-            WHERE ts > now() - INTERVAL 60 MINUTE""",
+            WHERE ts > now() - INTERVAL 60 MINUTE
+            GROUP BY pool_label""",
             """CREATE VIEW IF NOT EXISTS pool_stats_24h AS
             SELECT
+                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -171,19 +178,21 @@ class StatsDB:
                 maxMerge(max_actual_difficulty) as max_difficulty,
                 sumMerge(sum_pool_difficulty) * 4294967296 / 86400 as hashrate
             FROM pool_stats_mv
-            WHERE ts > now() - INTERVAL 24 HOUR""",
+            WHERE ts > now() - INTERVAL 24 HOUR
+            GROUP BY pool_label""",
             # Worker state view
             """CREATE VIEW IF NOT EXISTS worker_state AS
             SELECT
                 worker,
-                miner,
+                argMax(miner, ts) as latest_miner,
+                argMax(pool_label, ts) as pool_label,
                 max(ts) as last_share_ts,
                 CASE 
-                    WHEN max(ts) > now() - INTERVAL 2 HOUR THEN 'ok'
+                    WHEN max(ts) > now() - INTERVAL 10 MINUTE THEN 'ok'
                     ELSE 'offline'
                 END as state
             FROM shares
-            GROUP BY worker, miner""",
+            GROUP BY worker""",
         ]
 
     async def _create_tables(self):
@@ -227,6 +236,7 @@ class StatsDB:
         try:
             block_hash_reversed = block_hash[::-1] if block_hash else ""
             pool_requested_diff = kwargs.get("pool_requested_difficulty", 0)
+            pool_label = kwargs.get("pool_label", "unknown")
 
             data = [
                 [
@@ -237,6 +247,7 @@ class StatsDB:
                     actual_difficulty,
                     block_hash_reversed,
                     pool_requested_diff,
+                    pool_label,
                 ]
             ]
 
@@ -251,6 +262,7 @@ class StatsDB:
                     "actual_difficulty",
                     "block_hash",
                     "pool_requested_difficulty",
+                    "pool_label",
                 ],
             )
 
