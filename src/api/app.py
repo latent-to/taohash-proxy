@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 from datetime import datetime, timedelta
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,28 +19,17 @@ from slowapi.errors import RateLimitExceeded
 
 from ..storage.db import StatsDB
 from ..utils.logger import get_logger
+from .models import (
+    HealthResponse,
+    PoolStatsResponse,
+    WorkersStatsResponse,
+    WorkersTimerangeResponse,
+)
 
 logger = get_logger(__name__)
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
-
-
-app = FastAPI(
-    title="TaoHash Mining API",
-    description="API for querying mining pool and worker statistics",
-    version="1.0.0",
-)
-
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
 
 security = HTTPBearer()
 
@@ -52,6 +42,48 @@ API_TOKENS = set(
 db: Optional[StatsDB] = None
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle."""
+    global db
+    db = StatsDB()
+    if await db.init():
+        logger.info("API connected to ClickHouse successfully")
+    else:
+        logger.warning("API running without database connection")
+
+    yield
+
+    if db:
+        await db.close()
+        logger.info("Database connection closed")
+
+
+app = FastAPI(
+    title="TaoHash Mining API",
+    description="API for querying mining pool and worker statistics. Requires authentication via Bearer token.",
+    version="1.0.0",
+    openapi_tags=[
+        {"name": "Health", "description": "Service health checks"},
+        {
+            "name": "Historical Data",
+            "description": "Endpoints that require ClickHouse database",
+        },
+    ],
+    lifespan=lifespan,
+)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
+
 async def verify_token(
     credentials: HTTPAuthorizationCredentials = Security(security),
 ) -> str:
@@ -62,18 +94,7 @@ async def verify_token(
     return token
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database connection on startup."""
-    global db
-    db = StatsDB()
-    if await db.init():
-        logger.info("API connected to ClickHouse successfully")
-    else:
-        logger.warning("API running without database connection")
-
-
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Health check endpoint (no auth required)."""
     return {
@@ -83,17 +104,20 @@ async def health_check():
     }
 
 
-@app.get("/api/pool/stats")
+@app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
 @limiter.limit("60/minute")
 async def get_pool_stats(
     request: Request, token: str = Depends(verify_token), pool: Optional[str] = None
 ) -> dict[str, Any]:
     """
+    Get aggregated pool statistics.
 
     Args:
         pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
 
     Returns statistics for 5-minute, 60-minute, and 24-hour windows.
+
+    **Requires ClickHouse database to be running.**
     """
     if not db or not db.client:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -162,24 +186,26 @@ async def get_pool_stats(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/workers/stats")
+@app.get(
+    "/api/workers/stats", response_model=WorkersStatsResponse, tags=["Historical Data"]
+)
 @limiter.limit("60/minute")
 async def get_workers_stats(
     request: Request,
     token: str = Depends(verify_token),
-    miner: Optional[str] = None,
     worker: Optional[str] = None,
     pool: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Get per-worker statistics.
 
-    Can filter by specific miner/worker and pool if provided.
+    Can filter by specific worker and pool if provided.
 
     Args:
-        miner: Optional miner filter
         worker: Optional worker filter
         pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
+
+    **Requires ClickHouse database to be running.**
     """
     if not db or not db.client:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -187,7 +213,7 @@ async def get_workers_stats(
     try:
         # Default to "all"
         pool_filter = pool if pool in ["normal", "high_diff"] else None
-        workers = await _get_worker_stats(miner, worker, pool_filter)
+        workers = await _get_worker_stats(worker, pool_filter)
 
         workers_dict = {}
         for w in workers:
@@ -212,6 +238,109 @@ async def get_workers_stats(
 
     except Exception as e:
         logger.error(f"Error fetching worker stats: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get(
+    "/api/workers/timerange",
+    response_model=WorkersTimerangeResponse,
+    tags=["Historical Data"],
+)
+@limiter.limit("60/minute")
+async def get_workers_timerange(
+    request: Request,
+    start_time: int,
+    end_time: int,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get worker statistics for a custom time range.
+
+    Args:
+        start_time: Start time as Unix timestamp
+        end_time: End time as Unix timestamp
+
+    Returns worker statistics calculated for the specified time period.
+
+    **Requires ClickHouse database to be running.**
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    # Validate time range
+    if start_time >= end_time:
+        raise HTTPException(
+            status_code=400, detail="start_time must be before end_time"
+        )
+
+    time_diff = end_time - start_time
+    if time_diff > 30 * 24 * 3600:  # 30 days max
+        raise HTTPException(status_code=400, detail="Time range cannot exceed 30 days")
+
+    try:
+        # Convert timestamps to datetime
+        start_dt = datetime.fromtimestamp(start_time)
+        end_dt = datetime.fromtimestamp(end_time)
+
+        # Query for shares within time range and calculate metrics
+        query = """
+        WITH 
+        -- Get current state and last share time for all workers
+        current_state AS (
+            SELECT 
+                worker,
+                max(ts) as last_share_ts,
+                CASE 
+                    WHEN max(ts) > now() - INTERVAL 10 MINUTE THEN 'ok'
+                    ELSE 'offline'
+                END as state
+            FROM shares
+            GROUP BY worker
+        ),
+        -- Get metrics for the time range
+        timerange_stats AS (
+            SELECT 
+                worker,
+                count() as shares,
+                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) * 4294967296 / %(duration)s as hashrate
+            FROM shares
+            WHERE ts >= %(start_time)s AND ts < %(end_time)s
+            GROUP BY worker
+        )
+        SELECT 
+            COALESCE(t.worker, c.worker) as worker,
+            c.state,
+            toUnixTimestamp(c.last_share_ts) as last_share,
+            COALESCE(t.shares, 0) as shares,
+            COALESCE(t.share_value, 0) as share_value,
+            COALESCE(t.hashrate, 0) as hashrate
+        FROM current_state c
+        FULL OUTER JOIN timerange_stats t ON c.worker = t.worker
+        WHERE t.worker IS NOT NULL  -- Only include workers with shares in range
+        ORDER BY worker
+        """
+
+        params = {"start_time": start_dt, "end_time": end_dt, "duration": time_diff}
+
+        result = await db.client.query(query, parameters=params)
+
+        workers_dict = {}
+        for row in result.result_rows:
+            worker_name = row[0]
+            workers_dict[worker_name] = {
+                "state": row[1],
+                "last_share": int(row[2]) if row[2] else None,
+                "shares": int(row[3]),
+                "share_value": float(row[4]),
+                "hashrate": float(row[5]) / 1e9,  # Convert to GH/s
+                "hash_rate_unit": "Gh/s",
+            }
+
+        return {"btc": {"workers": workers_dict}}
+
+    except Exception as e:
+        logger.error(f"Error fetching workers timerange data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -272,18 +401,25 @@ async def _get_pool_stats_for_window(
                 {where_clause}
                 """
             else:
-                # Aggregate all pools and get pool list
+                if window == "60m":
+                    interval = "60 MINUTE"
+                    time_seconds = 3600
+                else:  # 24h
+                    interval = "24 HOUR"
+                    time_seconds = 86400
+
                 query = f"""
                 SELECT 
-                    sum(active_workers) as active_workers,
-                    sum(shares) as shares,
-                    sum(shares) as accepted,
+                    uniqMerge(unique_workers) as active_workers,
+                    countMerge(total_shares) as shares,
+                    countMerge(total_shares) as accepted,
                     0 as rejected,
-                    sum(pool_difficulty_sum) as total_difficulty,
-                    sum(actual_difficulty_sum) as share_value,
-                    sum(hashrate) as hashrate,
-                    groupArray(pool_label) as pools_included
-                FROM {view_name}
+                    sumMerge(sum_pool_difficulty) as total_difficulty,
+                    sumMerge(sum_actual_difficulty) as share_value,
+                    sumMerge(sum_pool_difficulty) * 4294967296 / {time_seconds} as hashrate,
+                    groupArray(DISTINCT pool_label) as pools_included
+                FROM pool_stats_mv
+                WHERE ts > now() - INTERVAL {interval}
                 """
 
         result = await db.client.query(query, parameters=params)
@@ -420,7 +556,6 @@ async def _get_worker_counts(pool_filter: Optional[str] = None) -> dict[str, int
 
 
 async def _get_worker_stats(
-    miner: Optional[str] = None,
     worker: Optional[str] = None,
     pool_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
