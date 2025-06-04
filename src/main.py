@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 
 config: dict = {}
 active_sessions: set[MinerSession] = set()
+active_sessions_lock = asyncio.Lock()
 stats_manager = StatsManager()
 stats_db: Optional[StatsDB] = None
 
@@ -37,7 +38,7 @@ def load_config(path: str = CONFIG_PATH) -> dict:
     return {"pools": data["pools"]}
 
 
-def update_config(path: str = CONFIG_PATH) -> bool:
+async def update_config(path: str = CONFIG_PATH) -> bool:
     """
     Reload TOML → swap in new `config` → schedule teardown of sessions in the background.
     """
@@ -47,8 +48,9 @@ def update_config(path: str = CONFIG_PATH) -> bool:
     config.update(new_conf)
     logger.info(f"🔄 Configuration reloaded: {config}")
 
-    sessions = list(active_sessions)
-    active_sessions.clear()
+    async with active_sessions_lock:
+        sessions = list(active_sessions)
+        active_sessions.clear()
 
     async def close_sessions_background() -> None:
         for sess in sessions:
@@ -70,7 +72,7 @@ def update_config(path: str = CONFIG_PATH) -> bool:
 async def handle_reload_request(request: web.Request) -> web.Response:
     logger.info(f"🔁 Received reload from {request.remote}")
     try:
-        success = update_config()
+        success = await update_config()
         if success:
             return web.Response(text="Reload scheduled")
         else:
@@ -125,15 +127,21 @@ async def handle_new_miner(
     
     session.db = stats_db
 
-    active_sessions.add(session)
+    async with active_sessions_lock:
+        active_sessions.add(session)
+    
     task = asyncio.create_task(session.run())
 
-    def _on_done(_: Any) -> None:
-        active_sessions.discard(session)
+    async def cleanup_session() -> None:
+        async with active_sessions_lock:
+            active_sessions.discard(session)
         stats_manager.unregister_miner(miner_address)
         logger.info(f"➖ Miner disconnected: {miner_address}")
 
-    task.add_done_callback(_on_done)
+    def on_task_done(future: Any) -> None:
+        asyncio.create_task(cleanup_session())
+
+    task.add_done_callback(on_task_done)
 
 
 async def start_reload_api() -> web.TCPSite:
@@ -170,7 +178,7 @@ async def main() -> None:
                 logger.error(f"❌ Config file not found at {config_path}")
                 sys.exit(1)
 
-    update_config(config_path)
+    await update_config(config_path)
 
     global stats_db
     stats_db = StatsDB()
@@ -225,9 +233,10 @@ async def main() -> None:
 
 async def shutdown():
     """Properly close database connection and other resources."""
-    if hasattr(stats_manager, "db") and stats_manager.db:
-        await stats_manager.db.close()
-    logger.info("Database connection closed")
+    global stats_db
+    if stats_db:
+        await stats_db.close()
+        logger.info("Database connection closed")
 
 if __name__ == "__main__":
     try:
