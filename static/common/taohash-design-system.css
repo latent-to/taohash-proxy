@@ -1,0 +1,334 @@
+:root {
+  /* Primary Colors */
+  --taohash-bg-primary: #0A1628;
+  --taohash-bg-secondary: #0D1B2C;
+  --taohash-bg-card: #162236;
+  --taohash-bg-card-hover: #1A2940;
+  
+  /* Accent Colors */
+  --taohash-accent-primary: #4ECDC4;
+  --taohash-accent-secondary: #52D9D0;
+  --taohash-accent-light: #6AE4DB;
+  
+  /* Text Colors */
+  --taohash-text-primary: #FFFFFF;
+  --taohash-text-secondary: #B8C5D6;
+  --taohash-text-muted: #7A8CA0;
+  
+  /* Utility Colors */
+  --taohash-border: rgba(78, 205, 196, 0.15);
+  --taohash-border-hover: rgba(78, 205, 196, 0.3);
+  --taohash-success: #4ECDC4;
+  --taohash-danger: #FF6B6B;
+  --taohash-warning: #FFE66D;
+  
+  /* Shadows */
+  --taohash-shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.1);
+  --taohash-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.15);
+  --taohash-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.2);
+  
+  /* Spacing */
+  --taohash-spacing-xs: 0.5rem;
+  --taohash-spacing-sm: 1rem;
+  --taohash-spacing-md: 1.5rem;
+  --taohash-spacing-lg: 2rem;
+  --taohash-spacing-xl: 3rem;
+  
+  /* Border Radius */
+  --taohash-radius-sm: 4px;
+  --taohash-radius-md: 8px;
+  --taohash-radius-lg: 12px;
+  
+  /* Transitions */
+  --taohash-transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Typography */
+.taohash-heading-1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--taohash-text-primary);
+}
+
+.taohash-heading-2 {
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--taohash-text-primary);
+}
+
+.taohash-heading-3 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--taohash-text-primary);
+}
+
+.taohash-body {
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--taohash-text-secondary);
+}
+
+.taohash-caption {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--taohash-text-muted);
+}
+
+/* Cards */
+.taohash-card {
+  background: var(--taohash-bg-card);
+  border: 1px solid var(--taohash-border);
+  border-radius: var(--taohash-radius-md);
+  padding: var(--taohash-spacing-md);
+  transition: var(--taohash-transition);
+}
+
+.taohash-card:hover {
+  background: var(--taohash-bg-card-hover);
+  border-color: var(--taohash-border-hover);
+  box-shadow: var(--taohash-shadow-md);
+}
+
+/* Metric Cards */
+.taohash-metric-card {
+  background: var(--taohash-bg-card);
+  border: 1px solid var(--taohash-border);
+  border-radius: var(--taohash-radius-md);
+  padding: var(--taohash-spacing-lg);
+  text-align: center;
+  transition: var(--taohash-transition);
+}
+
+.taohash-metric-value {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--taohash-accent-primary);
+  line-height: 1;
+  margin-bottom: var(--taohash-spacing-xs);
+}
+
+.taohash-metric-label {
+  font-size: 0.875rem;
+  color: var(--taohash-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Buttons */
+.taohash-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 500;
+  border-radius: var(--taohash-radius-md);
+  border: none;
+  cursor: pointer;
+  transition: var(--taohash-transition);
+  text-decoration: none;
+}
+
+.taohash-button-primary {
+  background: var(--taohash-accent-primary);
+  color: var(--taohash-bg-primary);
+}
+
+.taohash-button-primary:hover {
+  background: var(--taohash-accent-secondary);
+  transform: translateY(-2px);
+  box-shadow: var(--taohash-shadow-md);
+}
+
+.taohash-button-secondary {
+  background: transparent;
+  color: var(--taohash-accent-primary);
+  border: 1px solid var(--taohash-accent-primary);
+}
+
+.taohash-button-secondary:hover {
+  background: rgba(78, 205, 196, 0.1);
+  border-color: var(--taohash-accent-secondary);
+}
+
+/* Navigation */
+.taohash-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--taohash-spacing-md) 0;
+  border-bottom: 1px solid var(--taohash-border);
+}
+
+.taohash-nav-links {
+  display: flex;
+  gap: var(--taohash-spacing-lg);
+  align-items: center;
+}
+
+.taohash-nav-link {
+  color: var(--taohash-text-secondary);
+  text-decoration: none;
+  font-weight: 500;
+  transition: var(--taohash-transition);
+}
+
+.taohash-nav-link:hover {
+  color: var(--taohash-accent-primary);
+}
+
+.taohash-nav-link.active {
+  color: var(--taohash-accent-primary);
+}
+
+/* Logo */
+.taohash-logo {
+  display: flex;
+  align-items: center;
+  gap: var(--taohash-spacing-sm);
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--taohash-text-primary);
+}
+
+.taohash-logo-symbol {
+  color: var(--taohash-accent-primary);
+  font-size: 2rem;
+  line-height: 1;
+}
+
+/* Tables */
+.taohash-table {
+  width: 100%;
+  background: var(--taohash-bg-card);
+  border-radius: var(--taohash-radius-md);
+  overflow: hidden;
+  border: 1px solid var(--taohash-border);
+}
+
+.taohash-table thead {
+  background: var(--taohash-bg-secondary);
+}
+
+.taohash-table th {
+  padding: var(--taohash-spacing-sm);
+  text-align: left;
+  font-weight: 600;
+  color: var(--taohash-text-muted);
+  text-transform: uppercase;
+  font-size: 0.875rem;
+  letter-spacing: 0.05em;
+}
+
+.taohash-table td {
+  padding: var(--taohash-spacing-sm);
+  color: var(--taohash-text-secondary);
+  border-top: 1px solid var(--taohash-border);
+}
+
+.taohash-table tbody tr:hover {
+  background: var(--taohash-bg-card-hover);
+}
+
+/* Status Badges */
+.taohash-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: var(--taohash-radius-sm);
+}
+
+.taohash-badge-success {
+  background: rgba(78, 205, 196, 0.2);
+  color: var(--taohash-success);
+}
+
+.taohash-badge-danger {
+  background: rgba(255, 107, 107, 0.2);
+  color: var(--taohash-danger);
+}
+
+.taohash-badge-warning {
+  background: rgba(255, 230, 109, 0.2);
+  color: var(--taohash-warning);
+}
+
+/* Grid Layouts */
+.taohash-grid {
+  display: grid;
+  gap: var(--taohash-spacing-md);
+}
+
+.taohash-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+
+.taohash-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+
+.taohash-grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+
+/* Container */
+.taohash-container {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 0 var(--taohash-spacing-md);
+}
+
+/* Background Pattern */
+.taohash-bg-pattern {
+  background-color: var(--taohash-bg-primary);
+  background-image: 
+    radial-gradient(circle at 20% 80%, rgba(78, 205, 196, 0.05) 0%, transparent 50%),
+    radial-gradient(circle at 80% 20%, rgba(78, 205, 196, 0.05) 0%, transparent 50%),
+    radial-gradient(circle at 40% 40%, rgba(78, 205, 196, 0.02) 0%, transparent 50%);
+  background-attachment: fixed;
+}
+
+/* Animations */
+@keyframes taohash-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.taohash-animate {
+  animation: taohash-fade-in 0.6s ease-out;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .taohash-heading-1 {
+    font-size: 2rem;
+  }
+  
+  .taohash-heading-2 {
+    font-size: 1.5rem;
+  }
+  
+  .taohash-metric-value {
+    font-size: 2rem;
+  }
+  
+  .taohash-grid-2,
+  .taohash-grid-3,
+  .taohash-grid-4 {
+    grid-template-columns: 1fr;
+  }
+}
