@@ -123,7 +123,6 @@ The proxy can enforce minimum difficulty for pools that don't support custom dif
 
 - [Setup Guide](docs/SETUP.md) - Detailed installation instructions
 - [API Reference](docs/API.md) - REST API endpoints
-- [Monitoring Guide](docs/MONITORING.md) - Dashboard and metrics
 
 # Requirements
 
