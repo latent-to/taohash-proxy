@@ -4,44 +4,56 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TaoHash Analytics</title>
+  <link rel="stylesheet" href="/static/common/taohash-design-system.css">
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/analytics.css">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 </head>
-<body>
-  <div class="container">
-    <header>
-      <div class="logo-title">
-        <h1><span class="tao-letter">t</span>ao hash <span class="subtitle">analytics</span></h1>
+<body class="taohash-bg-pattern">
+  <div class="taohash-container">
+    <nav class="taohash-nav">
+      <div class="taohash-logo">
+        <span class="taohash-logo-symbol">⤙</span>
+        taohash
       </div>
-      <div class="nav-links">
-        <a href="/" class="nav-link">← Back to Dashboard</a>
+      <div class="taohash-nav-links">
+        <a href="/" class="taohash-nav-link">Dashboard</a>
+        <a href="/analytics" class="taohash-nav-link active">Analytics</a>
       </div>
-    </header>
+    </nav>
+
+    <div style="text-align: center; margin: 3rem 0;">
+      <h1 class="taohash-heading-1" style="margin-bottom: 1rem;">
+        📊 Analytics Dashboard
+      </h1>
+      <p class="taohash-body" style="font-size: 1.25rem;">
+        Deep dive
+      </p>
+    </div>
 
     <!-- Pool Statistics Summary -->
-    <div class="stats-summary">
-      <div class="stat-card">
-        <div class="stat-label">24h Pool Hashrate</div>
-        <div class="stat-value" id="poolHashrate">-</div>
+    <div class="taohash-grid taohash-grid-4" style="margin-bottom: 3rem;">
+      <div class="taohash-metric-card taohash-animate">
+        <div class="taohash-metric-value" id="poolHashrate">-</div>
+        <div class="taohash-metric-label">24h Pool Hashrate</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Active Workers</div>
-        <div class="stat-value" id="activeWorkers">-</div>
+      <div class="taohash-metric-card taohash-animate" style="animation-delay: 0.1s;">
+        <div class="taohash-metric-value" id="activeWorkers">-</div>
+        <div class="taohash-metric-label">Active Workers</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">24h Shares</div>
-        <div class="stat-value" id="totalShares">-</div>
+      <div class="taohash-metric-card taohash-animate" style="animation-delay: 0.2s;">
+        <div class="taohash-metric-value" id="totalShares">-</div>
+        <div class="taohash-metric-label">24h Shares</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">Best Share (24h)</div>
-        <div class="stat-value" id="bestShare">-</div>
+      <div class="taohash-metric-card taohash-animate" style="animation-delay: 0.3s;">
+        <div class="taohash-metric-value" id="bestShare">-</div>
+        <div class="taohash-metric-label">Best Share (24h)</div>
       </div>
     </div>
 
     <!-- Share Query Section -->
-    <section class="card">
-      <h2>Query Share History</h2>
+    <section class="taohash-card" style="margin-bottom: 3rem;">
+      <h2 class="taohash-heading-2" style="margin-bottom: 2rem;">Query Share History</h2>
       <div class="query-form">
         <div class="form-row">
           <div class="form-group">
@@ -84,17 +96,17 @@
           </div>
         </div>
 
-        <div class="button-group">
-          <button id="queryShares" class="btn btn-primary">Query Shares</button>
-          <button id="resetForm" class="btn btn-secondary">Reset</button>
+        <div class="button-group" style="margin-top: 2rem;">
+          <button id="queryShares" class="taohash-button taohash-button-primary">Query Shares</button>
+          <button id="resetForm" class="taohash-button taohash-button-secondary">Reset</button>
         </div>
       </div>
     </section>
 
     <!-- Results Section -->
-    <section id="resultsSection" class="card" style="display: none;">
+    <section id="resultsSection" class="taohash-card" style="display: none; margin-bottom: 3rem;">
       <div class="results-header">
-        <h2>Share History</h2>
+        <h2 class="taohash-heading-2">Share History</h2>
         <div class="export-buttons">
           <button id="exportCsv" class="btn btn-small">Export CSV</button>
           <button id="exportJson" class="btn btn-small">Export JSON</button>
@@ -103,8 +115,8 @@
       
       <div id="resultsSummary" class="results-summary"></div>
       
-      <div class="table-container">
-        <table id="resultsTable">
+      <div style="overflow-x: auto;">
+        <table class="taohash-table" id="resultsTable">
           <thead>
             <tr>
               <th>Time</th>
@@ -120,16 +132,16 @@
         </table>
       </div>
       
-      <div id="loadMore" class="load-more" style="display: none;">
-        <button id="loadMoreBtn" class="btn btn-secondary">Load More</button>
+      <div id="loadMore" class="load-more" style="display: none; text-align: center; margin-top: 2rem;">
+        <button id="loadMoreBtn" class="taohash-button taohash-button-secondary">Load More</button>
       </div>
     </section>
 
     <!-- Top Workers Section -->
-    <section class="card">
-      <h2>Top Workers (24 Hours)</h2>
-      <div class="table-container">
-        <table id="workersTable">
+    <section class="taohash-card" style="margin-bottom: 3rem;">
+      <h2 class="taohash-heading-2" style="margin-bottom: 2rem;">Top Workers (24 Hours)</h2>
+      <div style="overflow-x: auto;">
+        <table class="taohash-table" id="workersTable">
           <thead>
             <tr>
               <th>Worker</th>

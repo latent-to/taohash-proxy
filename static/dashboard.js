@@ -12,15 +12,15 @@ let shareChart = null;
 const REFRESH_INTERVAL = 10000; // 10 seconds
 const MAX_HISTORY_POINTS = 20;
 const COLORS = [
-  '#00B9B9', '#1ADABB', '#4CD4FF', '#3498db', '#9b59b6', 
-  '#e74c3c', '#f1c40f', '#34495e', '#d35400', '#7f8c8d'
+  '#4ECDC4', '#52D9D0', '#6AE4DB', '#82EFE6', '#9AF9F1', 
+  '#FFE66D', '#FF6B6B', '#C9ADA7', '#B8C5D6', '#7A8CA0'
 ];
 
 // Initialize the dashboard
 document.addEventListener('DOMContentLoaded', function() {
-  // Set Chart.js defaults to match theme
-  Chart.defaults.color = '#EEEEEE';
-  Chart.defaults.borderColor = '#333333';
+  // Set Chart.js defaults
+  Chart.defaults.color = '#B8C5D6';
+  Chart.defaults.borderColor = 'rgba(78, 205, 196, 0.15)';
   Chart.defaults.font.family = "'Inter', -apple-system, BlinkMacSystemFont, sans-serif";
   
   initCharts();
@@ -49,26 +49,26 @@ function initCharts() {
       scales: {
         x: {
           grid: {
-            color: 'rgba(255, 255, 255, 0.05)',
-            borderColor: '#333333'
+            color: 'rgba(78, 205, 196, 0.05)',
+            borderColor: 'rgba(78, 205, 196, 0.15)'
           },
           ticks: {
-            color: '#EEEEEE'
+            color: '#B8C5D6'
           }
         },
         y: {
           beginAtZero: true,
           grid: {
-            color: 'rgba(255, 255, 255, 0.05)',
-            borderColor: '#333333'
+            color: 'rgba(78, 205, 196, 0.05)',
+            borderColor: 'rgba(78, 205, 196, 0.15)'
           },
           ticks: {
-            color: '#EEEEEE'
+            color: '#B8C5D6'
           },
           title: {
             display: true,
             text: 'Hashrate',
-            color: '#EEEEEE'
+            color: '#B8C5D6'
           }
         }
       },
@@ -76,16 +76,16 @@ function initCharts() {
         legend: {
           position: 'top',
           labels: {
-            color: '#EEEEEE',
+            color: '#B8C5D6',
             usePointStyle: true,
             padding: 20
           }
         },
         tooltip: {
-          backgroundColor: 'rgba(30, 30, 30, 0.9)',
+          backgroundColor: 'rgba(22, 34, 54, 0.95)',
           titleColor: '#FFFFFF',
-          bodyColor: '#EEEEEE',
-          borderColor: '#333333',
+          bodyColor: '#B8C5D6',
+          borderColor: 'rgba(78, 205, 196, 0.3)',
           borderWidth: 1,
           padding: 12,
           callbacks: {
@@ -114,12 +114,12 @@ function initCharts() {
       datasets: [{
         data: [0, 0],
         backgroundColor: [
-          'rgba(26, 218, 187, 0.8)',
-          'rgba(255, 76, 91, 0.8)'
+          'rgba(78, 205, 196, 0.8)',
+          'rgba(255, 107, 107, 0.8)'
         ],
         borderColor: [
-          '#1ADABB',
-          '#FF4C5B'
+          '#4ECDC4',
+          '#FF6B6B'
         ],
         borderWidth: 1
       }]
@@ -135,16 +135,16 @@ function initCharts() {
         legend: {
           position: 'bottom',
           labels: {
-            color: '#EEEEEE',
+            color: '#B8C5D6',
             usePointStyle: true,
             padding: 15
           }
         },
         tooltip: {
-          backgroundColor: 'rgba(30, 30, 30, 0.9)',
+          backgroundColor: 'rgba(22, 34, 54, 0.95)',
           titleColor: '#FFFFFF',
-          bodyColor: '#EEEEEE',
-          borderColor: '#333333',
+          bodyColor: '#B8C5D6',
+          borderColor: 'rgba(78, 205, 196, 0.3)',
           borderWidth: 1,
           padding: 12
         }
@@ -199,43 +199,43 @@ function updatePoolsInfo(poolsInfo) {
   // Create a card for each pool
   for (const [poolName, poolData] of Object.entries(poolsInfo)) {
     const card = document.createElement('div');
-    card.className = 'pool-card';
+    card.className = 'taohash-card';
     
     const isActive = poolData.connected_miners > 0;
     
     card.innerHTML = `
-      <div class="pool-header">
-        <h3>${poolName.toUpperCase()}</h3>
-        <span class="pool-status ${isActive ? 'active' : 'inactive'}">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h3 class="taohash-heading-3" style="margin: 0;">${poolName.toUpperCase()}</h3>
+        <span class="taohash-badge ${isActive ? 'taohash-badge-success' : 'taohash-badge-danger'}">
           ${isActive ? 'Active' : 'Idle'}
         </span>
       </div>
-      <div class="pool-details">
-        <div class="pool-detail">
-          <span class="detail-label">Address:</span>
-          <span class="detail-value">${poolData.host}:${poolData.port}</span>
+      <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem;">
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <span class="taohash-caption" style="min-width: 100px;">Address:</span>
+          <span class="taohash-body" style="font-family: monospace; background: var(--taohash-bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px; flex-grow: 1; color: var(--taohash-accent-primary);">${poolData.host}:${poolData.port}</span>
         </div>
-        <div class="pool-detail">
-          <span class="detail-label">Proxy Port:</span>
-          <span class="detail-value">${poolData.proxy_port}</span>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <span class="taohash-caption" style="min-width: 100px;">Proxy Port:</span>
+          <span class="taohash-body" style="font-family: monospace; background: var(--taohash-bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px; flex-grow: 1; color: var(--taohash-accent-primary);">${poolData.proxy_port}</span>
         </div>
-        <div class="pool-detail">
-          <span class="detail-label">User:</span>
-          <span class="detail-value">${poolData.user}</span>
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <span class="taohash-caption" style="min-width: 100px;">User:</span>
+          <span class="taohash-body" style="font-family: monospace; background: var(--taohash-bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px; flex-grow: 1; color: var(--taohash-accent-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${poolData.user}</span>
         </div>
-        <div class="pool-stats">
-          <div class="pool-stat">
-            <span class="stat-value">${poolData.connected_miners}</span>
-            <span class="stat-label">Miners</span>
-          </div>
-          <div class="pool-stat">
-            <span class="stat-value">${formatHashrate(poolData.total_hashrate)}</span>
-            <span class="stat-label">Hashrate</span>
-          </div>
-          <div class="pool-stat">
-            <span class="stat-value">${poolData.total_accepted}</span>
-            <span class="stat-label">Accepted</span>
-          </div>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; padding-top: 1.5rem; border-top: 1px solid var(--taohash-border);">
+        <div style="text-align: center;">
+          <div class="taohash-metric-value" style="font-size: 1.5rem;">${poolData.connected_miners}</div>
+          <div class="taohash-metric-label">Miners</div>
+        </div>
+        <div style="text-align: center;">
+          <div class="taohash-metric-value" style="font-size: 1.5rem;">${formatHashrate(poolData.total_hashrate)}</div>
+          <div class="taohash-metric-label">Hashrate</div>
+        </div>
+        <div style="text-align: center;">
+          <div class="taohash-metric-value" style="font-size: 1.5rem;">${poolData.total_accepted}</div>
+          <div class="taohash-metric-label">Accepted</div>
         </div>
       </div>
     `;
