@@ -86,10 +86,12 @@ async def health_check():
 @app.get("/api/pool/stats")
 @limiter.limit("60/minute")
 async def get_pool_stats(
-    request: Request, token: str = Depends(verify_token)
+    request: Request, token: str = Depends(verify_token), pool: Optional[str] = None
 ) -> dict[str, Any]:
     """
-    Get pool-wide statistics.
+
+    Args:
+        pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
 
     Returns statistics for 5-minute, 60-minute, and 24-hour windows.
     """
@@ -100,29 +102,31 @@ async def get_pool_stats(
         now = datetime.now()
         yesterday = now - timedelta(days=1)
 
-        stats_5m = await _get_pool_stats_for_window("5m")
-        stats_60m = await _get_pool_stats_for_window("60m")
-        stats_24h = await _get_pool_stats_for_window("24h")
-        stats_yesterday = await _get_pool_stats_yesterday(yesterday)
+        # Default to "all"
+        pool_filter = pool if pool in ["normal", "high_diff"] else None
 
-        worker_counts = await _get_worker_counts()
-        username = os.environ.get("POOL_USER", "proxy_user")
+        stats_5m = await _get_pool_stats_for_window("5m", pool_filter)
+        stats_60m = await _get_pool_stats_for_window("60m", pool_filter)
+        stats_24h = await _get_pool_stats_for_window("24h", pool_filter)
+        stats_yesterday = await _get_pool_stats_yesterday(yesterday, pool_filter)
 
-        return {
-            "username": username,
+        worker_counts = await _get_worker_counts(pool_filter)
+
+        response = {
+            "pool": pool or "all",
             "btc": {
                 "all_time_reward": "0.00000000",  # TODO
                 "hash_rate_unit": "Gh/s",
-                "hash_rate_5m": round(stats_5m.get("hashrate", 0) / 1e9)
+                "hash_rate_5m": stats_5m.get("hashrate", 0) / 1e9  # Convert to GH/s
                 if stats_5m.get("hashrate", 0)
-                else 0,  # Convert to GH/s
-                "hash_rate_60m": round(stats_60m.get("hashrate", 0) / 1e9)
+                else 0,
+                "hash_rate_60m": stats_60m.get("hashrate", 0) / 1e9
                 if stats_60m.get("hashrate", 0)
                 else 0,
-                "hash_rate_24h": round(stats_24h.get("hashrate", 0) / 1e9)
+                "hash_rate_24h": stats_24h.get("hashrate", 0) / 1e9
                 if stats_24h.get("hashrate", 0)
                 else 0,
-                "hash_rate_yesterday": round(stats_yesterday.get("hashrate", 0) / 1e9)
+                "hash_rate_yesterday": stats_yesterday.get("hashrate", 0) / 1e9
                 if stats_yesterday.get("hashrate", 0)
                 else 0,
                 "low_workers": 0,
@@ -143,6 +147,16 @@ async def get_pool_stats(
             },
         }
 
+        if not pool_filter:
+            pools_included = set()
+            for stat_window in [stats_5m, stats_60m, stats_24h, stats_yesterday]:
+                if "pools_included" in stat_window:
+                    pools_included.update(stat_window["pools_included"])
+
+            response["pools_included"] = sorted(list(pools_included))
+
+        return response
+
     except Exception as e:
         logger.error(f"Error fetching pool stats: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -155,17 +169,25 @@ async def get_workers_stats(
     token: str = Depends(verify_token),
     miner: Optional[str] = None,
     worker: Optional[str] = None,
+    pool: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Get per-worker statistics.
 
-    Can filter by specific miner/worker if provided.
+    Can filter by specific miner/worker and pool if provided.
+
+    Args:
+        miner: Optional miner filter
+        worker: Optional worker filter
+        pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
     """
     if not db or not db.client:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        workers = await _get_worker_stats(miner, worker)
+        # Default to "all"
+        pool_filter = pool if pool in ["normal", "high_diff"] else None
+        workers = await _get_worker_stats(miner, worker, pool_filter)
 
         workers_dict = {}
         for w in workers:
@@ -193,27 +215,82 @@ async def get_workers_stats(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def _get_pool_stats_for_window(window: str) -> dict[str, Any]:
-    """Get pool statistics for a specific time window using the new views."""
+async def _get_pool_stats_for_window(
+    window: str, pool_filter: Optional[str] = None
+) -> dict[str, Any]:
+    """Get pool statistics for a specific time window."""
     try:
-        view_name = f"pool_stats_{window}"
-        query = f"""
-        SELECT 
-            active_workers,
-            shares,
-            shares as accepted,  -- All shares are accepted
-            0 as rejected,      -- No rejected shares
-            pool_difficulty_sum,
-            actual_difficulty_sum as share_value,
-            hashrate
-        FROM {view_name}
-        """
+        if window == "5m":
+            pool_condition = "AND pool_label = %(pool_filter)s" if pool_filter else ""
+            params = {"pool_filter": pool_filter} if pool_filter else {}
 
-        result = await db.client.query(query)
+            if pool_filter:
+                query = f"""
+                SELECT 
+                    count(DISTINCT worker) as active_workers,
+                    count() as shares,
+                    count() as accepted,
+                    0 as rejected,
+                    sum(pool_difficulty) as total_difficulty,
+                    sum(actual_difficulty) as share_value,
+                    sum(pool_difficulty) * 4294967296 / 300 as hashrate
+                FROM shares
+                WHERE ts > now() - INTERVAL 5 MINUTE
+                {pool_condition}
+                """
+            else:
+                query = """
+                SELECT 
+                    count(DISTINCT worker) as active_workers,
+                    count() as shares,
+                    count() as accepted,
+                    0 as rejected,
+                    sum(pool_difficulty) as total_difficulty,
+                    sum(actual_difficulty) as share_value,
+                    sum(pool_difficulty) * 4294967296 / 300 as hashrate,
+                    groupArray(DISTINCT pool_label) as pools_included
+                FROM shares
+                WHERE ts > now() - INTERVAL 5 MINUTE
+                """
+        else:
+            # Using materialized views for longer windows
+            view_name = f"pool_stats_{window}"
+            where_clause = "WHERE pool_label = %(pool_filter)s" if pool_filter else ""
+            params = {"pool_filter": pool_filter} if pool_filter else {}
+
+            if pool_filter:
+                query = f"""
+                SELECT 
+                    active_workers,
+                    shares,
+                    shares as accepted,
+                    0 as rejected,
+                    pool_difficulty_sum as total_difficulty,
+                    actual_difficulty_sum as share_value,
+                    hashrate
+                FROM {view_name}
+                {where_clause}
+                """
+            else:
+                # Aggregate all pools and get pool list
+                query = f"""
+                SELECT 
+                    sum(active_workers) as active_workers,
+                    sum(shares) as shares,
+                    sum(shares) as accepted,
+                    0 as rejected,
+                    sum(pool_difficulty_sum) as total_difficulty,
+                    sum(actual_difficulty_sum) as share_value,
+                    sum(hashrate) as hashrate,
+                    groupArray(pool_label) as pools_included
+                FROM {view_name}
+                """
+
+        result = await db.client.query(query, parameters=params)
 
         if result.result_rows and result.result_rows[0]:
             row = result.result_rows[0]
-            return {
+            response = {
                 "active_workers": int(row[0] or 0),
                 "total_shares": int(row[1] or 0),
                 "accepted": int(row[2] or 0),
@@ -222,6 +299,12 @@ async def _get_pool_stats_for_window(window: str) -> dict[str, Any]:
                 "share_value": float(row[5] or 0),
                 "hashrate": float(row[6] or 0) if row[6] else 0,
             }
+
+            if not pool_filter and len(row) > 7:
+                response["pools_included"] = row[7]
+
+            return response
+
     except Exception as e:
         logger.error(f"Error in _get_pool_stats_for_window: {e}")
 
@@ -236,35 +319,54 @@ async def _get_pool_stats_for_window(window: str) -> dict[str, Any]:
     }
 
 
-async def _get_pool_stats_yesterday(yesterday: datetime) -> dict[str, Any]:
+async def _get_pool_stats_yesterday(
+    yesterday: datetime, pool_filter: Optional[str] = None
+) -> dict[str, Any]:
     """Get pool statistics for yesterday."""
     try:
-        query = """
-        SELECT 
-            count(DISTINCT worker) as active_workers,
-            count() as total_shares,
-            count() as accepted,  -- All shares are accepted
-            0 as rejected,        -- No rejected shares
-            sum(pool_difficulty) as total_difficulty,
-            sum(actual_difficulty) as share_value,
-            sum(pool_difficulty) * 4294967296 / 86400 as hashrate
-        FROM shares
-        WHERE ts >= %(start)s AND ts < %(end)s
-        """
+        pool_condition = "AND pool_label = %(pool_filter)s" if pool_filter else ""
 
-        result = await db.client.query(
-            query,
-            parameters={
-                "start": yesterday.replace(hour=0, minute=0, second=0, microsecond=0),
-                "end": yesterday.replace(
-                    hour=23, minute=59, second=59, microsecond=999999
-                ),
-            },
-        )
+        if pool_filter:
+            query = f"""
+            SELECT 
+                count(DISTINCT worker) as active_workers,
+                count() as total_shares,
+                count() as accepted,  -- All shares are accepted
+                0 as rejected,        -- No rejected shares
+                sum(pool_difficulty) as total_difficulty,
+                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) * 4294967296 / 86400 as hashrate
+            FROM shares
+            WHERE ts >= %(start)s AND ts < %(end)s
+            {pool_condition}
+            """
+        else:
+            query = """
+            SELECT 
+                count(DISTINCT worker) as active_workers,
+                count() as total_shares,
+                count() as accepted,  -- All shares stored are accepted
+                0 as rejected,        -- No rejected shares
+                sum(pool_difficulty) as total_difficulty,
+                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) * 4294967296 / 86400 as hashrate,
+                groupArray(DISTINCT pool_label) as pools_included
+            FROM shares
+            WHERE ts >= %(start)s AND ts < %(end)s
+            """
+
+        params = {
+            "start": yesterday.replace(hour=0, minute=0, second=0, microsecond=0),
+            "end": yesterday.replace(hour=23, minute=59, second=59, microsecond=999999),
+        }
+        if pool_filter:
+            params["pool_filter"] = pool_filter
+
+        result = await db.client.query(query, parameters=params)
 
         if result.result_rows and result.result_rows[0]:
             row = result.result_rows[0]
-            return {
+            response = {
                 "active_workers": int(row[0] or 0),
                 "total_shares": int(row[1] or 0),
                 "accepted": int(row[2] or 0),
@@ -273,6 +375,11 @@ async def _get_pool_stats_yesterday(yesterday: datetime) -> dict[str, Any]:
                 "share_value": float(row[5] or 0),
                 "hashrate": float(row[6] or 0) if row[6] else 0,
             }
+
+            if not pool_filter and len(row) > 7:
+                response["pools_included"] = row[7]
+
+            return response
     except Exception as e:
         logger.error(f"Error in _get_pool_stats_yesterday: {e}")
 
@@ -287,17 +394,21 @@ async def _get_pool_stats_yesterday(yesterday: datetime) -> dict[str, Any]:
     }
 
 
-async def _get_worker_counts() -> dict[str, int]:
+async def _get_worker_counts(pool_filter: Optional[str] = None) -> dict[str, int]:
     """Get counts of workers in different states."""
     try:
-        query = """
+        pool_condition = "WHERE pool_label = %(pool_filter)s" if pool_filter else ""
+        params = {"pool_filter": pool_filter} if pool_filter else {}
+
+        query = f"""
         SELECT 
-            sum(CASE WHEN last_share_ts > now() - INTERVAL 2 HOUR THEN 1 ELSE 0 END) as ok_workers,
-            sum(CASE WHEN last_share_ts <= now() - INTERVAL 2 HOUR THEN 1 ELSE 0 END) as off_workers
+            sum(CASE WHEN state = 'ok' THEN 1 ELSE 0 END) as ok_workers,
+            sum(CASE WHEN state = 'offline' THEN 1 ELSE 0 END) as off_workers
         FROM worker_state
+        {pool_condition}
         """
 
-        result = await db.client.query(query)
+        result = await db.client.query(query, parameters=params)
 
         if result.result_rows and result.result_rows[0]:
             row = result.result_rows[0]
@@ -309,71 +420,74 @@ async def _get_worker_counts() -> dict[str, int]:
 
 
 async def _get_worker_stats(
-    miner: Optional[str] = None, worker: Optional[str] = None
+    miner: Optional[str] = None,
+    worker: Optional[str] = None,
+    pool_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Get worker statistics with optional filtering."""
+    """Get worker statistics using optimized materialized views."""
     where_conditions = []
     params = {}
 
-    if miner:
-        where_conditions.append("miner = %(miner)s")
-        params["miner"] = miner
     if worker:
         where_conditions.append("worker = %(worker)s")
         params["worker"] = worker
 
-    where_clause = f"AND {' AND '.join(where_conditions)}" if where_conditions else ""
-    where_clause_standalone = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
+    if pool_filter:
+        where_conditions.append("pool_label = %(pool_filter)s")
+        params["pool_filter"] = pool_filter
+
+    where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
 
     query = f"""
     WITH 
-    -- 5-minute stats directly from shares
+    -- Get worker state first
+    worker_status AS (
+        SELECT 
+            worker,
+            latest_miner,
+            pool_label,
+            last_share_ts,
+            state
+        FROM worker_state
+        {where_clause}
+    ),
+    -- Query shares directly for 5-minute precision
     stats_5m AS (
         SELECT 
-            miner, worker,
+            worker,
             count() as shares,
             sum(actual_difficulty) as share_value,
             sum(pool_difficulty) * 4294967296 / 300 as hashrate
         FROM shares
         WHERE ts > now() - INTERVAL 5 MINUTE
-        {where_clause}
-        GROUP BY miner, worker
+        {f"AND {' AND '.join(where_conditions)}" if where_conditions else ""}
+        GROUP BY worker
     ),
-    -- 60-minute stats directly from shares
+    -- Use materialized views for 60m and 24h
     stats_60m AS (
         SELECT 
-            miner, worker,
-            count() as shares,
-            sum(actual_difficulty) as share_value,
-            sum(pool_difficulty) * 4294967296 / 3600 as hashrate
-        FROM shares
-        WHERE ts > now() - INTERVAL 60 MINUTE
+            worker,
+            sum(shares) as shares,
+            sum(actual_difficulty_sum) as share_value,
+            sum(hashrate) as hashrate
+        FROM worker_stats_60m
         {where_clause}
-        GROUP BY miner, worker
+        GROUP BY worker
     ),
-    -- 24-hour stats directly from shares
     stats_24h AS (
         SELECT 
-            miner, worker,
-            count() as shares,
-            sum(actual_difficulty) as share_value,
-            sum(pool_difficulty) * 4294967296 / 86400 as hashrate
-        FROM shares
-        WHERE ts > now() - INTERVAL 24 HOUR
+            worker,
+            sum(shares) as shares,
+            sum(actual_difficulty_sum) as share_value,
+            sum(hashrate) as hashrate
+        FROM worker_stats_24h
         {where_clause}
-        GROUP BY miner, worker
-    ),
-    worker_status AS (
-        SELECT 
-            miner, worker,
-            last_share_ts,
-            state
-        FROM worker_state
-        {where_clause_standalone}
+        GROUP BY worker
     )
     SELECT 
-        w.miner, 
         w.worker,
+        w.latest_miner,
+        w.pool_label,
         toUnixTimestamp(w.last_share_ts) as last_share_ts,
         w.state,
         ifNull(s5.shares, 0) as shares_5m,
@@ -386,10 +500,10 @@ async def _get_worker_stats(
         ifNull(s24.hashrate, 0) as hashrate_24h,
         ifNull(s24.share_value, 0) as share_value_24h
     FROM worker_status w
-    LEFT JOIN stats_5m s5 ON (w.miner = s5.miner AND w.worker = s5.worker)
-    LEFT JOIN stats_60m s60 ON (w.miner = s60.miner AND w.worker = s60.worker)
-    LEFT JOIN stats_24h s24 ON (w.miner = s24.miner AND w.worker = s24.worker)
-    ORDER BY w.miner, w.worker
+    LEFT JOIN stats_5m s5 ON w.worker = s5.worker
+    LEFT JOIN stats_60m s60 ON w.worker = s60.worker
+    LEFT JOIN stats_24h s24 ON w.worker = s24.worker
+    ORDER BY w.worker
     """
 
     result = await db.client.query(query, parameters=params)
@@ -398,19 +512,20 @@ async def _get_worker_stats(
     for row in result.result_rows:
         workers.append(
             {
-                "miner": row[0],
-                "worker": row[1],
-                "last_share_ts": row[2],
-                "state": row[3],
-                "shares_5m": row[4],
-                "hashrate_5m": row[5],
-                "share_value_5m": row[6],
-                "shares_60m": row[7],
-                "hashrate_60m": row[8],
-                "share_value_60m": row[9],
-                "shares_24h": row[10],
-                "hashrate_24h": row[11],
-                "share_value_24h": row[12],
+                "worker": row[0],
+                "miner": row[1],
+                "pool_label": row[2],
+                "last_share_ts": row[3],
+                "state": row[4],
+                "shares_5m": row[5],
+                "hashrate_5m": row[6],
+                "share_value_5m": row[7],
+                "shares_60m": row[8],
+                "hashrate_60m": row[9],
+                "share_value_60m": row[10],
+                "shares_24h": row[11],
+                "hashrate_24h": row[12],
+                "share_value_24h": row[13],
             }
         )
 
