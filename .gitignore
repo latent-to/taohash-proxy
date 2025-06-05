@@ -201,7 +201,6 @@ yarn-error.log*
 **/.bash_history
 **/*.xml
 **/*.pstats
-**/*.png
 
 # Replicate library
 **/.replicate

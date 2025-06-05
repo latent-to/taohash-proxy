@@ -216,7 +216,7 @@ function updatePoolsInfo(poolsInfo) {
           <span class="taohash-body" style="font-family: monospace; background: var(--taohash-bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px; flex-grow: 1; color: var(--taohash-accent-primary);">${poolData.host}:${poolData.port}</span>
         </div>
         <div style="display: flex; gap: 0.5rem; align-items: center;">
-          <span class="taohash-caption" style="min-width: 100px;">Proxy Port:</span>
+          <span class="taohash-caption" style="min-width: 100px;">Port:</span>
           <span class="taohash-body" style="font-family: monospace; background: var(--taohash-bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px; flex-grow: 1; color: var(--taohash-accent-primary);">${poolData.proxy_port}</span>
         </div>
         <div style="display: flex; gap: 0.5rem; align-items: center;">
