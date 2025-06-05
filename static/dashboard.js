@@ -281,9 +281,26 @@ function addHashrateDataPoint(data) {
   // Add new label
   hashrateHistory.labels.push(timeString);
   
-  // Process each miner
-  data.forEach((miner, index) => {
-    const existingDataset = hashrateHistory.datasets.find(d => d.label === miner.worker || d.label === miner.miner);
+  // Aggregate miners for graph display
+  const aggregatedData = {};
+  data.forEach(miner => {
+    const label = miner.worker || miner.miner;
+    if (aggregatedData[label]) {
+      // Sum hashrates for miners with same worker name
+      aggregatedData[label].hashrate += miner.hashrate;
+    } else {
+      aggregatedData[label] = {
+        ...miner,
+        hashrate: miner.hashrate
+      };
+    }
+  });
+  
+  const graphData = Object.values(aggregatedData);
+  
+  graphData.forEach((miner, index) => {
+    const label = miner.worker || miner.miner;
+    const existingDataset = hashrateHistory.datasets.find(d => d.label === label);
     
     if (existingDataset) {
       // Update existing dataset
@@ -292,7 +309,7 @@ function addHashrateDataPoint(data) {
       // Create new dataset
       const color = COLORS[index % COLORS.length];
       const newDataset = {
-        label: miner.worker || miner.miner,
+        label: label,
         data: Array(hashrateHistory.labels.length - 1).fill(0).concat([miner.hashrate]),
         borderColor: color,
         backgroundColor: color + '20',
@@ -306,9 +323,9 @@ function addHashrateDataPoint(data) {
   });
   
   // Remove datasets for miners that are no longer connected
-  const activeMiners = data.map(m => m.worker || m.miner);
+  const activeLabels = Object.keys(aggregatedData);
   hashrateHistory.datasets = hashrateHistory.datasets.filter(ds => 
-    activeMiners.includes(ds.label));
+    activeLabels.includes(ds.label));
   
   // Update chart
   hashrateChart.data.labels = hashrateHistory.labels;
