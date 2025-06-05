@@ -14,7 +14,7 @@ from .utils.logger import get_logger
 from .utils.constants import (
     RELOAD_API_PORT,
     RELOAD_API_HOST,
-    INTERNAL_PROXY_PORT,
+    PROXY_PORT,
     INTERNAL_DASHBOARD_PORT,
     CONFIG_PATH,
 )
@@ -34,7 +34,7 @@ def load_config(path: str = CONFIG_PATH) -> dict:
 
     if "pools" not in data:
         raise ValueError("Configuration must have 'pools' section")
-    
+
     return {"pools": data["pools"]}
 
 
@@ -93,24 +93,25 @@ async def handle_new_miner(
       4) On completion, clean up stats + the session set
     """
     miner_address = writer.get_extra_info("peername")
-    
+
     local_addr = writer.get_extra_info("sockname")
     local_port = local_addr[1] if local_addr else None
-    
+
     pool_config = None
     pool_label = None
     for pool_name, pool_cfg in config["pools"].items():
-        if pool_cfg.get("proxy_port", INTERNAL_PROXY_PORT) == local_port:
+        expected_port = get_proxy_port(pool_name)
+        if expected_port == local_port:
             pool_config = pool_cfg
             pool_label = pool_name
             break
-    
+
     if not pool_config:
         logger.error(f"❌ No pool config found for port {local_port}")
         writer.close()
         await writer.wait_closed()
         return
-    
+
     pool_name = f"{pool_config['host']}:{pool_config['port']}"
     logger.info(f"➕ Miner connected: {miner_address} → {pool_name}")
 
@@ -124,12 +125,12 @@ async def handle_new_miner(
         stats_manager,
         pool_label,
     )
-    
+
     session.db = stats_db
 
     async with active_sessions_lock:
         active_sessions.add(session)
-    
+
     task = asyncio.create_task(session.run())
 
     async def cleanup_session() -> None:
@@ -161,6 +162,15 @@ async def start_reload_api() -> web.TCPSite:
     return site
 
 
+def get_proxy_port(pool_name: str) -> int:
+    if pool_name == "normal":
+        return int(os.getenv("PROXY_PORT", 3331))
+    elif pool_name == "high_diff":
+        return int(os.getenv("PROXY_PORT_HIGH", 3332))
+    else:
+        return 3331
+
+
 async def main() -> None:
     if os.path.exists(CONFIG_PATH):
         config_path = CONFIG_PATH
@@ -172,6 +182,7 @@ async def main() -> None:
             example_path = os.path.join(parent_dir, "config", "config.toml.example")
             if os.path.exists(example_path):
                 import shutil
+
                 logger.info("📋 No config.toml found; copying from example...")
                 shutil.copy(example_path, config_path)
             else:
@@ -182,7 +193,7 @@ async def main() -> None:
 
     global stats_db
     stats_db = StatsDB()
-    
+
     db_initialized = await stats_db.init()
     if db_initialized:
         logger.info(f"✅ ClickHouse initialized at {stats_db.host}:{stats_db.port}")
@@ -191,8 +202,10 @@ async def main() -> None:
 
     logger.info("🚀 Starting with configuration:")
     for pool_name, pool_config in config["pools"].items():
-        proxy_port = pool_config.get("proxy_port", INTERNAL_PROXY_PORT)
-        logger.info(f"  {pool_name.upper()} Pool: {pool_config['host']}:{pool_config['port']}")
+        proxy_port = get_proxy_port(pool_name)
+        logger.info(
+            f"  {pool_name.upper()} Pool: {pool_config['host']}:{pool_config['port']}"
+        )
         logger.info(f"    User: {pool_config['user']}")
         logger.info(f"    Proxy port: {proxy_port}")
     logger.info(f"  Dashboard on: 0.0.0.0:{INTERNAL_DASHBOARD_PORT}")
@@ -203,15 +216,14 @@ async def main() -> None:
     # Start a server for each pool configuration
     servers = []
     for pool_name, pool_config in config["pools"].items():
-        proxy_port = pool_config.get("proxy_port", INTERNAL_PROXY_PORT)
-        
+        proxy_port = get_proxy_port(pool_name)
         server = await asyncio.start_server(
             handle_new_miner,
             "0.0.0.0",
             proxy_port,
         )
         servers.append(server)
-        
+
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         logger.info(f"🔌 {pool_name.upper()} pool proxy listening on {addrs}")
 
@@ -237,6 +249,7 @@ async def shutdown():
     if stats_db:
         await stats_db.close()
         logger.info("Database connection closed")
+
 
 if __name__ == "__main__":
     try:

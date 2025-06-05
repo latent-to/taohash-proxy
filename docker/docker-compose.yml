@@ -7,12 +7,14 @@ services:
     volumes:
       - ../config:/app/config
     ports:
-      - "${PROXY_PORT:-3331}:3331"
-      - "${PROXY_PORT_HIGH:-3332}:3332"
+      - "${PROXY_PORT:-3331}:${PROXY_PORT:-3331}"
+      - "${PROXY_PORT_HIGH:-3332}:${PROXY_PORT_HIGH:-3332}"
       - "${DASHBOARD_PORT:-5000}:5000"
       - "${RELOAD_API_PORT:-5001}:5001"
     environment:
       - PYTHONUNBUFFERED=1
+      - PROXY_PORT=${PROXY_PORT:-3331}
+      - PROXY_PORT_HIGH=${PROXY_PORT_HIGH:-3332}
       - CLICKHOUSE_REQUIRED=false
       - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
