@@ -100,7 +100,7 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
 
                 if "pool" in data:
                     pool = data["pool"]
-                    
+
                     pool_info["url"] = (
                         f"{pool.get('host', 'unknown')}:{pool.get('port', '0')}"
                     )
@@ -125,28 +125,31 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
             - total accepted/rejected shares
         """
         try:
-            import toml
-
             config_dir = os.path.join(project_root, "config")
             config_path = os.path.join(config_dir, "config.toml")
-            
+
             pools_data = {}
-            
+
             if os.path.exists(config_path):
                 data = toml.load(config_path)
                 if "pools" in data:
                     for pool_name, pool_config in data["pools"].items():
+                        if pool_name == "normal":
+                            proxy_port = int(os.getenv("PROXY_PORT", "3331"))
+                        elif pool_name == "high_diff":
+                            proxy_port = int(os.getenv("PROXY_PORT_HIGH", "3332"))
+
                         pools_data[pool_name] = {
                             "host": pool_config.get("host", "unknown"),
                             "port": pool_config.get("port", 0),
-                            "proxy_port": pool_config.get("proxy_port", 0),
+                            "proxy_port": proxy_port,
                             "user": pool_config.get("user", "unknown"),
                             "connected_miners": 0,
                             "total_hashrate": 0.0,
                             "total_accepted": 0,
                             "total_rejected": 0,
                         }
-            
+
             miner_stats = stats_manager.get_all_stats()
             for miner in miner_stats:
                 pool_name = miner.get("pool", "unknown")
@@ -155,9 +158,9 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
                     pools_data[pool_name]["total_hashrate"] += miner.get("hashrate", 0)
                     pools_data[pool_name]["total_accepted"] += miner.get("accepted", 0)
                     pools_data[pool_name]["total_rejected"] += miner.get("rejected", 0)
-            
+
             return web.json_response(pools_data)
-            
+
         except Exception as e:
             logger.error(f"Error reading pools info: {e}")
             return web.json_response({})
@@ -172,10 +175,11 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
             web.get("/api/pools", api_pools_info),
         ]
     )
-    
+
     # Add analytics routes if database is available
     if stats_db:
         from .analytics_api import create_analytics_routes
+
         create_analytics_routes(app, stats_db)
 
     return app
