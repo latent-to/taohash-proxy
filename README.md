@@ -64,14 +64,12 @@ docker-compose logs -f
    port = 3333
    user = "your_wallet.taohash"
    pass = "x"
-   proxy_port = 3331
 
    [pools.high_diff]
    host = "stratum.pool.com"
    port = 3333
    user = "your_wallet.taohash"
    pass = "x"
-   proxy_port = 3332
    ```
 
 ### 3. Generate API Tokens
