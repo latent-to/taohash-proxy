@@ -102,7 +102,7 @@ The proxy acts as a bridge between miners and mining pools, while collecting dat
 ### Port Configuration
 - **Two TCP ports**: 3331 (normal difficulty) and 3332 (high difficulty)
 - Each port connects to its configured mining pool
-- Pf the pool doesn't support high difficulty, both ports should use the same pool configuration
+- If the pool doesn't support high difficulty, both ports should use the same pool configuration
 
 ### Minimum Difficulty Enforcement
 The proxy can enforce minimum difficulty for pools that don't support custom difficulty:
