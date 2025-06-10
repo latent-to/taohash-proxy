@@ -45,7 +45,7 @@ S3 storage is required for archiving historical data. Data older than 2 days is 
 
 ### 1. Create S3 Bucket
 
-1. Navigate to S3 → Create bucket (We recommend using S3 Express One Zone - it will be useful when we introduce BTC disbursements in the next phase)
+1. Navigate to S3 → Create bucket
 2. Bucket name: your-taohash-bucket (must be globally unique)
 3. Region: Choose closest to your proxy location
 4. Block all public access: ✓ (keep enabled for security)
