@@ -543,10 +543,7 @@ async def _get_worker_stats(
     pool_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
-    Implements the "Live Precision" strategy:
-    - 5m stats are from the raw `shares` table for per-second precision.
-    - 60m/24h stats are from materialized views for performance.
-    - Live state is from a dedicated materialized view for performance.
+    Fetches all worker statistics which were active in the last 24 hours.
     """
     params = {}
     where_clauses = []
