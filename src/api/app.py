@@ -267,7 +267,6 @@ async def get_workers_timerange(
     if not db or not db.client:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    # Validate time range
     if start_time >= end_time:
         raise HTTPException(
             status_code=400, detail="start_time must be before end_time"
@@ -277,51 +276,36 @@ async def get_workers_timerange(
     if time_diff > 30 * 24 * 3600:  # 30 days max
         raise HTTPException(status_code=400, detail="Time range cannot exceed 30 days")
 
+    if time_diff == 0:
+        time_diff = 1
+
     try:
-        # Convert timestamps to datetime
         start_dt = datetime.fromtimestamp(start_time)
         end_dt = datetime.fromtimestamp(end_time)
 
-        # Query for shares within time range and calculate metrics
         query = """
-        WITH 
-        -- Get current state and last share time for all workers
-        current_state AS (
-            SELECT 
-                worker,
-                max(ts) as last_share_ts,
-                CASE 
-                    WHEN max(ts) > now() - INTERVAL 10 MINUTE THEN 'ok'
-                    ELSE 'offline'
-                END as state
-            FROM shares
-            GROUP BY worker
-        ),
-        -- Get metrics for the time range
-        timerange_stats AS (
-            SELECT 
-                worker,
-                count() as shares,
-                sum(actual_difficulty) as share_value,
-                sum(pool_difficulty) * 4294967296 / %(duration)s as hashrate
-            FROM shares
-            WHERE ts >= %(start_time)s AND ts < %(end_time)s
-            GROUP BY worker
-        )
-        SELECT 
-            COALESCE(t.worker, c.worker) as worker,
-            c.state,
-            toUnixTimestamp(c.last_share_ts) as last_share,
-            COALESCE(t.shares, 0) as shares,
-            COALESCE(t.share_value, 0) as share_value,
-            COALESCE(t.hashrate, 0) as hashrate
-        FROM current_state c
-        FULL OUTER JOIN timerange_stats t ON c.worker = t.worker
-        WHERE t.worker IS NOT NULL  -- Only include workers with shares in range
+        SELECT
+            worker,
+            CASE
+                WHEN max(ts) > fromUnixTimestamp(%(end_time_int)s) - INTERVAL 10 MINUTE THEN 'ok'
+                ELSE 'offline'
+            END as state,
+            toUnixTimestamp(max(ts)) as last_share,
+            count() as shares,
+            sum(actual_difficulty) as share_value,
+            sum(pool_difficulty) * 4294967296 / %(duration)s as hashrate
+        FROM shares
+        WHERE ts >= %(start_time_dt)s AND ts < %(end_time_dt)s
+        GROUP BY worker
         ORDER BY worker
         """
 
-        params = {"start_time": start_dt, "end_time": end_dt, "duration": time_diff}
+        params = {
+            "start_time_dt": start_dt,
+            "end_time_dt": end_dt,
+            "end_time_int": end_time,
+            "duration": time_diff,
+        }
 
         result = await db.client.query(query, parameters=params)
 
@@ -333,7 +317,7 @@ async def get_workers_timerange(
                 "last_share": int(row[2]) if row[2] else None,
                 "shares": int(row[3]),
                 "share_value": float(row[4]),
-                "hashrate": float(row[5]) / 1e9,  # Convert to GH/s
+                "hashrate": float(row[5]) / 1e9,
                 "hash_rate_unit": "Gh/s",
             }
 
@@ -382,7 +366,6 @@ async def _get_pool_stats_for_window(
                 WHERE ts > now() - INTERVAL 5 MINUTE
                 """
         else:
-            # Using materialized views for longer windows
             view_name = f"pool_stats_{window}"
             where_clause = "WHERE pool_label = %(pool_filter)s" if pool_filter else ""
             params = {"pool_filter": pool_filter} if pool_filter else {}
@@ -538,9 +521,9 @@ async def _get_worker_counts(pool_filter: Optional[str] = None) -> dict[str, int
 
         query = f"""
         SELECT 
-            sum(CASE WHEN state = 'ok' THEN 1 ELSE 0 END) as ok_workers,
-            sum(CASE WHEN state = 'offline' THEN 1 ELSE 0 END) as off_workers
-        FROM worker_state
+            COUNT(DISTINCT CASE WHEN last_share_ts > now() - INTERVAL 120 MINUTE THEN worker END) as ok_workers,
+            COUNT(DISTINCT CASE WHEN last_share_ts <= now() - INTERVAL 120 MINUTE THEN worker END) as off_workers
+        FROM worker_pool_latest_share_mv
         {pool_condition}
         """
 
@@ -559,85 +542,74 @@ async def _get_worker_stats(
     worker: Optional[str] = None,
     pool_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Get worker statistics using optimized materialized views."""
-    where_conditions = []
+    """
+    Fetches all worker statistics which were active in the last 24 hours.
+    """
     params = {}
+    where_clauses = []
 
     if worker:
-        where_conditions.append("worker = %(worker)s")
+        where_clauses.append("worker = %(worker)s")
         params["worker"] = worker
-
     if pool_filter:
-        where_conditions.append("pool_label = %(pool_filter)s")
+        where_clauses.append("pool_label = %(pool_filter)s")
         params["pool_filter"] = pool_filter
 
-    where_clause = f"WHERE {' AND '.join(where_conditions)}" if where_conditions else ""
+    where_clause_sql = f"AND {' AND '.join(where_clauses)}" if where_clauses else ""
 
     query = f"""
-    WITH 
-    -- Get worker state first
-    worker_status AS (
-        SELECT 
-            worker,
-            latest_miner,
-            pool_label,
-            last_share_ts,
-            state
-        FROM worker_state
-        {where_clause}
-    ),
-    -- Query shares directly for 5-minute precision
-    stats_5m AS (
-        SELECT 
-            worker,
-            count() as shares,
-            sum(actual_difficulty) as share_value,
-            sum(pool_difficulty) * 4294967296 / 300 as hashrate
-        FROM shares
-        WHERE ts > now() - INTERVAL 5 MINUTE
-        {f"AND {' AND '.join(where_conditions)}" if where_conditions else ""}
-        GROUP BY worker
-    ),
-    -- Use materialized views for 60m and 24h
-    stats_60m AS (
-        SELECT 
-            worker,
-            sum(shares) as shares,
-            sum(actual_difficulty_sum) as share_value,
-            sum(hashrate) as hashrate
-        FROM worker_stats_60m
-        {where_clause}
-        GROUP BY worker
-    ),
-    stats_24h AS (
-        SELECT 
-            worker,
-            sum(shares) as shares,
-            sum(actual_difficulty_sum) as share_value,
-            sum(hashrate) as hashrate
-        FROM worker_stats_24h
-        {where_clause}
-        GROUP BY worker
-    )
-    SELECT 
+    WITH
+        all_active_workers AS (
+            SELECT DISTINCT worker, pool_label
+            FROM worker_stats_24h
+            {"WHERE " + " AND ".join(where_clauses) if where_clauses else ""}
+        ),
+        
+        stats_5m AS (
+            SELECT
+                worker,
+                pool_label,
+                argMax(miner, ts) as latest_miner,
+                count() as shares,
+                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) * 4294967296 / 300 as hashrate
+            FROM shares
+            WHERE ts > now() - INTERVAL 5 MINUTE {where_clause_sql.replace("w.", "")}
+            GROUP BY worker, pool_label
+        )
+
+    SELECT
         w.worker,
-        w.latest_miner,
         w.pool_label,
-        toUnixTimestamp(w.last_share_ts) as last_share_ts,
-        w.state,
-        ifNull(s5.shares, 0) as shares_5m,
-        ifNull(s5.hashrate, 0) as hashrate_5m,
-        ifNull(s5.share_value, 0) as share_value_5m,
-        ifNull(s60.shares, 0) as shares_60m,
-        ifNull(s60.hashrate, 0) as hashrate_60m,
-        ifNull(s60.share_value, 0) as share_value_60m,
-        ifNull(s24.shares, 0) as shares_24h,
-        ifNull(s24.hashrate, 0) as hashrate_24h,
-        ifNull(s24.share_value, 0) as share_value_24h
-    FROM worker_status w
-    LEFT JOIN stats_5m s5 ON w.worker = s5.worker
-    LEFT JOIN stats_60m s60 ON w.worker = s60.worker
-    LEFT JOIN stats_24h s24 ON w.worker = s24.worker
+        -- Get miner from the most recent source available
+        COALESCE(s5.latest_miner, s60.latest_miner, s24.latest_miner) as latest_miner,
+        
+        -- Get the live state and last share from the fast MV
+        toUnixTimestamp(latest_share_data.last_share_ts) as last_share_ts,
+        CASE
+            WHEN latest_share_data.last_share_ts > now() - INTERVAL 10 MINUTE THEN 'ok'
+            ELSE 'offline'
+        END as state,
+
+        s5.shares as shares_5m,
+        s5.hashrate as hashrate_5m,
+        s5.share_value as share_value_5m,
+
+        s60.shares as shares_60m,
+        s60.hashrate as hashrate_60m,
+        s60.actual_difficulty_sum as share_value_60m,
+
+        s24.shares as shares_24h,
+        s24.hashrate as hashrate_24h,
+        s24.actual_difficulty_sum as share_value_24h
+        
+    FROM all_active_workers AS w
+    LEFT JOIN worker_stats_24h AS s24 ON w.worker = s24.worker AND w.pool_label = s24.pool_label
+    LEFT JOIN worker_stats_60m AS s60 ON w.worker = s60.worker AND w.pool_label = s60.pool_label
+    LEFT JOIN stats_5m AS s5 ON w.worker = s5.worker AND w.pool_label = s5.pool_label
+    LEFT JOIN (
+        SELECT worker, pool_label, max(last_share_ts) as last_share_ts FROM worker_pool_latest_share_mv GROUP BY worker, pool_label
+    ) AS latest_share_data ON w.worker = latest_share_data.worker AND w.pool_label = latest_share_data.pool_label
     ORDER BY w.worker
     """
 
@@ -648,20 +620,19 @@ async def _get_worker_stats(
         workers.append(
             {
                 "worker": row[0],
-                "miner": row[1],
-                "pool_label": row[2],
+                "pool_label": row[1],
+                "miner": row[2],
                 "last_share_ts": row[3],
                 "state": row[4],
-                "shares_5m": row[5],
-                "hashrate_5m": row[6],
-                "share_value_5m": row[7],
-                "shares_60m": row[8],
-                "hashrate_60m": row[9],
-                "share_value_60m": row[10],
-                "shares_24h": row[11],
-                "hashrate_24h": row[12],
-                "share_value_24h": row[13],
+                "shares_5m": row[5] or 0,
+                "hashrate_5m": row[6] or 0,
+                "share_value_5m": row[7] or 0,
+                "shares_60m": row[8] or 0,
+                "hashrate_60m": row[9] or 0,
+                "share_value_60m": row[10] or 0,
+                "shares_24h": row[11] or 0,
+                "hashrate_24h": row[12] or 0,
+                "share_value_24h": row[13] or 0,
             }
         )
-
     return workers

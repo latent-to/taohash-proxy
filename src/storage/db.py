@@ -67,7 +67,7 @@ class StatsDB:
             )
             ENGINE = MergeTree()
             PARTITION BY toYYYYMM(ts)
-            ORDER BY (worker, ts)
+            ORDER BY (ts, worker)
             TTL ts + INTERVAL 2 DAY TO VOLUME 'cold'
             SETTINGS index_granularity = 8192, storage_policy = 'tiered'""",
             # Worker stats materialized view
@@ -193,6 +193,17 @@ class StatsDB:
                 END as state
             FROM shares
             GROUP BY worker""",
+            # Worker's latest contribution 
+            """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_pool_latest_share_mv
+            ENGINE = ReplacingMergeTree()
+            ORDER BY (worker, pool_label)
+            AS
+            SELECT
+                worker,
+                pool_label,
+                max(ts) as last_share_ts
+            FROM shares
+            GROUP BY worker, pool_label""",
         ]
 
     async def _create_tables(self):
