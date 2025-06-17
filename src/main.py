@@ -128,21 +128,26 @@ async def handle_new_miner(
 
     session.db = stats_db
 
-    async with active_sessions_lock:
-        active_sessions.add(session)
-
-    task = asyncio.create_task(session.run())
-
     async def cleanup_session() -> None:
         async with active_sessions_lock:
             active_sessions.discard(session)
         stats_manager.unregister_miner(miner_address)
         logger.info(f"➖ Miner disconnected: {miner_address}")
 
-    def on_task_done(future: Any) -> None:
-        asyncio.create_task(cleanup_session())
+    try:
+        async with active_sessions_lock:
+            active_sessions.add(session)
 
-    task.add_done_callback(on_task_done)
+        task = asyncio.create_task(session.run())
+
+        def on_task_done(future: Any) -> None:
+            asyncio.create_task(cleanup_session())
+
+        task.add_done_callback(on_task_done)
+
+    except Exception:
+        await cleanup_session()
+        raise
 
 
 async def start_reload_api() -> web.TCPSite:
