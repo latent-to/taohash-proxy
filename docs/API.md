@@ -48,6 +48,37 @@ All API endpoints require Bearer token authentication.
 - **Interactive Docs**: `http://your-server:8888/docs`
 - **ReDoc**: `http://your-server:8888/redoc`
 
+## Administrative Endpoints
+
+### Configuration Hot Reload
+Reload the proxy configuration without restarting the service. Updates pool settings from `config.toml` dynamically.
+
+**Endpoint:** `POST /api/reload`  
+**Authentication:** Not required  
+**Port:** 5001 (separate from main API)
+
+**Example:**
+```bash
+curl -X POST http://localhost:5001/api/reload
+```
+
+**Response:**
+```text
+Reload scheduled
+```
+
+**Error Response:**
+```text
+Failed to update config
+```
+
+**Notes:**
+- Runs on separate port (5001) from main API endpoints
+- Existing miner connections will be gracefully closed
+- Miners will automatically reconnect with updated configuration
+
+**Important:** This port is not exposed by default and should not be exposed by any validator. If exposed, this can be a security risk. 
+
 ## Core API Endpoints
 
 ### Health Check
