@@ -37,7 +37,7 @@ docker-compose logs -f
 - **REST API**: Statistics API on port 8888 with bearer token auth
 - **ClickHouse Database**: Time-series storage with automatic data lifecycle
 - **Worker Tracking**: Individual worker performance metrics and share validation
-- **Hot Configuration Reload**: Update pool settings without restarting. This is useful when validators want to change pools without disrupting miner operations.
+- **Hot Configuration Reload**: Update pool settings without restarting. This is useful when validators want to change pools without disrupting miner operations. Check api.md for more details. 
 - **Share Difficulty**: Creates the share header and calculates actual difficulty of the submission. This is used in scoring. 
 
 # Configuration
