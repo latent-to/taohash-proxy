@@ -250,8 +250,9 @@ You can also change the default ports if you wish. Make sure that the pool addre
 
 ### Testing Your Connection
 
-There is a shell script present in this same directory which tests the proxy connection. 
+There is a shell script present in the docker directory directory which tests the proxy connection. 
 After setting up the proxy, you can execute it to make sure ports are listening. 
+Ports are fetched through the `.env` file. 
 
 `chmod +x test_proxy.sh`
 `./test_proxy.sh`
