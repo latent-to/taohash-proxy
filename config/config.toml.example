@@ -11,6 +11,6 @@ pass = "x"
 # High difficulty pool
 [pools.high_diff]
 host = "stratum.braiins.com"
-port = 4334
+port = 3333
 user = "your_username.worker"
 pass = "x"
