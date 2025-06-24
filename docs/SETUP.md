@@ -16,8 +16,8 @@ This guide will walk you through setting up the mining/validator proxy  with all
 ### System Requirements
 - **OS**: Linux or macOS
 - **CPU**: 2+ cores recommended
-- **RAM**: 4GB minimum, 8GB recommended
-- **Storage**: 60GB for local data (2 days retention before S3 archival)
+- **RAM**: 8GB minimum, 12GB recommended
+- **Storage**: 256GB for local data (2 days retention before S3 archival)
 - **Network**: Stable internet connection with open ports
 
 ### Software Requirements
