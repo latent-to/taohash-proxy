@@ -48,7 +48,7 @@ class MinerStats:
     rejected: int = 0
     difficulty: float = 1.0
     pool_difficulty: float = 0.0
-    recent_shares: deque = field(default_factory=lambda: deque)
+    recent_shares: deque = field(default_factory=lambda: deque())
     highest_difficulty: float = 0.0
     last_share_difficulty: float = 0.0
     pool_name: str = "unknown"
