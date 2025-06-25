@@ -48,7 +48,7 @@ class MinerStats:
     rejected: int = 0
     difficulty: float = 1.0
     pool_difficulty: float = 0.0
-    recent_shares: deque = field(default_factory=lambda: deque(maxlen=100))
+    recent_shares: deque = field(default_factory=lambda: deque())
     highest_difficulty: float = 0.0
     last_share_difficulty: float = 0.0
     pool_name: str = "unknown"
@@ -87,6 +87,23 @@ class MinerStats:
         except:
             self.rejected_other += 1
 
+    def _cleanup_old_shares(self) -> None:
+        """
+        Remove shares older than 6 minutes
+        """
+        if not self.recent_shares:
+            return
+            
+        now = time.time()
+        ten_min_ago = now - 600
+        
+        recent = [(t, d) for t, d in self.recent_shares if t > ten_min_ago]
+        
+        if len(self.recent_shares) > len(recent) * 1.25:
+            self.recent_shares.clear()
+            self.recent_shares.extend(recent)
+            logger.debug(f"Cleaned up old shares for {self.ip}: {len(self.recent_shares)} -> {len(recent)}")
+
     def record_share(
         self, accepted: bool, difficulty: float, share_difficulty: float, pool: str, error: Optional[str] = None
     ) -> None:
@@ -110,6 +127,9 @@ class MinerStats:
             logger.debug(
                 f"Rejected share from {self.ip} at difficulty {difficulty} with error {error}"
             )
+
+        if (self.accepted + self.rejected) % 100 == 0:
+            self._cleanup_old_shares()
 
         self.last_share_difficulty = share_difficulty
         if share_difficulty > self.highest_difficulty:
