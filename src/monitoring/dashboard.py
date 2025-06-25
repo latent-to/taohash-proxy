@@ -180,6 +180,7 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
     if stats_db:
         from .analytics_api import create_analytics_routes
 
-        create_analytics_routes(app, stats_db)
+        # Disabled temporarily
+        # create_analytics_routes(app, stats_db)
 
     return app

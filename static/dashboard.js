@@ -183,6 +183,9 @@ async function updateData() {
     // Update shares chart
     updateSharesChart(minerStats);
     
+    // Store data globally for expand/collapse functionality
+    window.lastMinerData = minerStats;
+    
     // Update miners table
     updateMinersTable(minerStats);
     
@@ -281,9 +284,12 @@ function addHashrateDataPoint(data) {
   // Add new label
   hashrateHistory.labels.push(timeString);
   
-  // Aggregate miners for graph display
+  // Filter out inactive miners (only show miners with shares submitted)
+  const activeMiners = data.filter(miner => miner.accepted > 0 || miner.rejected > 0);
+  
+  // Aggregate active miners for graph display
   const aggregatedData = {};
-  data.forEach(miner => {
+  activeMiners.forEach(miner => {
     const label = miner.worker || miner.miner;
     if (aggregatedData[label]) {
       // Sum hashrates for miners with same worker name
@@ -342,114 +348,322 @@ function updateSharesChart(data) {
   shareChart.update();
 }
 
-// Update miners table
+// Global state for tracking expanded groups
+let expandedGroups = new Set();
+
+// Update miners table with grouping
 function updateMinersTable(data) {
   const tbody = document.getElementById('minersTable').querySelector('tbody');
   tbody.innerHTML = '';
   
-  data.forEach(miner => {
-    const row = document.createElement('tr');
+  // Separate active and inactive miners
+  const activeMiners = data.filter(miner => miner.accepted > 0 || miner.rejected > 0);
+  const inactiveMiners = data.filter(miner => miner.accepted === 0 && miner.rejected === 0);
+  
+  // Group active miners by worker name
+  const activeGroups = groupMinersByWorker(activeMiners);
+  const inactiveGroups = groupMinersByWorker(inactiveMiners);
+  
+  // Render active miners
+  renderMinerGroups(tbody, activeGroups, 'active');
+  
+  // Add separator and inactive miners if any exist
+  if (inactiveMiners.length > 0) {
+    addInactiveSeparator(tbody, inactiveMiners.length);
     
-    // Worker/Miner name
-    const nameCell = document.createElement('td');
-    const fullName = miner.worker || miner.miner;
-    nameCell.textContent = truncateMiner(fullName);
-    nameCell.title = fullName; // Show full name on hover
-    row.appendChild(nameCell);
-    
-    // Pool
-    const poolCell = document.createElement('td');
-    poolCell.textContent = miner.pool || 'unknown';
-    row.appendChild(poolCell);
-    
-    // Hashrate
-    const hashrateCell = document.createElement('td');
-    hashrateCell.textContent = formatHashrate(miner.hashrate);
-    row.appendChild(hashrateCell);
-    
-    // Accepted shares
-    const acceptedCell = document.createElement('td');
-    acceptedCell.textContent = miner.accepted;
-    row.appendChild(acceptedCell);
-    
-    // Rejected shares with breakdown on hover
-    const rejectedCell = document.createElement('td');
-    rejectedCell.style.position = 'relative';
-    rejectedCell.style.cursor = 'help';
-    rejectedCell.textContent = miner.rejected;
-    
-    // Add tooltip if there are rejections
-    if (miner.rejected > 0 && miner.rejected_breakdown) {
-      const tooltip = document.createElement('div');
-      tooltip.className = 'rejection-tooltip';
-      tooltip.innerHTML = `
-        <div>Stale: ${miner.rejected_breakdown.stale}</div>
-        <div>Duplicate: ${miner.rejected_breakdown.duplicate}</div>
-        <div>Low Diff: ${miner.rejected_breakdown.low_diff}</div>
-        <div>Other: ${miner.rejected_breakdown.other}</div>
-      `;
-      rejectedCell.appendChild(tooltip);
+    // Only render inactive miners if the section is expanded
+    if (expandedGroups.has('inactive-section')) {
+      renderMinerGroups(tbody, inactiveGroups, 'inactive');
     }
-    
-    row.appendChild(rejectedCell);
-    
-    // Acceptance rate
-    const rateCell = document.createElement('td');
-    const rate = miner.accepted + miner.rejected === 0 ? 
-      100 : (miner.accepted / (miner.accepted + miner.rejected) * 100).toFixed(2);
-    
-    const badge = document.createElement('span');
-    badge.classList.add('badge');
-    badge.classList.add(rate >= 95 ? 'badge-success' : 'badge-danger');
-    badge.textContent = rate + '%';
-    
-    rateCell.appendChild(badge);
-    row.appendChild(rateCell);
-    
-    // Pool requested difficulty
-    const poolDiffCell = document.createElement('td');
-    poolDiffCell.textContent = formatDifficulty(miner.pool_difficulty || 0);
-    poolDiffCell.title = (miner.pool_difficulty || 0).toFixed(2); // Show exact value on hover
-    row.appendChild(poolDiffCell);
-    
-    // Miner difficulty (effective)
-    const difficultyCell = document.createElement('td');
-    difficultyCell.textContent = formatDifficulty(miner.difficulty);
-    difficultyCell.title = miner.difficulty.toFixed(2); // Show exact value on hover
-    row.appendChild(difficultyCell);
-    
-    // Last share difficulty
-    const lastShareCell = document.createElement('td');
-    if (miner.last_share_difficulty > 0) {
-      lastShareCell.textContent = formatDifficulty(miner.last_share_difficulty);
-      lastShareCell.title = miner.last_share_difficulty.toFixed(2); // Show exact value on hover
-      
-      // Highlight if last share was better than pool difficulty
-      if (miner.last_share_difficulty > miner.difficulty * 1.1) {
-        lastShareCell.style.color = 'var(--secondary)';
-        lastShareCell.style.fontWeight = 'bold';
-      }
-    } else {
-      lastShareCell.textContent = '-';
+  }
+}
+
+// Group miners by worker name
+function groupMinersByWorker(miners) {
+  const groups = {};
+  
+  miners.forEach(miner => {
+    const workerName = miner.worker || miner.miner;
+    if (!groups[workerName]) {
+      groups[workerName] = [];
     }
-    row.appendChild(lastShareCell);
-    
-    // Highest difficulty
-    const highestCell = document.createElement('td');
-    if (miner.highest_difficulty > 0) {
-      highestCell.textContent = formatDifficulty(miner.highest_difficulty);
-      highestCell.title = miner.highest_difficulty.toFixed(2); // Show exact value on hover
-      
-      // Always highlight the highest difficulty
-      highestCell.style.color = 'var(--accent)';
-      highestCell.style.fontWeight = 'bold';
-    } else {
-      highestCell.textContent = '-';
-    }
-    row.appendChild(highestCell);
-    
-    tbody.appendChild(row);
+    groups[workerName].push(miner);
   });
+  
+  return groups;
+}
+
+// Render miner groups
+function renderMinerGroups(tbody, groups, type) {
+  Object.entries(groups).forEach(([workerName, miners]) => {
+    if (miners.length === 1) {
+      // Single miner - render normally
+      renderMinerRow(tbody, miners[0]);
+    } else {
+      // Multiple miners with same worker name - render as group
+      renderGroupHeader(tbody, workerName, miners, type);
+      
+      // Render individual miners if group is expanded
+      const groupKey = `${type}-${workerName}`;
+      if (expandedGroups.has(groupKey)) {
+        miners.forEach(miner => {
+          renderMinerRow(tbody, miner, true); // true = isInGroup
+        });
+      }
+    }
+  });
+}
+
+// Render group header row
+function renderGroupHeader(tbody, workerName, miners, type) {
+  const row = document.createElement('tr');
+  row.classList.add('group-header');
+  row.style.backgroundColor = 'var(--taohash-bg-secondary)';
+  row.style.cursor = 'pointer';
+  
+  const groupKey = `${type}-${workerName}`;
+  const isExpanded = expandedGroups.has(groupKey);
+  
+  // Calculate total hashrate for the group
+  const totalHashrate = miners.reduce((sum, miner) => sum + miner.hashrate, 0);
+  const totalAccepted = miners.reduce((sum, miner) => sum + miner.accepted, 0);
+  const totalRejected = miners.reduce((sum, miner) => sum + miner.rejected, 0);
+  
+  // Group name with dropdown arrow and count
+  const nameCell = document.createElement('td');
+  nameCell.innerHTML = `
+    <span style="display: flex; align-items: center; gap: 0.75rem;">
+      <svg style="width: 28px; height: 28px; transition: transform 0.2s ease; color: var(--taohash-accent-primary); flex-shrink: 0;" transform="${isExpanded ? 'rotate(180)' : 'rotate(0)'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6,9 12,15 18,9"></polyline>
+      </svg>
+      <span style="font-weight: 600; font-size: 1rem;">${truncateMiner(workerName)} (${miners.length})</span>
+    </span>
+  `;
+  row.appendChild(nameCell);
+  
+  // Pool column
+  const poolCell = document.createElement('td');
+  poolCell.textContent = '-';
+  poolCell.style.color = 'var(--taohash-text-muted)';
+  row.appendChild(poolCell);
+  
+  // Hashrate column - show total for collapsed groups
+  const hashrateCell = document.createElement('td');
+  if (!isExpanded && totalHashrate > 0) {
+    hashrateCell.textContent = formatHashrate(totalHashrate);
+    hashrateCell.style.color = 'var(--taohash-accent-primary)';
+    hashrateCell.style.fontWeight = 'bold';
+  } else {
+    hashrateCell.textContent = '-';
+    hashrateCell.style.color = 'var(--taohash-text-muted)';
+  }
+  row.appendChild(hashrateCell);
+  
+  // Accepted shares column - show total for collapsed groups
+  const acceptedCell = document.createElement('td');
+  if (!isExpanded && totalAccepted > 0) {
+    acceptedCell.textContent = totalAccepted;
+    acceptedCell.style.color = 'var(--taohash-accent-primary)';
+    acceptedCell.style.fontWeight = 'bold';
+  } else {
+    acceptedCell.textContent = '-';
+    acceptedCell.style.color = 'var(--taohash-text-muted)';
+  }
+  row.appendChild(acceptedCell);
+  
+  // Rejected shares column - show total for collapsed groups
+  const rejectedCell = document.createElement('td');
+  if (!isExpanded && totalRejected > 0) {
+    rejectedCell.textContent = totalRejected;
+    rejectedCell.style.color = 'var(--taohash-accent-primary)';
+    rejectedCell.style.fontWeight = 'bold';
+  } else {
+    rejectedCell.textContent = '-';
+    rejectedCell.style.color = 'var(--taohash-text-muted)';
+  }
+  row.appendChild(rejectedCell);
+  
+  // Add dashes for remaining columns
+  for (let i = 5; i < 10; i++) {
+    const cell = document.createElement('td');
+    cell.textContent = '-';
+    cell.style.color = 'var(--taohash-text-muted)';
+    row.appendChild(cell);
+  }
+  
+  // Add click handler to toggle group
+  row.addEventListener('click', () => {
+    if (expandedGroups.has(groupKey)) {
+      expandedGroups.delete(groupKey);
+    } else {
+      expandedGroups.add(groupKey);
+    }
+    updateMinersTable(window.lastMinerData || []);
+  });
+  
+  tbody.appendChild(row);
+}
+
+// Render individual miner row
+function renderMinerRow(tbody, miner, isInGroup = false) {
+  const row = document.createElement('tr');
+  
+  if (isInGroup) {
+    row.style.backgroundColor = 'var(--taohash-bg-primary)';
+    row.style.borderLeft = '3px solid var(--taohash-accent-primary)';
+  }
+  
+  // Worker/Miner name
+  const nameCell = document.createElement('td');
+  const fullName = miner.worker || miner.miner;
+  nameCell.textContent = isInGroup ? `  ${truncateMiner(fullName)}` : truncateMiner(fullName);
+  nameCell.title = fullName; // Show full name on hover
+  if (isInGroup) {
+    nameCell.style.paddingLeft = '2rem';
+    nameCell.style.fontSize = '0.9rem';
+  }
+  row.appendChild(nameCell);
+  
+  // Pool
+  const poolCell = document.createElement('td');
+  poolCell.textContent = miner.pool || 'unknown';
+  row.appendChild(poolCell);
+  
+  // Hashrate
+  const hashrateCell = document.createElement('td');
+  hashrateCell.textContent = formatHashrate(miner.hashrate);
+  row.appendChild(hashrateCell);
+  
+  // Accepted shares
+  const acceptedCell = document.createElement('td');
+  acceptedCell.textContent = miner.accepted;
+  row.appendChild(acceptedCell);
+  
+  // Rejected shares with breakdown on hover
+  const rejectedCell = document.createElement('td');
+  rejectedCell.style.position = 'relative';
+  rejectedCell.style.cursor = 'help';
+  rejectedCell.textContent = miner.rejected;
+  
+  // Add tooltip if there are rejections
+  if (miner.rejected > 0 && miner.rejected_breakdown) {
+    const tooltip = document.createElement('div');
+    tooltip.className = 'rejection-tooltip';
+    tooltip.innerHTML = `
+      <div>Stale: ${miner.rejected_breakdown.stale}</div>
+      <div>Duplicate: ${miner.rejected_breakdown.duplicate}</div>
+      <div>Low Diff: ${miner.rejected_breakdown.low_diff}</div>
+      <div>Other: ${miner.rejected_breakdown.other}</div>
+    `;
+    rejectedCell.appendChild(tooltip);
+  }
+  
+  row.appendChild(rejectedCell);
+  
+  // Acceptance rate
+  const rateCell = document.createElement('td');
+  const rate = miner.accepted + miner.rejected === 0 ? 
+    100 : (miner.accepted / (miner.accepted + miner.rejected) * 100).toFixed(2);
+  
+  const badge = document.createElement('span');
+  badge.classList.add('badge');
+  badge.classList.add(rate >= 95 ? 'badge-success' : 'badge-danger');
+  badge.textContent = rate + '%';
+  
+  rateCell.appendChild(badge);
+  row.appendChild(rateCell);
+  
+  // Pool requested difficulty
+  const poolDiffCell = document.createElement('td');
+  poolDiffCell.textContent = formatDifficulty(miner.pool_difficulty || 0);
+  poolDiffCell.title = (miner.pool_difficulty || 0).toFixed(2); // Show exact value on hover
+  row.appendChild(poolDiffCell);
+  
+  // Miner difficulty (effective)
+  const difficultyCell = document.createElement('td');
+  difficultyCell.textContent = formatDifficulty(miner.difficulty);
+  difficultyCell.title = miner.difficulty.toFixed(2); // Show exact value on hover
+  row.appendChild(difficultyCell);
+  
+  // Last share difficulty
+  const lastShareCell = document.createElement('td');
+  if (miner.last_share_difficulty > 0) {
+    lastShareCell.textContent = formatDifficulty(miner.last_share_difficulty);
+    lastShareCell.title = miner.last_share_difficulty.toFixed(2); // Show exact value on hover
+    
+    // Highlight if last share was better than pool difficulty
+    if (miner.last_share_difficulty > miner.difficulty * 1.1) {
+      lastShareCell.style.color = 'var(--secondary)';
+      lastShareCell.style.fontWeight = 'bold';
+    }
+  } else {
+    lastShareCell.textContent = '-';
+  }
+  row.appendChild(lastShareCell);
+  
+  // Highest difficulty
+  const highestCell = document.createElement('td');
+  if (miner.highest_difficulty > 0) {
+    highestCell.textContent = formatDifficulty(miner.highest_difficulty);
+    highestCell.title = miner.highest_difficulty.toFixed(2); // Show exact value on hover
+    
+    // Always highlight the highest difficulty
+    highestCell.style.color = 'var(--accent)';
+    highestCell.style.fontWeight = 'bold';
+  } else {
+    highestCell.textContent = '-';
+  }
+  row.appendChild(highestCell);
+  
+  tbody.appendChild(row);
+}
+
+// Add separator row for inactive miners
+function addInactiveSeparator(tbody, inactiveCount) {
+  const separatorRow = document.createElement('tr');
+  separatorRow.style.backgroundColor = 'var(--taohash-border)';
+  separatorRow.style.height = '2px';
+  
+  const separatorCell = document.createElement('td');
+  separatorCell.colSpan = 10;
+  separatorCell.style.padding = '0';
+  separatorRow.appendChild(separatorCell);
+  
+  tbody.appendChild(separatorRow);
+  
+  // Add inactive miners header with collapse/expand functionality
+  const headerRow = document.createElement('tr');
+  headerRow.style.backgroundColor = 'var(--taohash-bg-secondary)';
+  headerRow.style.cursor = 'pointer';
+  
+  const isExpanded = expandedGroups.has('inactive-section');
+  
+  const headerCell = document.createElement('td');
+  headerCell.colSpan = 10;
+  headerCell.style.textAlign = 'center';
+  headerCell.style.fontWeight = 'bold';
+  headerCell.style.color = 'var(--taohash-text-muted)';
+  headerCell.innerHTML = `
+    <span style="display: flex; align-items: center; justify-content: center; gap: 0.75rem;">
+      <svg style="width: 28px; height: 28px; transition: transform 0.2s ease; color: var(--taohash-accent-primary); flex-shrink: 0;" transform="${isExpanded ? 'rotate(180)' : 'rotate(0)'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6,9 12,15 18,9"></polyline>
+      </svg>
+      <span style="font-weight: 600;">Inactive Miners (Connected but no shares) - ${inactiveCount} miners</span>
+    </span>
+  `;
+  headerRow.appendChild(headerCell);
+  
+  // Add click handler to toggle inactive section
+  headerRow.addEventListener('click', () => {
+    if (expandedGroups.has('inactive-section')) {
+      expandedGroups.delete('inactive-section');
+    } else {
+      expandedGroups.add('inactive-section');
+    }
+    updateMinersTable(window.lastMinerData || []);
+  });
+  
+  tbody.appendChild(headerRow);
 }
 
 // Helper function to format hashrate
