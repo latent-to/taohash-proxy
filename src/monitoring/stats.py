@@ -48,7 +48,7 @@ class MinerStats:
     rejected: int = 0
     difficulty: float = 1.0
     pool_difficulty: float = 0.0
-    recent_shares: deque = field(default_factory=lambda: deque(maxlen=100))
+    recent_shares: deque = field(default_factory=lambda: deque)
     highest_difficulty: float = 0.0
     last_share_difficulty: float = 0.0
     pool_name: str = "unknown"
@@ -150,6 +150,11 @@ class MinerStats:
         
         if len(recent) < 10:
             return 0.0
+        
+        if len(self.recent_shares) > len(recent) * 1.33:
+            logger.info(f"{self.ip} recent shares: {len(self.recent_shares)} > recent: {len(recent)}")
+            self.recent_shares.clear()
+            self.recent_shares.extend(recent)
             
         time_span = 300.0
         total_hashes = sum(diff * (2**32) for _, diff in recent)
