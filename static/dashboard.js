@@ -432,9 +432,11 @@ function renderGroupHeader(tbody, workerName, miners, type) {
   // Group name with dropdown arrow and count
   const nameCell = document.createElement('td');
   nameCell.innerHTML = `
-    <span style="display: flex; align-items: center; gap: 0.5rem;">
-      <span style="font-size: 0.8rem;">${isExpanded ? '🔼' : '🔽'}</span>
-      <span>${truncateMiner(workerName)} (${miners.length})</span>
+    <span style="display: flex; align-items: center; gap: 0.75rem;">
+      <svg style="width: 28px; height: 28px; transition: transform 0.2s ease; color: var(--taohash-accent-primary); flex-shrink: 0;" transform="${isExpanded ? 'rotate(180)' : 'rotate(0)'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6,9 12,15 18,9"></polyline>
+      </svg>
+      <span style="font-weight: 600; font-size: 1rem;">${truncateMiner(workerName)} (${miners.length})</span>
     </span>
   `;
   row.appendChild(nameCell);
@@ -642,9 +644,11 @@ function addInactiveSeparator(tbody, inactiveCount) {
   headerCell.style.fontWeight = 'bold';
   headerCell.style.color = 'var(--taohash-text-muted)';
   headerCell.innerHTML = `
-    <span style="display: flex; align-items: center; justify-content: center; gap: 0.5rem;">
-      <span style="font-size: 0.8rem;">${isExpanded ? '🔼' : '🔽'}</span>
-      <span>Inactive Miners (Connected but no shares) - ${inactiveCount} miners</span>
+    <span style="display: flex; align-items: center; justify-content: center; gap: 0.75rem;">
+      <svg style="width: 28px; height: 28px; transition: transform 0.2s ease; color: var(--taohash-accent-primary); flex-shrink: 0;" transform="${isExpanded ? 'rotate(180)' : 'rotate(0)'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6,9 12,15 18,9"></polyline>
+      </svg>
+      <span style="font-weight: 600;">Inactive Miners (Connected but no shares) - ${inactiveCount} miners</span>
     </span>
   `;
   headerRow.appendChild(headerCell);
