@@ -87,6 +87,23 @@ class MinerStats:
         except:
             self.rejected_other += 1
 
+    def _cleanup_old_shares(self) -> None:
+        """
+        Remove shares older than 6 minutes
+        """
+        if not self.recent_shares:
+            return
+            
+        now = time.time()
+        ten_min_ago = now - 600
+        
+        recent = [(t, d) for t, d in self.recent_shares if t > ten_min_ago]
+        
+        if len(self.recent_shares) > len(recent) * 1.25:
+            self.recent_shares.clear()
+            self.recent_shares.extend(recent)
+            logger.debug(f"Cleaned up old shares for {self.ip}: {len(self.recent_shares)} -> {len(recent)}")
+
     def record_share(
         self, accepted: bool, difficulty: float, share_difficulty: float, pool: str, error: Optional[str] = None
     ) -> None:
@@ -110,6 +127,9 @@ class MinerStats:
             logger.debug(
                 f"Rejected share from {self.ip} at difficulty {difficulty} with error {error}"
             )
+
+        if (self.accepted + self.rejected) % 100 == 0:
+            self._cleanup_old_shares()
 
         self.last_share_difficulty = share_difficulty
         if share_difficulty > self.highest_difficulty:
@@ -150,10 +170,6 @@ class MinerStats:
         
         if len(recent) < 10:
             return 0.0
-        
-        if len(self.recent_shares) > len(recent) * 1.33:
-            self.recent_shares.clear()
-            self.recent_shares.extend(recent)
             
         time_span = 300.0
         total_hashes = sum(diff * (2**32) for _, diff in recent)
