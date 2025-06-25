@@ -152,7 +152,6 @@ class MinerStats:
             return 0.0
         
         if len(self.recent_shares) > len(recent) * 1.33:
-            logger.info(f"{self.ip} recent shares: {len(self.recent_shares)} > recent: {len(recent)}")
             self.recent_shares.clear()
             self.recent_shares.extend(recent)
             
