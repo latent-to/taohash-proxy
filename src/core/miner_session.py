@@ -721,19 +721,22 @@ class MinerSession:
 
             # Insert receipt to ClickHouse
             if accepted and self.db:
-                try:
-                    await self.db.insert_share(
-                        miner=self.miner_id,
-                        worker=pending_data["worker"],
-                        pool=f"{self.pool_host}:{self.pool_port}",
-                        pool_difficulty=pending_data["pool_difficulty"],
-                        actual_difficulty=pending_data["actual_difficulty"],
-                        block_hash=pending_data.get("block_hash", ""),
-                        pool_requested_difficulty=pending_data.get("pool_requested_difficulty"),
-                        pool_label=self.pool_label,
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to insert share: {e}")
+                async def _insert():
+                    try:
+                        await self.db.insert_share(
+                            miner=self.miner_id,
+                            worker=pending_data["worker"],
+                            pool=f"{self.pool_host}:{self.pool_port}",
+                            pool_difficulty=pending_data["pool_difficulty"],
+                            actual_difficulty=pending_data["actual_difficulty"],
+                            block_hash=pending_data.get("block_hash", ""),
+                            pool_requested_difficulty=pending_data.get("pool_requested_difficulty"),
+                            pool_label=self.pool_label,
+                        )
+                    except Exception as e:
+                        logger.error(f"[{self.miner_id}] Failed to insert share: {e}")
+                
+                asyncio.create_task(_insert())
 
             self.stats.record_share(
                 accepted=accepted,
