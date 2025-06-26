@@ -265,7 +265,6 @@ class StatsDB:
             kwargs.get("pool_requested_difficulty", 0.0),
             kwargs.get("pool_label", "unknown"),
         ]
-        logger.warning("Inserting share")
         await self.queue.put(row)
 
     async def close(self):
