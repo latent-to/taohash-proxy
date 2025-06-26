@@ -1,4 +1,7 @@
+import asyncio
 import os
+import time
+from typing import Optional
 
 import clickhouse_connect
 
@@ -21,6 +24,13 @@ class StatsDB:
         self.password = os.environ.get("CLICKHOUSE_PASSWORD", "taohash123")
         self.required = os.environ.get("CLICKHOUSE_REQUIRED", "false").lower() == "true"
 
+        self.BATCH_SIZE = 1000
+        self.FLUSH_INTERVAL = 10
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=100_000)
+
+        self._writer_task: Optional[asyncio.Task] = None
+        self._stop_event: asyncio.Event = asyncio.Event()
+
     async def init(self):
         """Initialize connection to ClickHouse."""
         logger.info(f"Initializing ClickHouse connection to {self.host}:{self.port}")
@@ -41,6 +51,7 @@ class StatsDB:
             logger.info(f"Connected to ClickHouse server version: {version}")
 
             await self._create_tables()
+            self._writer_task = asyncio.create_task(self._writer_loop())
 
             return True
         except Exception as e:
@@ -193,7 +204,7 @@ class StatsDB:
                 END as state
             FROM shares
             GROUP BY worker""",
-            # Worker's latest contribution 
+            # Worker's latest contribution
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_pool_latest_share_mv
             ENGINE = ReplacingMergeTree()
             ORDER BY (worker, pool_label)
@@ -244,27 +255,76 @@ class StatsDB:
         if not self.client:
             return
 
+        row = [
+            miner,
+            worker,
+            pool,
+            pool_difficulty,
+            actual_difficulty,
+            block_hash[::-1] if block_hash else "",  # reversed block hash
+            kwargs.get("pool_requested_difficulty", 0.0),
+            kwargs.get("pool_label", "unknown"),
+        ]
+        logger.warning("Inserting share")
+        await self.queue.put(row)
+
+    async def close(self):
+        """Flush remaining data, stop writer task, close ClickHouse client."""
+        self._stop_event.set()
+
+        if self._writer_task:
+            await self._writer_task
+
+        if self.client:
+            await self.client.close()
+            logger.info("ClickHouse connection closed")
+
+    async def _writer_loop(self) -> None:
+        """
+        For batching and inserting.
+        """
+        batch: list[list] = []
+        next_flush_at = time.time() + self.FLUSH_INTERVAL
+        logger.warning("Writer loop started")
+
+        while not self._stop_event.is_set():
+            timeout = max(0, next_flush_at - time.time())
+            try:
+                row = await asyncio.wait_for(self.queue.get(), timeout)
+                batch.append(row)
+
+                # Flush on size limit
+                if len(batch) >= self.BATCH_SIZE:
+                    await self._flush(batch)
+                    batch.clear()
+                    next_flush_at = time.time() + self.FLUSH_INTERVAL
+            except asyncio.TimeoutError:
+                # Flush on interval
+                if batch:
+                    await self._flush(batch)
+                    batch.clear()
+                next_flush_at = time.time() + self.FLUSH_INTERVAL
+
+        # Final drain when stop signal received
+        while not self.queue.empty():
+            batch.append(self.queue.get_nowait())
+            if len(batch) >= self.BATCH_SIZE:
+                await self._flush(batch)
+                batch.clear()
+        if batch:
+            await self._flush(batch)
+
+    async def _flush(self, rows: list[list]) -> None:
+        """
+        Flush batched shares to ClickHouse.
+        """
+        if not self.client:
+            logger.error("ClickHouse client is not initialised")
+            return
         try:
-            block_hash_reversed = block_hash[::-1] if block_hash else ""
-            pool_requested_diff = kwargs.get("pool_requested_difficulty", 0)
-            pool_label = kwargs.get("pool_label", "unknown")
-
-            data = [
-                [
-                    miner,
-                    worker,
-                    pool,
-                    pool_difficulty,
-                    actual_difficulty,
-                    block_hash_reversed,
-                    pool_requested_diff,
-                    pool_label,
-                ]
-            ]
-
             await self.client.insert(
                 "shares",
-                data,
+                rows,
                 column_names=[
                     "miner",
                     "worker",
@@ -276,17 +336,10 @@ class StatsDB:
                     "pool_label",
                 ],
             )
-
+            logger.info("Flushed %d shares to ClickHouse", len(rows))
         except Exception as e:
-            logger.error(f"Error inserting share: {e}")
+            logger.error("Batch insert failed: %s", e)
+            with open("failed_shares.log", "a") as f:
+                f.write(repr(rows) + "\n")
             if self.required:
                 raise
-
-    async def close(self):
-        """Close the database connection."""
-        if self.client:
-            try:
-                await self.client.close()
-            finally:
-                self.client = None
-                logger.info("ClickHouse connection closed")
