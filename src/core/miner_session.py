@@ -69,7 +69,7 @@ class MinerSession:
         self.pool_session: Optional[PoolSession] = None
         self.pending_calls: dict[int, Any] = {}
 
-        self.jobs = JobQueue(max_size=10)  # FIFO queue with max 10 jobs
+        self.jobs = JobQueue(max_size=25)  # FIFO queue with max 25 jobs
         self.db = None
 
         self.state_machine = MinerStateMachine(self.miner_id)
@@ -100,9 +100,9 @@ class MinerSession:
         pending_requests = []
 
         start_time = time.time()
-        while time.time() - start_time < 1:
+        while time.time() - start_time < 10:
             try:
-                line = await asyncio.wait_for(self.miner_reader.readline(), 0.1)
+                line = await asyncio.wait_for(self.miner_reader.readline(), 5)
                 if not line:
                     break
 
