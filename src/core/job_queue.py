@@ -14,7 +14,7 @@ class JobQueue:
     while preventing memory growth.
     """
 
-    def __init__(self, max_size: int = 10):
+    def __init__(self, max_size: int = 25):
         """
         Initialize job queue.
 

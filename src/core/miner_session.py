@@ -69,7 +69,7 @@ class MinerSession:
         self.pool_session: Optional[PoolSession] = None
         self.pending_calls: dict[int, Any] = {}
 
-        self.jobs = JobQueue(max_size=10)  # FIFO queue with max 10 jobs
+        self.jobs = JobQueue(max_size=25)  # FIFO queue with max 25 jobs
         self.db = None
 
         self.state_machine = MinerStateMachine(self.miner_id)
@@ -84,6 +84,7 @@ class MinerSession:
         }
 
         self._initial_pending_requests = []
+        self.pending_configure = None
 
         logger.info(f"[{self.miner_id}] Miner session initialized")
 
@@ -99,9 +100,9 @@ class MinerSession:
         pending_requests = []
 
         start_time = time.time()
-        while time.time() - start_time < 1:
+        while time.time() - start_time < 10:
             try:
-                line = await asyncio.wait_for(self.miner_reader.readline(), 0.1)
+                line = await asyncio.wait_for(self.miner_reader.readline(), 5)
                 if not line:
                     break
 
@@ -119,7 +120,8 @@ class MinerSession:
                     )
 
                     if method == "mining.configure":
-                        await self._handle_configure(request, req_id)
+                        self.pending_configure = request
+
                     elif method == "mining.suggest_difficulty":
                         await self._handle_suggest_difficulty(request, req_id)
                     else:
@@ -173,7 +175,8 @@ class MinerSession:
         """
         try:
             self.pool_session = await PoolSession.connect(
-                self.pool_host, self.pool_port, self.pool_user, self.pool_pass
+                self.pool_host, self.pool_port, self.pool_user, self.pool_pass,
+                configure_request=self.pending_configure
             )
 
             # Pool session data
@@ -183,6 +186,22 @@ class MinerSession:
 
             await self._process_pool_init_messages()
             logger.info(f"[{self.miner_id}] Pool connection established")
+            
+            if self.pending_configure:
+                logger.debug(f"[{self.miner_id}] Pending configure request: {self.pending_configure}")
+                if self.pool_session and self.pool_session.configure_response is not None:
+                    response = {
+                        "id": self.pending_configure.get("id"),
+                        "result": self.pool_session.configure_response,
+                        "error": None
+                    }
+                    await self._send_to_miner(response)
+                    logger.debug(f"[{self.miner_id}] Sent configure response to miner: {response}")
+                else:
+                    logger.debug(f"[{self.miner_id}] No configure response from pool")
+            else:
+                logger.debug(f"[{self.miner_id}] No pending configure request")
+            
             await self._process_pending_miner_requests()
 
         except Exception as e:
@@ -315,7 +334,7 @@ class MinerSession:
         log_stratum_message(logger, message, prefix=f"[{self.miner_id}] From miner")
         
         # Support for ASIC boost miners
-        if method in ["mining.configure", "mining.extranonce.subscribe"]:
+        if method in ["mining.extranonce.subscribe"]:
             handler = handlers.get(method)
             if handler:
                 await handler(message, msg_id)
@@ -733,7 +752,8 @@ class MinerSession:
                         pool_label=self.pool_label,
                     )
                 except Exception as e:
-                    logger.error(f"Failed to insert share: {e}")
+                    logger.error(f"[{self.miner_id}] Failed to insert share: {e}")
+            
 
             self.stats.record_share(
                 accepted=accepted,
@@ -772,28 +792,27 @@ class MinerSession:
 
     async def _handle_configure(self, message: dict[str, Any], msg_id: Any):
         """Handle mining.configure (version rolling)."""
-        params = message.get("params", [])
-        extensions = params[0] if len(params) > 0 else []
-        extension_params = params[1] if len(params) > 1 else {}
+        if self.pool_session:
+            if self.pool_session.configure_response is not None:
+                await self._send_to_miner({
+                    "id": msg_id,
+                    "result": self.pool_session.configure_response,
+                    "error": None,
+                })
+                logger.debug(
+                    f"[{self.miner_id}] Returned cached configure response to miner"
+                )
+            else:
+                logger.debug(
+                    f"[{self.miner_id}] Forwarding late mining.configure to pool"
+                )
+                await self._send_to_pool(message)
+            return
 
-        logger.debug(f"[{self.miner_id}] Responding to mining.configure: {extensions}")
-
-        result = {}
-
-        # Check if version-rolling is requested
-        if (
-            "version-rolling" in extensions
-            and "version-rolling.mask" in extension_params
-        ):
-            requested_mask = extension_params.get("version-rolling.mask", "00000000")
-            # Support full version rolling mask
-            result["version-rolling"] = True
-            result["version-rolling.mask"] = requested_mask
-            logger.info(
-                f"[{self.miner_id}] Version rolling enabled with mask: {requested_mask}"
-            )
-
-        await self._send_to_miner({"id": msg_id, "result": result, "error": None})
+        self.pending_configure = message
+        logger.debug(
+            f"[{self.miner_id}] Stored configure request until pool connection ready"
+        )
 
     async def _handle_suggest_difficulty(self, message: dict[str, Any], msg_id: Any):
         """Handle difficulty suggestion from miner."""
@@ -816,11 +835,23 @@ class MinerSession:
                     )
 
                     message["params"][0] = effective
+                if self.pool_session:
                     await self._send_to_pool(message)
                 else:
-                    await self._send_to_pool(message)
+                    # Pool session to be established
+                    self._initial_pending_requests.append(message)
             except (ValueError, TypeError):
+                # Miner sends invalid msg (saw it sometimes)
+                if self.pool_session:
+                    await self._send_to_pool(message)
+                else:
+                    self._initial_pending_requests.append(message)
+        else:
+            # Miner sends an empty message
+            if self.pool_session:
                 await self._send_to_pool(message)
+            else:
+                self._initial_pending_requests.append(message)
 
     async def _send_to_miner(self, message: dict[str, Any]):
         """Send message to miner."""
