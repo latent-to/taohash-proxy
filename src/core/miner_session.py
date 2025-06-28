@@ -470,11 +470,9 @@ class MinerSession:
         await self._send_to_miner(
             {"id": None, "method": "mining.set_difficulty", "params": [effective_diff]}
         )
-        logger.info(f"[{self.miner_id}] Sent initial difficulty: {effective_diff}")
 
         if self.pool_init_data["initial_job"]:
             await self._send_to_miner(self.pool_init_data["initial_job"])
-            logger.info(f"[{self.miner_id}] Sent initial job: {self.pool_init_data['initial_job']['params'][0] if self.pool_init_data['initial_job'].get('params') else 'unknown'}")
             await self.state_machine.transition_to(MinerState.ACTIVE)
         else:
             logger.debug(f"[{self.miner_id}] Waiting for initial job from pool")
