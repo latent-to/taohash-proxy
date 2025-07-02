@@ -85,24 +85,46 @@ class MinerSession:
 
         self._initial_pending_requests = []
         self.pending_configure = None
+        self.pool_connecting = False
+        self.pool_connect_task = None
 
         logger.info(f"[{self.miner_id}] Miner session initialized")
 
     async def _handle_initial_miner_requests(self):
         """
         Collect early miner requests before pool connection.
-
-        Some miners send configure/subscribe immediately on connect.
-        Stores these for processing after pool handshake.
+        
+        Waits for mining.authorize as the signal for complete handshake,
+        then waits additional time for any trailing messages.
         """
         logger.debug(f"[{self.miner_id}] Handling initial miner requests")
 
         pending_requests = []
-
+        has_authorize = False
+        authorize_time = None
+        
+        AUTHORIZE_TIMEOUT = 1
+        POST_AUTHORIZE_WAIT = 0.2
+        
         start_time = time.time()
-        while time.time() - start_time < 1:
+        
+        while True:
+            current_time = time.time()
+            elapsed = current_time - start_time
+            
+            if not has_authorize:
+                if elapsed > AUTHORIZE_TIMEOUT:
+                    logger.warning(f"[{self.miner_id}] No authorize after {AUTHORIZE_TIMEOUT}s, proceeding anyway")
+                    break
+                timeout = 0.2
+            else:
+                if current_time - authorize_time > POST_AUTHORIZE_WAIT:
+                    logger.debug(f"[{self.miner_id}] Post-authorize wait complete")
+                    break
+                timeout = 0.1
+            
             try:
-                line = await asyncio.wait_for(self.miner_reader.readline(), 0.2)
+                line = await asyncio.wait_for(self.miner_reader.readline(), timeout)
                 if not line:
                     break
 
@@ -121,9 +143,22 @@ class MinerSession:
 
                     if method == "mining.configure":
                         self.pending_configure = request
+                        logger.info(f"[{self.miner_id}] Got configure request at {elapsed:.3f}s")
+                        
+                        if not self.pool_connecting:
+                            self.pool_connecting = True
+                            self.pool_connect_task = asyncio.create_task(self._connect_to_pool())
+                            logger.debug(f"[{self.miner_id}] Started early pool connection")
 
                     elif method == "mining.suggest_difficulty":
                         await self._handle_suggest_difficulty(request, req_id)
+                        
+                    elif method == "mining.authorize":
+                        has_authorize = True
+                        authorize_time = current_time
+                        pending_requests.append(request)
+                        logger.debug(f"[{self.miner_id}] Got authorize at {elapsed:.3f}s, waiting {POST_AUTHORIZE_WAIT}s more")
+                        
                     else:
                         pending_requests.append(request)
 
@@ -131,13 +166,19 @@ class MinerSession:
                     logger.warning(f"[{self.miner_id}] Invalid JSON in initial request")
 
             except asyncio.TimeoutError:
-                break
+                continue
 
         self._initial_pending_requests = pending_requests
 
+        total_time = time.time() - start_time
         logger.info(
-            f"[{self.miner_id}] Collected {len(pending_requests)} pending requests"
+            f"[{self.miner_id}] Collected {len(pending_requests)} pending requests in {total_time:.3f}s"
         )
+        
+        if not self.pool_connecting:
+            self.pool_connecting = True
+            self.pool_connect_task = asyncio.create_task(self._connect_to_pool())
+            logger.debug(f"[{self.miner_id}] No configure received, starting pool connection")
 
     async def run(self):
         """
@@ -148,7 +189,11 @@ class MinerSession:
         """
         try:
             await self._handle_initial_miner_requests()
-            await self._connect_to_pool()
+            
+            if self.pool_connect_task:
+                await self.pool_connect_task
+            else:
+                await self._connect_to_pool()
 
             miner_task = asyncio.create_task(self._handle_miner_messages())
             pool_task = asyncio.create_task(self._handle_pool_messages())
