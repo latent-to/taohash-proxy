@@ -103,7 +103,7 @@ class MinerSession:
         has_authorize = False
         authorize_time = None
         
-        AUTHORIZE_TIMEOUT = 1
+        AUTHORIZE_TIMEOUT = 0.3
         POST_AUTHORIZE_WAIT = 0.2
         
         start_time = time.time()
@@ -204,6 +204,12 @@ class MinerSession:
 
             for task in pending:
                 task.cancel()
+            
+            for task in pending:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         except Exception as e:
             logger.error(f"[{self.miner_id}] Session error: {e}")
