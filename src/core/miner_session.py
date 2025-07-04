@@ -814,6 +814,22 @@ class MinerSession:
                 error=json.dumps(error) if error else None,
             )
 
+            # Poor acceptance rate
+            total_shares = self.stats.accepted + self.stats.rejected
+            if total_shares > 0 and total_shares % 1000 == 0:
+                acceptance_rate = (self.stats.accepted / total_shares) * 100
+                
+                if acceptance_rate < 30:
+                    logger.warning(
+                        f"[{self.miner_id}] {pending_data.get('worker', 'unknown')} - "
+                        f"Disconnecting: {acceptance_rate:.1f}% acceptance rate "
+                        f"({self.stats.accepted}/{total_shares} accepted)"
+                    )
+                    
+                    await self._send_to_miner(message)
+                    self.miner_writer.close()
+                    return
+
             self.stats.last_share_difficulty = pending_data["actual_difficulty"]
             worker_name = pending_data.get("worker", "unknown")
             
