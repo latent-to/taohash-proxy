@@ -816,7 +816,7 @@ class MinerSession:
 
             # Poor acceptance rate
             total_shares = self.stats.accepted + self.stats.rejected
-            if total_shares > 0 and total_shares % 1000 == 0:
+            if total_shares > 0 and total_shares % 250 == 0:
                 acceptance_rate = (self.stats.accepted / total_shares) * 100
                 
                 if acceptance_rate < 30:
