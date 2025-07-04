@@ -103,7 +103,7 @@ class MinerSession:
         has_authorize = False
         authorize_time = None
         
-        AUTHORIZE_TIMEOUT = 0.4
+        AUTHORIZE_TIMEOUT = 0.7
         POST_AUTHORIZE_WAIT = 0.2
         
         start_time = time.time()
