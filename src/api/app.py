@@ -6,13 +6,16 @@ Provides RESTful endpoints for querying mining pool and worker statistics.
 
 import os
 import time
+import json
+import aiosqlite
 from typing import Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -39,7 +42,13 @@ API_TOKENS = set(
     if token.strip()
 )
 
+REWARDS_POST_TOKEN = os.environ.get("REWARDS_POST_TOKEN", "")
+
 db: Optional[StatsDB] = None
+
+HISTORICAL_DB_PATH = os.environ.get(
+    "HISTORICAL_DB_PATH", "/data/historical/share_values.db"
+)
 
 
 @asynccontextmanager
@@ -51,6 +60,30 @@ async def lifespan(app: FastAPI):
         logger.info("API connected to ClickHouse successfully")
     else:
         logger.warning("API running without database connection")
+
+    try:
+        os.makedirs(os.path.dirname(HISTORICAL_DB_PATH), exist_ok=True)
+        async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_snapshots (
+                    date TEXT PRIMARY KEY,
+                    data JSON,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS daily_rewards (
+                    date TEXT PRIMARY KEY,
+                    amount REAL NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            await conn.commit()
+        logger.info(f"Historical database initialized at {HISTORICAL_DB_PATH}")
+    except Exception as e:
+        logger.error(f"Failed to initialize historical database: {e}")
 
     yield
 
@@ -91,6 +124,16 @@ async def verify_token(
     token = credentials.credentials
     if not API_TOKENS or token not in API_TOKENS:
         raise HTTPException(status_code=403, detail="Invalid API token")
+    return token
+
+
+async def verify_rewards_token(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+) -> str:
+    """Verify rewards POST token."""
+    token = credentials.credentials
+    if not REWARDS_POST_TOKEN or token != REWARDS_POST_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid rewards token")
     return token
 
 
@@ -636,3 +679,167 @@ async def _get_worker_stats(
             }
         )
     return workers
+
+
+@app.get(
+    "/api/workers/share-value/{date}",
+    response_model=WorkersTimerangeResponse,
+    tags=["Historical Data"],
+)
+@limiter.limit("60/minute")
+async def get_workers_share_value(
+    request: Request,
+    date: str,  # Format: YYYY-MM-DD
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get worker share values for a specific UTC date.
+
+    Args:
+        date: Date in YYYY-MM-DD format
+
+    Returns:
+        - Today: Live data from ClickHouse
+        - Historical: Snapshot data from SQLite
+
+    The response format is identical to /api/workers/timerange
+    """
+    try:
+        requested_date = datetime.strptime(date, "%Y-%m-%d").date()
+        today_utc = datetime.now(timezone.utc).date()
+
+        if requested_date == today_utc:
+            start_dt = datetime.combine(
+                requested_date, datetime.min.time(), timezone.utc
+            )
+            end_dt = datetime.now(timezone.utc)
+
+            start_time = int(start_dt.timestamp())
+            end_time = int(end_dt.timestamp())
+
+            return await get_workers_timerange(request, start_time, end_time, token)
+
+        if requested_date > today_utc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot query future dates. Today is {today_utc}",
+            )
+
+        try:
+            async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
+                cursor = await conn.execute(
+                    "SELECT data FROM daily_snapshots WHERE date = ?", (date,)
+                )
+                row = await cursor.fetchone()
+
+                if row:
+                    return json.loads(row[0])
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"No data available for {date}. Data may not have been collected yet.",
+                    )
+        except json.JSONDecodeError:
+            logger.error(f"Invalid JSON data stored for date {date}")
+            raise HTTPException(
+                status_code=500, detail="Corrupted data for requested date"
+            )
+        except aiosqlite.Error as e:
+            logger.error(f"Database error when fetching data for {date}: {e}")
+            raise HTTPException(status_code=500, detail="Database error")
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
+        )
+
+
+class RewardRequest(BaseModel):
+    amount: float
+
+
+@app.post("/api/rewards/{date}", tags=["Rewards"])
+@limiter.limit("60/minute")
+async def set_daily_reward(
+    request: Request,
+    date: str,  # Format: YYYY-MM-DD
+    reward_data: RewardRequest,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Set or update the daily reward amount for a specific date.
+
+    Args:
+        date: Date in YYYY-MM-DD format
+        amount: Reward amount as a float
+    """
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+
+        if reward_data.amount < 0:
+            raise HTTPException(status_code=400, detail="Amount must be positive")
+
+        try:
+            async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
+                await conn.execute(
+                    """
+                    INSERT OR REPLACE INTO daily_rewards (date, amount, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                """,
+                    (date, reward_data.amount),
+                )
+
+                await conn.commit()
+
+                return {
+                    "success": True,
+                    "date": date,
+                    "amount": reward_data.amount,
+                    "message": "Reward amount updated successfully",
+                }
+
+        except aiosqlite.Error as e:
+            logger.error(f"Database error when setting reward for {date}: {e}")
+            raise HTTPException(status_code=500, detail="Database error")
+
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
+        )
+
+
+@app.get("/api/rewards", tags=["Rewards"])
+@limiter.limit("60/minute")
+async def get_all_rewards(
+    request: Request,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get all daily reward records.
+
+    Returns:
+        Dictionary with date as key and reward info as value
+    """
+    try:
+        async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
+            cursor = await conn.execute("""
+                SELECT date, amount, created_at, updated_at
+                FROM daily_rewards
+                ORDER BY date DESC
+            """)
+
+            rows = await cursor.fetchall()
+
+            rewards = {}
+            for row in rows:
+                rewards[row[0]] = {
+                    "amount": row[1],
+                    "created_at": row[2],
+                    "updated_at": row[3],
+                }
+
+            return {"success": True, "total_records": len(rewards), "rewards": rewards}
+
+    except aiosqlite.Error as e:
+        logger.error(f"Database error when fetching rewards: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
