@@ -61,31 +61,64 @@ class StatsDB:
         """Run schema migrations for existing tables."""
         logger.info("Running schema migrations...")
 
+        await self.client.command("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version Int32,
+                description String,
+                applied_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY version
+        """)
+
+        result = await self.client.query("SELECT version FROM schema_migrations")
+        applied_versions = {row[0] for row in result.result_rows}
+
         migrations = [
-
-            "ALTER TABLE shares MODIFY COLUMN pool LowCardinality(String)",
-            "ALTER TABLE shares MODIFY COLUMN pool_label LowCardinality(String) DEFAULT 'unknown'",
-
-            "DROP VIEW IF EXISTS worker_stats_5m",
-            "DROP VIEW IF EXISTS worker_stats_60m",
-            "DROP VIEW IF EXISTS worker_stats_24h",
-            "DROP VIEW IF EXISTS pool_stats_5m",
-            "DROP VIEW IF EXISTS pool_stats_60m",
-            "DROP VIEW IF EXISTS pool_stats_24h",
-            "DROP VIEW IF EXISTS worker_state",
-
-            "DROP VIEW IF EXISTS worker_stats_mv",
-            "DROP VIEW IF EXISTS pool_stats_mv",
+            (
+                1,
+                "ALTER TABLE shares MODIFY COLUMN pool LowCardinality(String)",
+                "Modify pool column to LowCardinality",
+            ),
+            (
+                2,
+                "ALTER TABLE shares MODIFY COLUMN pool_label LowCardinality(String) DEFAULT 'unknown'",
+                "Modify pool_label column to LowCardinality",
+            ),
+            (3, "DROP VIEW IF EXISTS worker_stats_5m", "Drop worker_stats_5m view"),
+            (4, "DROP VIEW IF EXISTS worker_stats_60m", "Drop worker_stats_60m view"),
+            (5, "DROP VIEW IF EXISTS worker_stats_24h", "Drop worker_stats_24h view"),
+            (6, "DROP VIEW IF EXISTS pool_stats_5m", "Drop pool_stats_5m view"),
+            (7, "DROP VIEW IF EXISTS pool_stats_60m", "Drop pool_stats_60m view"),
+            (8, "DROP VIEW IF EXISTS pool_stats_24h", "Drop pool_stats_24h view"),
+            (9, "DROP VIEW IF EXISTS worker_state", "Drop worker_state view"),
+            (
+                10,
+                "DROP VIEW IF EXISTS worker_stats_mv",
+                "Drop worker_stats_mv materialized view",
+            ),
+            (
+                11,
+                "DROP VIEW IF EXISTS pool_stats_mv",
+                "Drop pool_stats_mv materialized view",
+            ),
         ]
 
-        for migration in migrations:
-            try:
-                await self.client.command(migration)
-                logger.info(f"Migration successful: {migration[:20]}...")
-            except Exception as e:
-                logger.warning(
-                    f"Migration skipped (may be already applied): {migration[:20]}... - {str(e)}"
-                )
+        for version, migration_sql, description in migrations:
+            if version not in applied_versions:
+                try:
+                    await self.client.command(migration_sql)
+                    await self.client.command(
+                        """INSERT INTO schema_migrations (version, description) 
+                           VALUES (%(version)s, %(description)s)""",
+                        parameters={"version": version, "description": description},
+                    )
+                    logger.info(f"Migration {version} applied: {description}")
+                except Exception as e:
+                    logger.error(
+                        f"Migration {version} failed: {description} - {str(e)}"
+                    )
+            else:
+                logger.debug(f"Migration {version} already applied: {description}")
 
     def _get_schema_statements(self):
         """Return schema statements as a list of SQL strings."""
@@ -256,7 +289,7 @@ class StatsDB:
 
             logger.info("Database schema created/verified")
 
-            # TBD if we wanna do this. 
+            # TBD if we wanna do this.
             # Backfill materialized views with last 24 hours of data
             # await self._backfill_materialized_views()
 
