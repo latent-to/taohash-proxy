@@ -540,6 +540,8 @@ async def get_workers_share_value(
         for row in result.result_rows:
             worker_name = row[0]
             workers_dict[worker_name] = {
+                "state": "ok",  # Daily aggregates don't track state
+                "last_share": None,  # Not available in daily aggregates
                 "shares": int(row[1]),
                 "share_value": float(row[2]),
                 "hashrate": float(row[3]) / 1e9,  # Convert to GH/s
