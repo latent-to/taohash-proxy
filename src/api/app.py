@@ -25,6 +25,7 @@ from .models import (
     PoolStatsResponse,
     WorkersStatsResponse,
     WorkersTimerangeResponse,
+    WorkersShareValueResponse,
 )
 
 logger = get_logger(__name__)
@@ -488,7 +489,7 @@ async def _get_worker_stats(
 
 @app.get(
     "/api/workers/share-value/{date}",
-    response_model=WorkersTimerangeResponse,
+    response_model=WorkersShareValueResponse,
     tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
@@ -540,8 +541,6 @@ async def get_workers_share_value(
         for row in result.result_rows:
             worker_name = row[0]
             workers_dict[worker_name] = {
-                "state": "ok",  # Daily aggregates don't track state
-                "last_share": None,  # Not available in daily aggregates
                 "shares": int(row[1]),
                 "share_value": float(row[2]),
                 "hashrate": float(row[3]) / 1e9,  # Convert to GH/s
