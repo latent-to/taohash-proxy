@@ -42,9 +42,6 @@ services:
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
-      - HISTORICAL_DB_PATH=/data/historical/share_values.db
-    volumes:
-      - historical_data:/data/historical
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -74,29 +71,10 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  snapshot-cron:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.cron
-    container_name: taohash-snapshot-cron
-    environment:
-      - API_TOKEN=${API_TOKENS}
-      - API_URL=http://api:8000
-      - HISTORICAL_DB_PATH=/data/historical/share_values.db
-    volumes:
-      - historical_data:/data/historical
-      - ../logs:/app/logs
-    restart: unless-stopped
-    depends_on:
-      - api
-      - clickhouse
-
 networks:
   default:
     driver: bridge
 
 volumes:
   clickhouse_data:
-    driver: local
-  historical_data:
     driver: local
