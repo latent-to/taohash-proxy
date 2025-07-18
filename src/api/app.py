@@ -6,8 +6,6 @@ Provides RESTful endpoints for querying mining pool and worker statistics.
 
 import os
 import time
-import json
-import aiosqlite
 from typing import Any, Optional
 from datetime import datetime, timedelta, timezone
 
@@ -46,10 +44,6 @@ REWARDS_POST_TOKEN = os.environ.get("REWARDS_POST_TOKEN", "")
 
 db: Optional[StatsDB] = None
 
-HISTORICAL_DB_PATH = os.environ.get(
-    "HISTORICAL_DB_PATH", "/data/historical/share_values.db"
-)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -60,30 +54,6 @@ async def lifespan(app: FastAPI):
         logger.info("API connected to ClickHouse successfully")
     else:
         logger.warning("API running without database connection")
-
-    try:
-        os.makedirs(os.path.dirname(HISTORICAL_DB_PATH), exist_ok=True)
-        async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS daily_snapshots (
-                    date TEXT PRIMARY KEY,
-                    data JSON,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS daily_rewards (
-                    date TEXT PRIMARY KEY,
-                    amount REAL NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            await conn.commit()
-        logger.info(f"Historical database initialized at {HISTORICAL_DB_PATH}")
-    except Exception as e:
-        logger.error(f"Failed to initialize historical database: {e}")
 
     yield
 
@@ -150,13 +120,10 @@ async def health_check():
 @app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
 @limiter.limit("60/minute")
 async def get_pool_stats(
-    request: Request, token: str = Depends(verify_token), pool: Optional[str] = None
+    request: Request, token: str = Depends(verify_token)
 ) -> dict[str, Any]:
     """
     Get aggregated pool statistics.
-
-    Args:
-        pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
 
     Returns statistics for 5-minute, 60-minute, and 24-hour windows.
 
@@ -166,21 +133,14 @@ async def get_pool_stats(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        now = datetime.now()
-        yesterday = now - timedelta(days=1)
+        stats_5m = await _get_pool_stats_for_window("5m")
+        stats_60m = await _get_pool_stats_for_window("60m")
+        stats_24h = await _get_pool_stats_for_window("24h")
 
-        # Default to "all"
-        pool_filter = pool if pool in ["normal", "high_diff"] else None
-
-        stats_5m = await _get_pool_stats_for_window("5m", pool_filter)
-        stats_60m = await _get_pool_stats_for_window("60m", pool_filter)
-        stats_24h = await _get_pool_stats_for_window("24h", pool_filter)
-        stats_yesterday = await _get_pool_stats_yesterday(yesterday, pool_filter)
-
-        worker_counts = await _get_worker_counts(pool_filter)
+        worker_counts = await _get_worker_counts()
 
         response = {
-            "pool": pool or "all",
+            "pool": "all",
             "btc": {
                 "all_time_reward": "0.00000000",  # TODO
                 "hash_rate_unit": "Gh/s",
@@ -193,9 +153,6 @@ async def get_pool_stats(
                 "hash_rate_24h": stats_24h.get("hashrate", 0) / 1e9
                 if stats_24h.get("hashrate", 0)
                 else 0,
-                "hash_rate_yesterday": stats_yesterday.get("hashrate", 0) / 1e9
-                if stats_yesterday.get("hashrate", 0)
-                else 0,
                 "low_workers": 0,
                 "off_workers": worker_counts.get("off_workers", 0),
                 "ok_workers": worker_counts.get("ok_workers", 0),
@@ -206,21 +163,11 @@ async def get_pool_stats(
                 "shares_5m": stats_5m.get("total_shares", 0),
                 "shares_60m": stats_60m.get("total_shares", 0),
                 "shares_24h": stats_24h.get("total_shares", 0),
-                "shares_yesterday": stats_yesterday.get("total_shares", 0),
                 "shares_value_5m": stats_5m.get("share_value", 0),
                 "shares_value_60m": stats_60m.get("share_value", 0),
                 "shares_value_24h": stats_24h.get("share_value", 0),
-                "shares_value_yesterday": stats_yesterday.get("share_value", 0),
             },
         }
-
-        if not pool_filter:
-            pools_included = set()
-            for stat_window in [stats_5m, stats_60m, stats_24h, stats_yesterday]:
-                if "pools_included" in stat_window:
-                    pools_included.update(stat_window["pools_included"])
-
-            response["pools_included"] = sorted(list(pools_included))
 
         return response
 
@@ -237,16 +184,14 @@ async def get_workers_stats(
     request: Request,
     token: str = Depends(verify_token),
     worker: Optional[str] = None,
-    pool: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Get per-worker statistics.
 
-    Can filter by specific worker and pool if provided.
+    Can filter by specific worker if provided.
 
     Args:
         worker: Optional worker filter
-        pool: Optional pool filter - "all", "normal", "high_diff" (defaults to "all")
 
     **Requires ClickHouse database to be running.**
     """
@@ -254,9 +199,7 @@ async def get_workers_stats(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        # Default to "all"
-        pool_filter = pool if pool in ["normal", "high_diff"] else None
-        workers = await _get_worker_stats(worker, pool_filter)
+        workers = await _get_worker_stats(worker)
 
         workers_dict = {}
         for w in workers:
@@ -372,83 +315,38 @@ async def get_workers_timerange(
 
 
 async def _get_pool_stats_for_window(
-    window: str, pool_filter: Optional[str] = None
+    window: str
 ) -> dict[str, Any]:
     """Get pool statistics for a specific time window."""
     try:
         if window == "5m":
-            pool_condition = "AND pool_label = %(pool_filter)s" if pool_filter else ""
-            params = {"pool_filter": pool_filter} if pool_filter else {}
-
-            if pool_filter:
-                query = f"""
-                SELECT 
-                    count(DISTINCT worker) as active_workers,
-                    count() as shares,
-                    count() as accepted,
-                    0 as rejected,
-                    sum(pool_difficulty) as total_difficulty,
-                    sum(actual_difficulty) as share_value,
-                    sum(pool_difficulty) * 4294967296 / 300 as hashrate
-                FROM shares
-                WHERE ts > now() - INTERVAL 5 MINUTE
-                {pool_condition}
-                """
-            else:
-                query = """
-                SELECT 
-                    count(DISTINCT worker) as active_workers,
-                    count() as shares,
-                    count() as accepted,
-                    0 as rejected,
-                    sum(pool_difficulty) as total_difficulty,
-                    sum(actual_difficulty) as share_value,
-                    sum(pool_difficulty) * 4294967296 / 300 as hashrate,
-                    groupArray(DISTINCT pool_label) as pools_included
-                FROM shares
-                WHERE ts > now() - INTERVAL 5 MINUTE
-                """
+            query = """
+            SELECT 
+                count(DISTINCT worker) as active_workers,
+                count() as shares,
+                count() as accepted,
+                0 as rejected,
+                sum(pool_difficulty) as total_difficulty,
+                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) * 4294967296 / 300 as hashrate
+            FROM shares
+            WHERE ts > now() - INTERVAL 5 MINUTE
+            """
         else:
             view_name = f"pool_stats_{window}"
-            where_clause = "WHERE pool_label = %(pool_filter)s" if pool_filter else ""
-            params = {"pool_filter": pool_filter} if pool_filter else {}
+            query = f"""
+            SELECT 
+                active_workers,
+                shares,
+                shares as accepted,
+                0 as rejected,
+                pool_difficulty_sum as total_difficulty,
+                actual_difficulty_sum as share_value,
+                hashrate
+            FROM {view_name}
+            """
 
-            if pool_filter:
-                query = f"""
-                SELECT 
-                    active_workers,
-                    shares,
-                    shares as accepted,
-                    0 as rejected,
-                    pool_difficulty_sum as total_difficulty,
-                    actual_difficulty_sum as share_value,
-                    hashrate
-                FROM {view_name}
-                {where_clause}
-                """
-            else:
-                if window == "60m":
-                    interval = "60 MINUTE"
-                    time_seconds = 3600
-                else:  # 24h
-                    interval = "24 HOUR"
-                    time_seconds = 86400
-
-                query = f"""
-                SELECT 
-                    uniqMerge(unique_workers) as active_workers,
-                    countMerge(total_shares) as shares,
-                    countMerge(total_shares) as accepted,
-                    0 as rejected,
-                    sumMerge(sum_pool_difficulty) as total_difficulty,
-                    sumMerge(sum_actual_difficulty) as share_value,
-                    sumMerge(sum_pool_difficulty) * 4294967296 / {time_seconds} as hashrate,
-                    groupArray(DISTINCT pool_label) as pools_included
-                FROM pool_stats_mv
-                WHERE ts > now() - INTERVAL {interval}
-                """
-
-        result = await db.client.query(query, parameters=params)
+        result = await db.client.query(query)
 
         if result.result_rows and result.result_rows[0]:
             row = result.result_rows[0]
@@ -461,9 +359,6 @@ async def _get_pool_stats_for_window(
                 "share_value": float(row[5] or 0),
                 "hashrate": float(row[6] or 0) if row[6] else 0,
             }
-
-            if not pool_filter and len(row) > 7:
-                response["pools_included"] = row[7]
 
             return response
 
@@ -480,97 +375,17 @@ async def _get_pool_stats_for_window(
         "share_value": 0,
     }
 
-
-async def _get_pool_stats_yesterday(
-    yesterday: datetime, pool_filter: Optional[str] = None
-) -> dict[str, Any]:
-    """Get pool statistics for yesterday."""
-    try:
-        pool_condition = "AND pool_label = %(pool_filter)s" if pool_filter else ""
-
-        if pool_filter:
-            query = f"""
-            SELECT 
-                count(DISTINCT worker) as active_workers,
-                count() as total_shares,
-                count() as accepted,  -- All shares are accepted
-                0 as rejected,        -- No rejected shares
-                sum(pool_difficulty) as total_difficulty,
-                sum(actual_difficulty) as share_value,
-                sum(pool_difficulty) * 4294967296 / 86400 as hashrate
-            FROM shares
-            WHERE ts >= %(start)s AND ts < %(end)s
-            {pool_condition}
-            """
-        else:
-            query = """
-            SELECT 
-                count(DISTINCT worker) as active_workers,
-                count() as total_shares,
-                count() as accepted,  -- All shares stored are accepted
-                0 as rejected,        -- No rejected shares
-                sum(pool_difficulty) as total_difficulty,
-                sum(actual_difficulty) as share_value,
-                sum(pool_difficulty) * 4294967296 / 86400 as hashrate,
-                groupArray(DISTINCT pool_label) as pools_included
-            FROM shares
-            WHERE ts >= %(start)s AND ts < %(end)s
-            """
-
-        params = {
-            "start": yesterday.replace(hour=0, minute=0, second=0, microsecond=0),
-            "end": yesterday.replace(hour=23, minute=59, second=59, microsecond=999999),
-        }
-        if pool_filter:
-            params["pool_filter"] = pool_filter
-
-        result = await db.client.query(query, parameters=params)
-
-        if result.result_rows and result.result_rows[0]:
-            row = result.result_rows[0]
-            response = {
-                "active_workers": int(row[0] or 0),
-                "total_shares": int(row[1] or 0),
-                "accepted": int(row[2] or 0),
-                "rejected": int(row[3] or 0),
-                "total_difficulty": float(row[4] or 0),
-                "share_value": float(row[5] or 0),
-                "hashrate": float(row[6] or 0) if row[6] else 0,
-            }
-
-            if not pool_filter and len(row) > 7:
-                response["pools_included"] = row[7]
-
-            return response
-    except Exception as e:
-        logger.error(f"Error in _get_pool_stats_yesterday: {e}")
-
-    return {
-        "active_workers": 0,
-        "total_shares": 0,
-        "accepted": 0,
-        "rejected": 0,
-        "total_difficulty": 0,
-        "hashrate": 0,
-        "share_value": 0,
-    }
-
-
-async def _get_worker_counts(pool_filter: Optional[str] = None) -> dict[str, int]:
+async def _get_worker_counts() -> dict[str, int]:
     """Get counts of workers in different states."""
     try:
-        pool_condition = "WHERE pool_label = %(pool_filter)s" if pool_filter else ""
-        params = {"pool_filter": pool_filter} if pool_filter else {}
-
-        query = f"""
+        query = """
         SELECT 
             COUNT(DISTINCT CASE WHEN last_share_ts > now() - INTERVAL 120 MINUTE THEN worker END) as ok_workers,
             COUNT(DISTINCT CASE WHEN last_share_ts <= now() - INTERVAL 120 MINUTE THEN worker END) as off_workers
         FROM worker_pool_latest_share_mv
-        {pool_condition}
         """
 
-        result = await db.client.query(query, parameters=params)
+        result = await db.client.query(query)
 
         if result.result_rows and result.result_rows[0]:
             row = result.result_rows[0]
@@ -583,47 +398,40 @@ async def _get_worker_counts(pool_filter: Optional[str] = None) -> dict[str, int
 
 async def _get_worker_stats(
     worker: Optional[str] = None,
-    pool_filter: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
     Fetches all worker statistics which were active in the last 24 hours.
     """
     params = {}
-    where_clauses = []
+    where_clause = ""
 
     if worker:
-        where_clauses.append("worker = %(worker)s")
+        where_clause = "WHERE worker = %(worker)s"
         params["worker"] = worker
-    if pool_filter:
-        where_clauses.append("pool_label = %(pool_filter)s")
-        params["pool_filter"] = pool_filter
-
-    where_clause_sql = f"AND {' AND '.join(where_clauses)}" if where_clauses else ""
 
     query = f"""
     WITH
         all_active_workers AS (
-            SELECT DISTINCT worker, pool_label
+            SELECT DISTINCT worker
             FROM worker_stats_24h
-            {"WHERE " + " AND ".join(where_clauses) if where_clauses else ""}
+            {where_clause}
         ),
         
         stats_5m AS (
             SELECT
                 worker,
-                pool_label,
                 argMax(miner, ts) as latest_miner,
                 count() as shares,
                 sum(actual_difficulty) as share_value,
                 sum(pool_difficulty) * 4294967296 / 300 as hashrate
             FROM shares
-            WHERE ts > now() - INTERVAL 5 MINUTE {where_clause_sql.replace("w.", "")}
-            GROUP BY worker, pool_label
+            WHERE ts > now() - INTERVAL 5 MINUTE
+            {"AND " + where_clause.replace("WHERE ", "") if where_clause else ""}
+            GROUP BY worker
         )
 
     SELECT
         w.worker,
-        w.pool_label,
         -- Get miner from the most recent source available
         COALESCE(s5.latest_miner, s60.latest_miner, s24.latest_miner) as latest_miner,
         
@@ -647,12 +455,10 @@ async def _get_worker_stats(
         s24.actual_difficulty_sum as share_value_24h
         
     FROM all_active_workers AS w
-    LEFT JOIN worker_stats_24h AS s24 ON w.worker = s24.worker AND w.pool_label = s24.pool_label
-    LEFT JOIN worker_stats_60m AS s60 ON w.worker = s60.worker AND w.pool_label = s60.pool_label
-    LEFT JOIN stats_5m AS s5 ON w.worker = s5.worker AND w.pool_label = s5.pool_label
-    LEFT JOIN (
-        SELECT worker, pool_label, max(last_share_ts) as last_share_ts FROM worker_pool_latest_share_mv GROUP BY worker, pool_label
-    ) AS latest_share_data ON w.worker = latest_share_data.worker AND w.pool_label = latest_share_data.pool_label
+    LEFT JOIN worker_stats_24h AS s24 ON w.worker = s24.worker
+    LEFT JOIN worker_stats_60m AS s60 ON w.worker = s60.worker
+    LEFT JOIN stats_5m AS s5 ON w.worker = s5.worker
+    LEFT JOIN worker_pool_latest_share_mv AS latest_share_data ON w.worker = latest_share_data.worker
     ORDER BY w.worker
     """
 
@@ -663,19 +469,18 @@ async def _get_worker_stats(
         workers.append(
             {
                 "worker": row[0],
-                "pool_label": row[1],
-                "miner": row[2],
-                "last_share_ts": row[3],
-                "state": row[4],
-                "shares_5m": row[5] or 0,
-                "hashrate_5m": row[6] or 0,
-                "share_value_5m": row[7] or 0,
-                "shares_60m": row[8] or 0,
-                "hashrate_60m": row[9] or 0,
-                "share_value_60m": row[10] or 0,
-                "shares_24h": row[11] or 0,
-                "hashrate_24h": row[12] or 0,
-                "share_value_24h": row[13] or 0,
+                "miner": row[1],
+                "last_share_ts": row[2],
+                "state": row[3],
+                "shares_5m": row[4] or 0,
+                "hashrate_5m": row[5] or 0,
+                "share_value_5m": row[6] or 0,
+                "shares_60m": row[7] or 0,
+                "hashrate_60m": row[8] or 0,
+                "share_value_60m": row[9] or 0,
+                "shares_24h": row[10] or 0,
+                "hashrate_24h": row[11] or 0,
+                "share_value_24h": row[12] or 0,
             }
         )
     return workers
@@ -699,25 +504,16 @@ async def get_workers_share_value(
         date: Date in YYYY-MM-DD format
 
     Returns:
-        - Today: Live data from ClickHouse
-        - Historical: Snapshot data from SQLite
+        Worker statistics for the specified date from ClickHouse.
 
     The response format is identical to /api/workers/timerange
     """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
     try:
         requested_date = datetime.strptime(date, "%Y-%m-%d").date()
         today_utc = datetime.now(timezone.utc).date()
-
-        if requested_date == today_utc:
-            start_dt = datetime.combine(
-                requested_date, datetime.min.time(), timezone.utc
-            )
-            end_dt = datetime.now(timezone.utc)
-
-            start_time = int(start_dt.timestamp())
-            end_time = int(end_dt.timestamp())
-
-            return await get_workers_timerange(request, start_time, end_time, token)
 
         if requested_date > today_utc:
             raise HTTPException(
@@ -725,33 +521,57 @@ async def get_workers_share_value(
                 detail=f"Cannot query future dates. Today is {today_utc}",
             )
 
-        try:
-            async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
-                cursor = await conn.execute(
-                    "SELECT data FROM daily_snapshots WHERE date = ?", (date,)
-                )
-                row = await cursor.fetchone()
+        query = """
+        SELECT
+            worker,
+            countMerge(shares) as shares,
+            sumMerge(share_value) as share_value,
+            sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
+        FROM worker_daily_share_value
+        WHERE date = %(date)s
+        GROUP BY worker
+        ORDER BY worker
+        """
 
-                if row:
-                    return json.loads(row[0])
-                else:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"No data available for {date}. Data may not have been collected yet.",
-                    )
-        except json.JSONDecodeError:
-            logger.error(f"Invalid JSON data stored for date {date}")
-            raise HTTPException(
-                status_code=500, detail="Corrupted data for requested date"
-            )
-        except aiosqlite.Error as e:
-            logger.error(f"Database error when fetching data for {date}: {e}")
-            raise HTTPException(status_code=500, detail="Database error")
+        params = {"date": requested_date}
+        result = await db.client.query(query, parameters=params)
+
+        workers_dict = {}
+        for row in result.result_rows:
+            worker_name = row[0]
+            workers_dict[worker_name] = {
+                "shares": int(row[1]),
+                "share_value": float(row[2]),
+                "hashrate": float(row[3]) / 1e9,  # Convert to GH/s
+                "hash_rate_unit": "Gh/s",
+            }
+
+        reward_query = """
+        SELECT amount
+        FROM daily_rewards
+        WHERE date = %(date)s
+        LIMIT 1
+        """
+        
+        reward_result = await db.client.query(reward_query, parameters=params)
+        btc_amount = None
+        if reward_result.result_rows and reward_result.result_rows[0]:
+            btc_amount = float(reward_result.result_rows[0][0])
+
+        return {
+            "btc": {
+                "workers": workers_dict,
+                "btc_amount": btc_amount
+            }
+        }
 
     except ValueError:
         raise HTTPException(
             status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
         )
+    except Exception as e:
+        logger.error(f"Error fetching workers share value for {date}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 class RewardRequest(BaseModel):
@@ -773,39 +593,41 @@ async def set_daily_reward(
         date: Date in YYYY-MM-DD format
         amount: Reward amount as a float
     """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
     try:
-        datetime.strptime(date, "%Y-%m-%d")
+        requested_date = datetime.strptime(date, "%Y-%m-%d").date()
 
         if reward_data.amount < 0:
             raise HTTPException(status_code=400, detail="Amount must be positive")
 
-        try:
-            async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
-                await conn.execute(
-                    """
-                    INSERT OR REPLACE INTO daily_rewards (date, amount, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                """,
-                    (date, reward_data.amount),
-                )
+        query = """
+        INSERT INTO daily_rewards (date, amount, updated_at)
+        VALUES (%(date)s, %(amount)s, now())
+        """
+        
+        params = {
+            "date": requested_date,
+            "amount": reward_data.amount
+        }
+        
+        await db.client.command(query, parameters=params)
 
-                await conn.commit()
-
-                return {
-                    "success": True,
-                    "date": date,
-                    "amount": reward_data.amount,
-                    "message": "Reward amount updated successfully",
-                }
-
-        except aiosqlite.Error as e:
-            logger.error(f"Database error when setting reward for {date}: {e}")
-            raise HTTPException(status_code=500, detail="Database error")
+        return {
+            "success": True,
+            "date": date,
+            "amount": reward_data.amount,
+            "message": "Reward amount updated successfully",
+        }
 
     except ValueError:
         raise HTTPException(
             status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
         )
+    except Exception as e:
+        logger.error(f"Error setting reward for {date}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
 
 
 @app.get("/api/rewards", tags=["Rewards"])
@@ -820,26 +642,31 @@ async def get_all_rewards(
     Returns:
         Dictionary with date as key and reward info as value
     """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
     try:
-        async with aiosqlite.connect(HISTORICAL_DB_PATH) as conn:
-            cursor = await conn.execute("""
-                SELECT date, amount, created_at, updated_at
-                FROM daily_rewards
-                ORDER BY date DESC
-            """)
+        query = """
+        SELECT 
+            date,
+            amount,
+            updated_at
+        FROM daily_rewards
+        ORDER BY date DESC
+        """
 
-            rows = await cursor.fetchall()
+        result = await db.client.query(query)
 
-            rewards = {}
-            for row in rows:
-                rewards[row[0]] = {
-                    "amount": row[1],
-                    "created_at": row[2],
-                    "updated_at": row[3],
-                }
+        rewards = {}
+        for row in result.result_rows:
+            date_str = row[0].strftime("%Y-%m-%d")
+            rewards[date_str] = {
+                "amount": float(row[1]),
+                "updated_at": row[2].isoformat() if row[2] else None,
+            }
 
-            return {"success": True, "total_records": len(rewards), "rewards": rewards}
+        return {"success": True, "total_records": len(rewards), "rewards": rewards}
 
-    except aiosqlite.Error as e:
-        logger.error(f"Database error when fetching rewards: {e}")
+    except Exception as e:
+        logger.error(f"Error fetching rewards: {e}")
         raise HTTPException(status_code=500, detail="Database error")
