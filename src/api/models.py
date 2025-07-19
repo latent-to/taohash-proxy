@@ -20,9 +20,6 @@ class BtcPoolStats(BaseModel):
     hash_rate_5m: float = Field(description="5-minute average hashrate in Gh/s")
     hash_rate_60m: float = Field(description="60-minute average hashrate in Gh/s")
     hash_rate_24h: float = Field(description="24-hour average hashrate in Gh/s")
-    hash_rate_yesterday: float = Field(
-        description="Yesterday's average hashrate in Gh/s"
-    )
     low_workers: int = Field(description="Number of low hashrate workers (always 0)")
     off_workers: int = Field(description="Number of offline workers")
     ok_workers: int = Field(description="Number of active workers")
@@ -33,13 +30,9 @@ class BtcPoolStats(BaseModel):
     shares_5m: int = Field(description="Shares submitted in last 5 minutes")
     shares_60m: int = Field(description="Shares submitted in last 60 minutes")
     shares_24h: int = Field(description="Shares submitted in last 24 hours")
-    shares_yesterday: int = Field(description="Shares submitted yesterday")
     shares_value_5m: float = Field(description="Total share difficulty value (5m)")
     shares_value_60m: float = Field(description="Total share difficulty value (60m)")
     shares_value_24h: float = Field(description="Total share difficulty value (24h)")
-    shares_value_yesterday: float = Field(
-        description="Total share difficulty value (yesterday)"
-    )
 
 
 class PoolStatsResponse(BaseModel):
@@ -111,3 +104,29 @@ class WorkersTimerangeResponse(BaseModel):
     """Workers timerange API response"""
 
     btc: BtcWorkersTimerange
+
+
+class WorkerDailyStats(BaseModel):
+    """Worker statistics for a specific day"""
+
+    shares: int = Field(description="Total shares submitted")
+    share_value: float = Field(description="Total share difficulty value")
+    hashrate: float = Field(description="Average hashrate in Gh/s")
+    hash_rate_unit: str = Field(default="Gh/s", description="Hash rate unit")
+
+
+class BtcWorkersShareValue(BaseModel):
+    """Container for worker share value statistics with reward amount"""
+
+    workers: Dict[str, WorkerDailyStats] = Field(
+        description="Worker statistics for the date, keyed by worker name"
+    )
+    btc_amount: Optional[float] = Field(
+        description="BTC reward amount for the date", default=None
+    )
+
+
+class WorkersShareValueResponse(BaseModel):
+    """Workers share value API response"""
+
+    btc: BtcWorkersShareValue

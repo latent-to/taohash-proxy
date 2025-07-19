@@ -1,7 +1,4 @@
-import asyncio
 import os
-import time
-from typing import Optional
 
 import clickhouse_connect
 
@@ -24,13 +21,6 @@ class StatsDB:
         self.password = os.environ.get("CLICKHOUSE_PASSWORD", "taohash123")
         self.required = os.environ.get("CLICKHOUSE_REQUIRED", "false").lower() == "true"
 
-        self.BATCH_SIZE = 1000
-        self.FLUSH_INTERVAL = 10
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=100_000)
-
-        self._writer_task: Optional[asyncio.Task] = None
-        self._stop_event: asyncio.Event = asyncio.Event()
-
     async def init(self):
         """Initialize connection to ClickHouse."""
         logger.info(f"Initializing ClickHouse connection to {self.host}:{self.port}")
@@ -44,14 +34,21 @@ class StatsDB:
                 database="default",
                 secure=False,
                 compress=True,
+                settings={
+                    "async_insert": 1,
+                    "wait_for_async_insert": 0,
+                    "async_insert_busy_timeout_min_ms": 10_000,
+                    "async_insert_max_data_size": 5242880,
+                    "async_insert_busy_timeout_max_ms": 200_000,
+                },
             )
 
             result = await self.client.query("SELECT version()")
             version = result.result_rows[0][0]
             logger.info(f"Connected to ClickHouse server version: {version}")
 
+            await self._migrate_schema()
             await self._create_tables()
-            self._writer_task = asyncio.create_task(self._writer_loop())
 
             return True
         except Exception as e:
@@ -60,6 +57,69 @@ class StatsDB:
                 raise
             return False
 
+    async def _migrate_schema(self):
+        """Run schema migrations for existing tables."""
+        logger.info("Running schema migrations...")
+
+        await self.client.command("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version Int32,
+                description String,
+                applied_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY version
+        """)
+
+        result = await self.client.query("SELECT version FROM schema_migrations")
+        applied_versions = {row[0] for row in result.result_rows}
+
+        migrations = [
+            (
+                1,
+                "ALTER TABLE shares MODIFY COLUMN pool LowCardinality(String)",
+                "Modify pool column to LowCardinality",
+            ),
+            (
+                2,
+                "ALTER TABLE shares MODIFY COLUMN pool_label LowCardinality(String) DEFAULT 'unknown'",
+                "Modify pool_label column to LowCardinality",
+            ),
+            (3, "DROP VIEW IF EXISTS worker_stats_5m", "Drop worker_stats_5m view"),
+            (4, "DROP VIEW IF EXISTS worker_stats_60m", "Drop worker_stats_60m view"),
+            (5, "DROP VIEW IF EXISTS worker_stats_24h", "Drop worker_stats_24h view"),
+            (6, "DROP VIEW IF EXISTS pool_stats_5m", "Drop pool_stats_5m view"),
+            (7, "DROP VIEW IF EXISTS pool_stats_60m", "Drop pool_stats_60m view"),
+            (8, "DROP VIEW IF EXISTS pool_stats_24h", "Drop pool_stats_24h view"),
+            (9, "DROP VIEW IF EXISTS worker_state", "Drop worker_state view"),
+            (
+                10,
+                "DROP VIEW IF EXISTS worker_stats_mv",
+                "Drop worker_stats_mv materialized view",
+            ),
+            (
+                11,
+                "DROP VIEW IF EXISTS pool_stats_mv",
+                "Drop pool_stats_mv materialized view",
+            ),
+        ]
+
+        for version, migration_sql, description in migrations:
+            if version not in applied_versions:
+                try:
+                    await self.client.command(migration_sql)
+                    await self.client.command(
+                        """INSERT INTO schema_migrations (version, description) 
+                           VALUES (%(version)s, %(description)s)""",
+                        parameters={"version": version, "description": description},
+                    )
+                    logger.info(f"Migration {version} applied: {description}")
+                except Exception as e:
+                    logger.error(
+                        f"Migration {version} failed: {description} - {str(e)}"
+                    )
+            else:
+                logger.debug(f"Migration {version} already applied: {description}")
+
     def _get_schema_statements(self):
         """Return schema statements as a list of SQL strings."""
         return [
@@ -67,12 +127,12 @@ class StatsDB:
                 ts DateTime DEFAULT now(),
                 miner String,
                 worker String,
-                pool String,
+                pool LowCardinality(String),
                 pool_difficulty Float32,
                 actual_difficulty Float32,
                 block_hash String,
                 pool_requested_difficulty Float32 DEFAULT 0,
-                pool_label String DEFAULT 'unknown',
+                pool_label LowCardinality(String) DEFAULT 'unknown',
                 INDEX idx_worker (worker) TYPE bloom_filter GRANULARITY 1,
                 INDEX idx_ts (ts) TYPE minmax GRANULARITY 1
             )
@@ -85,40 +145,37 @@ class StatsDB:
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_stats_mv
             ENGINE = AggregatingMergeTree()
             PARTITION BY toYYYYMM(ts)
-            ORDER BY (worker, pool_label, ts)
+            ORDER BY (worker, ts)
             AS
             SELECT
                 toStartOfMinute(ts) as ts,
                 worker,
-                pool_label,
                 anyLastState(miner) as latest_miner,
                 countState() as share_count,
                 sumState(pool_difficulty) as total_pool_difficulty,
                 sumState(actual_difficulty) as total_actual_difficulty,
                 maxState(actual_difficulty) as max_difficulty
             FROM shares
-            GROUP BY ts, worker, pool_label""",
+            GROUP BY ts, worker""",
             # Pool stats materialized view
             """CREATE MATERIALIZED VIEW IF NOT EXISTS pool_stats_mv
             ENGINE = AggregatingMergeTree()
             PARTITION BY toYYYYMM(ts)
-            ORDER BY (pool_label, ts)
+            ORDER BY ts
             AS
             SELECT
                 toStartOfMinute(ts) as ts,
-                pool_label,
                 uniqState(worker) as unique_workers,
                 countState() as total_shares,
                 sumState(pool_difficulty) as sum_pool_difficulty,
                 sumState(actual_difficulty) as sum_actual_difficulty,
                 maxState(actual_difficulty) as max_actual_difficulty
             FROM shares
-            GROUP BY ts, pool_label""",
+            GROUP BY ts""",
             # Worker stats views
             """CREATE VIEW IF NOT EXISTS worker_stats_5m AS
             SELECT
                 worker,
-                pool_label,
                 anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
@@ -127,11 +184,10 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 300 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 5 MINUTE
-            GROUP BY worker, pool_label""",
+            GROUP BY worker""",
             """CREATE VIEW IF NOT EXISTS worker_stats_60m AS
             SELECT
                 worker,
-                pool_label,
                 anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
@@ -140,11 +196,10 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 3600 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 60 MINUTE
-            GROUP BY worker, pool_label""",
+            GROUP BY worker""",
             """CREATE VIEW IF NOT EXISTS worker_stats_24h AS
             SELECT
                 worker,
-                pool_label,
                 anyLastMerge(latest_miner) as latest_miner,
                 countMerge(share_count) as shares,
                 sumMerge(total_pool_difficulty) as pool_difficulty_sum,
@@ -153,11 +208,10 @@ class StatsDB:
                 sumMerge(total_pool_difficulty) * 4294967296 / 86400 as hashrate
             FROM worker_stats_mv
             WHERE ts > now() - INTERVAL 24 HOUR
-            GROUP BY worker, pool_label""",
+            GROUP BY worker""",
             # Pool stats views
             """CREATE VIEW IF NOT EXISTS pool_stats_5m AS
             SELECT
-                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -166,10 +220,9 @@ class StatsDB:
                 sumMerge(sum_pool_difficulty) * 4294967296 / 300 as hashrate
             FROM pool_stats_mv
             WHERE ts > now() - INTERVAL 5 MINUTE
-            GROUP BY pool_label""",
+            """,
             """CREATE VIEW IF NOT EXISTS pool_stats_60m AS
             SELECT
-                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -178,10 +231,9 @@ class StatsDB:
                 sumMerge(sum_pool_difficulty) * 4294967296 / 3600 as hashrate
             FROM pool_stats_mv
             WHERE ts > now() - INTERVAL 60 MINUTE
-            GROUP BY pool_label""",
+            """,
             """CREATE VIEW IF NOT EXISTS pool_stats_24h AS
             SELECT
-                pool_label,
                 uniqMerge(unique_workers) as active_workers,
                 countMerge(total_shares) as shares,
                 sumMerge(sum_pool_difficulty) as pool_difficulty_sum,
@@ -190,31 +242,39 @@ class StatsDB:
                 sumMerge(sum_pool_difficulty) * 4294967296 / 86400 as hashrate
             FROM pool_stats_mv
             WHERE ts > now() - INTERVAL 24 HOUR
-            GROUP BY pool_label""",
-            # Worker state view
-            """CREATE VIEW IF NOT EXISTS worker_state AS
-            SELECT
-                worker,
-                argMax(miner, ts) as latest_miner,
-                argMax(pool_label, ts) as pool_label,
-                max(ts) as last_share_ts,
-                CASE 
-                    WHEN max(ts) > now() - INTERVAL 10 MINUTE THEN 'ok'
-                    ELSE 'offline'
-                END as state
-            FROM shares
-            GROUP BY worker""",
+            """,
             # Worker's latest contribution
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_pool_latest_share_mv
             ENGINE = ReplacingMergeTree()
-            ORDER BY (worker, pool_label)
+            ORDER BY worker
             AS
             SELECT
                 worker,
-                pool_label,
                 max(ts) as last_share_ts
             FROM shares
-            GROUP BY worker, pool_label""",
+            GROUP BY worker""",
+            # Daily worker share value - used for rewards
+            """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_daily_share_value
+            ENGINE = AggregatingMergeTree()
+            PARTITION BY toYYYYMM(date)
+            ORDER BY (date, worker)
+            AS
+            SELECT
+                toDate(ts) as date,
+                worker,
+                countState() as shares,
+                sumState(actual_difficulty) as share_value,
+                sumState(pool_difficulty) as pool_difficulty_sum
+            FROM shares
+            GROUP BY date, worker""",
+            # Daily rewards table
+            """CREATE TABLE IF NOT EXISTS daily_rewards (
+                date Date,
+                amount Float64,
+                updated_at DateTime DEFAULT now()
+            )
+            ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY date""",
         ]
 
     async def _create_tables(self):
@@ -228,8 +288,66 @@ class StatsDB:
                     pass
 
             logger.info("Database schema created/verified")
+
+            # TBD if we wanna do this.
+            # Backfill materialized views with last 24 hours of data
+            # await self._backfill_materialized_views()
+
         except Exception as e:
             logger.error(f"Failed to create tables: {e}")
+
+    async def _backfill_materialized_views(self):
+        """Backfill materialized views with last 24 hours of data."""
+        logger.info("Backfilling materialized views with last 24 hours of data...")
+
+        backfill_queries = [
+            # Backfill worker_stats_mv
+            """INSERT INTO worker_stats_mv
+            SELECT
+                toStartOfMinute(ts) as ts,
+                worker,
+                anyLastState(miner) as latest_miner,
+                countState() as share_count,
+                sumState(pool_difficulty) as total_pool_difficulty,
+                sumState(actual_difficulty) as total_actual_difficulty,
+                maxState(actual_difficulty) as max_difficulty
+            FROM shares
+            WHERE ts >= now() - INTERVAL 24 HOUR
+            GROUP BY ts, worker""",
+            # Backfill pool_stats_mv
+            """INSERT INTO pool_stats_mv
+            SELECT
+                toStartOfMinute(ts) as ts,
+                uniqState(worker) as unique_workers,
+                countState() as total_shares,
+                sumState(pool_difficulty) as sum_pool_difficulty,
+                sumState(actual_difficulty) as sum_actual_difficulty,
+                maxState(actual_difficulty) as max_actual_difficulty
+            FROM shares
+            WHERE ts >= now() - INTERVAL 24 HOUR
+            GROUP BY ts""",
+            # Backfill worker_pool_latest_share_mv
+            """INSERT INTO worker_pool_latest_share_mv
+            SELECT
+                worker,
+                max(ts) as last_share_ts
+            FROM shares
+            WHERE ts >= now() - INTERVAL 24 HOUR
+            GROUP BY worker""",
+        ]
+
+        for query in backfill_queries:
+            try:
+                await self.client.command(query)
+                logger.info(f"Backfill successful: {query[:20]}...")
+            except Exception as e:
+                logger.error(f"Backfill failed: {str(e)}")
+
+    async def close(self):
+        """Close ClickHouse client."""
+        if self.client:
+            await self.client.close()
+            logger.info("ClickHouse connection closed")
 
     async def insert_share(
         self,
@@ -242,7 +360,7 @@ class StatsDB:
         **kwargs,
     ) -> None:
         """
-        Insert a share submission with minimal data.
+        Insert a share submission directly to ClickHouse.
 
         Args:
             miner: Miner identifier
@@ -253,77 +371,24 @@ class StatsDB:
             block_hash: Block hash (will be reversed before storage)
         """
         if not self.client:
-            return
-
-        row = [
-            miner,
-            worker,
-            pool,
-            pool_difficulty,
-            actual_difficulty,
-            block_hash[::-1] if block_hash else "",  # reversed block hash
-            kwargs.get("pool_requested_difficulty", 0.0),
-            kwargs.get("pool_label", "unknown"),
-        ]
-        await self.queue.put(row)
-
-    async def close(self):
-        """Flush remaining data, stop writer task, close ClickHouse client."""
-        self._stop_event.set()
-
-        if self._writer_task:
-            await self._writer_task
-
-        if self.client:
-            await self.client.close()
-            logger.info("ClickHouse connection closed")
-
-    async def _writer_loop(self) -> None:
-        """
-        For batching and inserting.
-        """
-        batch: list[list] = []
-        next_flush_at = time.time() + self.FLUSH_INTERVAL
-        logger.warning("Writer loop started")
-
-        while not self._stop_event.is_set():
-            timeout = max(0, next_flush_at - time.time())
-            try:
-                row = await asyncio.wait_for(self.queue.get(), timeout)
-                batch.append(row)
-
-                # Flush on size limit
-                if len(batch) >= self.BATCH_SIZE:
-                    await self._flush(batch)
-                    batch.clear()
-                    next_flush_at = time.time() + self.FLUSH_INTERVAL
-            except asyncio.TimeoutError:
-                # Flush on interval
-                if batch:
-                    await self._flush(batch)
-                    batch.clear()
-                next_flush_at = time.time() + self.FLUSH_INTERVAL
-
-        # Final drain when stop signal received
-        while not self.queue.empty():
-            batch.append(self.queue.get_nowait())
-            if len(batch) >= self.BATCH_SIZE:
-                await self._flush(batch)
-                batch.clear()
-        if batch:
-            await self._flush(batch)
-
-    async def _flush(self, rows: list[list]) -> None:
-        """
-        Flush batched shares to ClickHouse.
-        """
-        if not self.client:
             logger.error("ClickHouse client is not initialised")
             return
+
         try:
             await self.client.insert(
                 "shares",
-                rows,
+                [
+                    [
+                        miner,
+                        worker,
+                        pool,
+                        pool_difficulty,
+                        actual_difficulty,
+                        block_hash[::-1] if block_hash else "",
+                        kwargs.get("pool_requested_difficulty", 0.0),
+                        kwargs.get("pool_label", "unknown"),
+                    ]
+                ],
                 column_names=[
                     "miner",
                     "worker",
@@ -335,10 +400,7 @@ class StatsDB:
                     "pool_label",
                 ],
             )
-            logger.info("Flushed %d shares to ClickHouse", len(rows))
         except Exception as e:
-            logger.error("Batch insert failed: %s", e)
-            with open("failed_shares.log", "a") as f:
-                f.write(repr(rows) + "\n")
+            logger.error(f"Insert failed: {e}")
             if self.required:
                 raise
