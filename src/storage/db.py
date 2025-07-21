@@ -1,8 +1,10 @@
 import os
 
 import clickhouse_connect
+import urllib3
 
 from ..utils.logger import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -26,6 +28,7 @@ class StatsDB:
         logger.info(f"Initializing ClickHouse connection to {self.host}:{self.port}")
 
         try:
+            pool_mgr = urllib3.PoolManager(maxsize=200)
             self.client = await clickhouse_connect.get_async_client(
                 host=self.host,
                 port=self.port,
@@ -34,6 +37,7 @@ class StatsDB:
                 database="default",
                 secure=False,
                 compress=True,
+                pool_mgr=pool_mgr,
                 settings={
                     "async_insert": 1,
                     "wait_for_async_insert": 0,
