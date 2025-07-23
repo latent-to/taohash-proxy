@@ -21,7 +21,7 @@ class StatsAggregator:
             timeout=aiohttp.ClientTimeout(total=0.5)
         ) as session:
             tasks = []
-            for i in range(1, 10):
+            for i in range(1, 13):
                 url = f"http://docker-proxy-{i}:5000/api/stats"
                 tasks.append(self._fetch_one(session, url))
 
