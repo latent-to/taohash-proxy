@@ -1,22 +1,29 @@
 services:
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: taohash-haproxy
+    ports:
+      - "${PROXY_PORT:-3331}:3331"
+      - "${PROXY_PORT_HIGH:-3332}:3332"
+      - "8404:8404"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    restart: unless-stopped
+    networks:
+      - taohash-network
+
   proxy:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: taohash-proxy
     volumes:
-      - ../config:/app/config
-    ports:
-      - "${PROXY_PORT:-3331}:${PROXY_PORT:-3331}"
-      - "${PROXY_PORT_HIGH:-3332}:${PROXY_PORT_HIGH:-3332}"
-      - "${DASHBOARD_PORT:-5000}:5000"
-      - "${RELOAD_API_PORT:-5001}:5001"
+      - ../config:/app/config:ro
     environment:
       - PYTHONUNBUFFERED=1
       - PROXY_PORT=${PROXY_PORT:-3331}
       - PROXY_PORT_HIGH=${PROXY_PORT_HIGH:-3332}
-      - CLICKHOUSE_REQUIRED=false
-      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_REQUIRED=true
+      - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
@@ -24,6 +31,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    networks:
+      - taohash-network
 
   api:
     build:
@@ -38,7 +47,7 @@ services:
       - PYTHONUNBUFFERED=1
       - API_TOKENS=${API_TOKENS}
       - REWARDS_POST_TOKEN=${REWARDS_POST_TOKEN}
-      - CLICKHOUSE_HOST=${CLICKHOUSE_HOST:-clickhouse}
+      - CLICKHOUSE_HOST=clickhouse
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
@@ -46,6 +55,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    networks:
+      - taohash-network
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -70,10 +81,29 @@ services:
       retries: 10
       start_period: 30s
     restart: unless-stopped
+    networks:
+      - taohash-network
+
+  aggregator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: taohash-aggregator
+    command: ["python", "-m", "src.aggregator"]
+    ports:
+      - "5000:5555"
+    networks:
+      - taohash-network
+    depends_on:
+      - proxy
+    restart: unless-stopped
 
 networks:
-  default:
+  taohash-network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
 
 volumes:
   clickhouse_data:
