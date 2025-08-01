@@ -19,4 +19,4 @@ if __name__ == "__main__":
         except Exception:
             pass
     except Exception:
-        sys.exit(1) 
+        sys.exit(1)

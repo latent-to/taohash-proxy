@@ -54,10 +54,10 @@ db: Optional[StatsDB] = None
 
 async def process_rewards_task():
     """Bg task to automatically fetch and set daily rewards from Braiins Pool API."""
-    logger.info("Starting reward automation task")
+    logger.info("Starting daily rewards loop")
 
     if not BRAIINS_API_TOKEN:
-        logger.error("BRAIINS_API_TOKEN not configured, disabling reward automation")
+        logger.error("BRAIINS_API_TOKEN not configured, disabling daily rewards loop")
         return
 
     while True:
@@ -171,10 +171,10 @@ async def lifespan(app: FastAPI):
 
     task = None
     if ENABLE_REWARD_POLLING:
-        logger.info("Reward automation is enabled")
+        logger.info("Daily rewards loop is enabled")
         task = asyncio.create_task(process_rewards_task())
     else:
-        logger.info("Reward automation is disabled")
+        logger.info("Daily rewards loop is disabled")
 
     yield
 
