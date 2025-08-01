@@ -16,6 +16,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    deploy:
+      replicas: 10
     volumes:
       - ../config:/app/config:ro
     environment:
