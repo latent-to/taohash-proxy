@@ -14,7 +14,6 @@ from .utils.logger import get_logger
 from .utils.constants import (
     RELOAD_API_PORT,
     RELOAD_API_HOST,
-    PROXY_PORT,
     INTERNAL_DASHBOARD_PORT,
     CONFIG_PATH,
 )
