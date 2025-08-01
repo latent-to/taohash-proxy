@@ -177,11 +177,13 @@ def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Appl
     app.router.add_get(
         "/api/stats", lambda r: web.json_response(stats_manager.get_all_stats())
     )
-    # Add analytics routes if database is available
-    if stats_db:
-        from .analytics_api import create_analytics_routes
 
-        # Disabled temporarily
-        # create_analytics_routes(app, stats_db)
+    # TODO: Add analytics when required
+    # Add analytics routes if database is available
+    # if stats_db:
+    #     from .analytics_api import create_analytics_routes
+
+    # Disabled temporarily
+    # create_analytics_routes(app, stats_db)
 
     return app
