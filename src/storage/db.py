@@ -105,6 +105,32 @@ class StatsDB:
                 "DROP VIEW IF EXISTS pool_stats_mv",
                 "Drop pool_stats_mv materialized view",
             ),
+            (
+                12,
+                "ALTER TABLE daily_rewards ADD COLUMN paid Boolean DEFAULT false",
+                "Add paid column to daily_rewards table",
+            ),
+            (
+                13,
+                """ALTER TABLE daily_rewards 
+                   UPDATE paid = true 
+                   WHERE date IN (
+                       '2025-07-21',
+                       '2025-07-22',
+                       '2025-07-23',
+                       '2025-07-24',
+                       '2025-07-25',
+                       '2025-07-26',
+                       '2025-07-27',
+                       '2025-07-28'
+                   )""",
+                "Backfill paid=true for known paid dates July 21-28",
+            ),
+            (
+                14,
+                "ALTER TABLE daily_rewards ADD COLUMN payment_proof_url String DEFAULT ''",
+                "Add payment_proof_url field for storing payment documentation links",
+            ),
         ]
 
         for version, migration_sql, description in migrations:

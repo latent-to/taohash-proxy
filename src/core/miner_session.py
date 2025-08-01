@@ -387,19 +387,19 @@ class MinerSession:
                 f"[{self.miner_id}] {submit_data['worker']} - Share rejected ({reason}): "
                 f"diff={actual_difficulty:.2f}"
             )
-        
+
         # Check acceptance ratio every 250 shares
         total_shares = self.stats.accepted + self.stats.rejected
         if total_shares > 0 and total_shares % 250 == 0:
             acceptance_rate = (self.stats.accepted / total_shares) * 100
-            
+
             if acceptance_rate < 30:
                 logger.warning(
                     f"[{self.miner_id}] {submit_data.get('worker', 'unknown')} - "
                     f"Disconnecting: {acceptance_rate:.1f}% acceptance rate "
                     f"({self.stats.accepted}/{total_shares} accepted)"
                 )
-                
+
                 # Close the miner connection
                 self.miner_writer.close()
                 await self.miner_writer.wait_closed()

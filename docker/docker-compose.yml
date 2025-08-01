@@ -16,6 +16,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    deploy:
+      replicas: 10
     volumes:
       - ../config:/app/config:ro
     environment:
@@ -51,6 +53,10 @@ services:
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
+      - ENABLE_REWARD_POLLING=${ENABLE_REWARD_POLLING:-false}
+      - BRAIINS_API_TOKEN=${BRAIINS_API_TOKEN}
+      - BRAIINS_API_URL=${BRAIINS_API_URL:-https://pool.braiins.com/accounts/rewards/json/btc}
+      - REWARD_CHECK_INTERVAL=${REWARD_CHECK_INTERVAL:-3600}
     restart: unless-stopped
     depends_on:
       clickhouse:

@@ -124,9 +124,27 @@ class BtcWorkersShareValue(BaseModel):
     btc_amount: Optional[float] = Field(
         description="BTC reward amount for the date", default=None
     )
+    paid: Optional[bool] = Field(
+        description="Whether the reward has been paid out", default=None
+    )
+    payment_proof_url: Optional[str] = Field(
+        description="URL to payment proof documentation", default=None
+    )
 
 
 class WorkersShareValueResponse(BaseModel):
     """Workers share value API response"""
 
     btc: BtcWorkersShareValue
+
+
+class RewardRequest(BaseModel):
+    """Request model for updating daily rewards"""
+
+    amount: Optional[float] = Field(None, description="Reward amount in BTC", ge=0)
+    paid: Optional[bool] = Field(
+        None, description="Whether the reward has been paid out"
+    )
+    payment_proof_url: Optional[str] = Field(
+        None, description="URL to payment proof documentation"
+    )

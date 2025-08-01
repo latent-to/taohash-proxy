@@ -65,13 +65,13 @@ class MinerStats:
         if not error:
             self.rejected_other += 1
             return
-            
+
         try:
             error_data = json.loads(error)
             if isinstance(error_data, list) and len(error_data) > 0:
                 error_code = error_data[0]
                 error_msg = error_data[1] if len(error_data) > 1 else ""
-                
+
                 if error_code == ERROR_JOB_NOT_FOUND:
                     self.rejected_stale += 1
                 elif error_code == ERROR_DUPLICATE_SHARE:
@@ -93,19 +93,26 @@ class MinerStats:
         """
         if not self.recent_shares:
             return
-            
+
         now = time.time()
         ten_min_ago = now - 600
-        
+
         recent = [(t, d) for t, d in self.recent_shares if t > ten_min_ago]
-        
+
         if len(self.recent_shares) > len(recent) * 1.25:
             self.recent_shares.clear()
             self.recent_shares.extend(recent)
-            logger.debug(f"Cleaned up old shares for {self.ip}: {len(self.recent_shares)} -> {len(recent)}")
+            logger.debug(
+                f"Cleaned up old shares for {self.ip}: {len(self.recent_shares)} -> {len(recent)}"
+            )
 
     def record_share(
-        self, accepted: bool, difficulty: float, share_difficulty: float, pool: str, error: Optional[str] = None
+        self,
+        accepted: bool,
+        difficulty: float,
+        share_difficulty: float,
+        pool: str,
+        error: Optional[str] = None,
     ) -> None:
         """
         Record a submitted share and its result.
@@ -136,7 +143,6 @@ class MinerStats:
             self.highest_difficulty = share_difficulty
             logger.info(f"New highest difficulty for {self.ip}: {share_difficulty}")
 
-
     def update_difficulty(self, difficulty: float) -> None:
         """
         Update the miner's current difficulty level.
@@ -159,21 +165,21 @@ class MinerStats:
         """
         if not self.recent_shares:
             return 0.0
-        
+
         now = time.time()
         five_min_ago = now - 300
-        
+
         recent = [(t, d) for t, d in self.recent_shares if t > five_min_ago]
-        
+
         if not recent:
             return 0.0
-        
+
         if len(recent) < 10:
             return 0.0
-            
+
         time_span = 300.0
         total_hashes = sum(diff * (2**32) for _, diff in recent)
-        
+
         return total_hashes / time_span
 
 
@@ -190,7 +196,9 @@ class StatsManager:
         self.miners: dict[str, MinerStats] = {}
         logger.info("StatsManager initialized")
 
-    def register_miner(self, peer: tuple[str, int], pool_name: str = "unknown") -> MinerStats:
+    def register_miner(
+        self, peer: tuple[str, int], pool_name: str = "unknown"
+    ) -> MinerStats:
         """
         Register a new miner connection and create its statistics tracker.
 
