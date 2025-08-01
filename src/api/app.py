@@ -6,14 +6,15 @@ Provides RESTful endpoints for querying mining pool and worker statistics.
 
 import os
 import time
+import asyncio
 from typing import Any, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
+import aiohttp
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -26,6 +27,7 @@ from .models import (
     WorkersStatsResponse,
     WorkersTimerangeResponse,
     WorkersShareValueResponse,
+    RewardRequest,
 )
 
 logger = get_logger(__name__)
@@ -42,8 +44,119 @@ API_TOKENS = set(
 )
 
 REWARDS_POST_TOKEN = os.environ.get("REWARDS_POST_TOKEN", "")
+ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
+REWARD_CHECK_INTERVAL = int(os.environ.get("REWARD_CHECK_INTERVAL", ""))
+BRAIINS_API_TOKEN = os.environ.get("BRAIINS_API_TOKEN", "")
+BRAIINS_API_URL = os.environ.get("BRAIINS_API_URL", "")
 
 db: Optional[StatsDB] = None
+
+
+async def process_rewards_task():
+    """Bg task to automatically fetch and set daily rewards from Braiins Pool API."""
+    logger.info("Starting reward automation task")
+
+    if not BRAIINS_API_TOKEN:
+        logger.error("BRAIINS_API_TOKEN not configured, disabling reward automation")
+        return
+
+    while True:
+        try:
+            if not db or not db.client:
+                logger.warning("Database not available for reward processing")
+                await asyncio.sleep(300)
+                continue
+
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-SlushPool-Auth-Token": BRAIINS_API_TOKEN,
+                }
+
+                async with session.get(BRAIINS_API_URL, headers=headers) as response:
+                    if response.status != 200:
+                        logger.error(
+                            f"Failed to fetch rewards from Braiins API: {response.status}"
+                        )
+                        await asyncio.sleep(300)
+                        continue
+
+                    data = await response.json()
+                    daily_rewards = data.get("btc", {}).get("daily_rewards", [])
+
+                    # Process last 10 days of rewards
+                    for reward_data in daily_rewards[:10]:
+                        unix_timestamp = reward_data.get("date")
+                        total_reward = reward_data.get("total_reward")
+
+                        if not unix_timestamp or not total_reward:
+                            continue
+
+                        # Convert Unix timestamp to date
+                        reward_date = datetime.fromtimestamp(
+                            unix_timestamp, tz=timezone.utc
+                        ).date()
+                        reward_amount = float(total_reward)
+
+                        # Check if reward already exists
+                        check_query = """
+                        SELECT amount, paid
+                        FROM daily_rewards
+                        WHERE date = %(date)s
+                        LIMIT 1
+                        """
+
+                        result = await db.client.query(
+                            check_query, parameters={"date": reward_date}
+                        )
+
+                        if not result.result_rows:
+                            # Check if there's worker activity before inserting
+                            activity_query = """
+                            SELECT COUNT(DISTINCT worker) as worker_count
+                            FROM worker_daily_share_value
+                            WHERE date = %(date)s
+                            """
+
+                            activity_result = await db.client.query(
+                                activity_query, parameters={"date": reward_date}
+                            )
+
+                            if (
+                                activity_result.result_rows
+                                and activity_result.result_rows[0][0] > 0
+                            ):
+                                # Insert new reward only if workers were active
+                                insert_query = """
+                                INSERT INTO daily_rewards (date, amount)
+                                VALUES (%(date)s, %(amount)s)
+                                """
+
+                                await db.client.command(
+                                    insert_query,
+                                    parameters={
+                                        "date": reward_date,
+                                        "amount": reward_amount,
+                                    },
+                                )
+
+                                logger.info(
+                                    f"Set reward for {reward_date}: {reward_amount} BTC"
+                                )
+                            else:
+                                logger.warning(
+                                    f"No worker activity for {reward_date}, skipping reward"
+                                )
+                        else:
+                            logger.debug(
+                                f"Reward already exists for {reward_date}, keeping existing value"
+                            )
+
+        except Exception as e:
+            logger.error(f"Error in reward processing task: {e}")
+
+        await asyncio.sleep(REWARD_CHECK_INTERVAL)
 
 
 @asynccontextmanager
@@ -56,7 +169,21 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without database connection")
 
+    task = None
+    if ENABLE_REWARD_POLLING:
+        logger.info("Reward automation is enabled")
+        task = asyncio.create_task(process_rewards_task())
+    else:
+        logger.info("Reward automation is disabled")
+
     yield
+
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if db:
         await db.close()
@@ -315,9 +442,7 @@ async def get_workers_timerange(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-async def _get_pool_stats_for_window(
-    window: str
-) -> dict[str, Any]:
+async def _get_pool_stats_for_window(window: str) -> dict[str, Any]:
     """Get pool statistics for a specific time window."""
     try:
         if window == "5m":
@@ -375,6 +500,7 @@ async def _get_pool_stats_for_window(
         "hashrate": 0,
         "share_value": 0,
     }
+
 
 async def _get_worker_counts() -> dict[str, int]:
     """Get counts of workers in different states."""
@@ -548,21 +674,35 @@ async def get_workers_share_value(
             }
 
         reward_query = """
-        SELECT amount
+        SELECT amount, paid, payment_proof_url
         FROM daily_rewards
         WHERE date = %(date)s
         LIMIT 1
         """
-        
+
         reward_result = await db.client.query(reward_query, parameters=params)
         btc_amount = None
+        paid = None
+        payment_proof_url = None
         if reward_result.result_rows and reward_result.result_rows[0]:
             btc_amount = float(reward_result.result_rows[0][0])
+            paid = (
+                bool(reward_result.result_rows[0][1])
+                if len(reward_result.result_rows[0]) > 1
+                else False
+            )
+            payment_proof_url = (
+                reward_result.result_rows[0][2]
+                if len(reward_result.result_rows[0]) > 2
+                else None
+            )
 
         return {
             "btc": {
                 "workers": workers_dict,
-                "btc_amount": btc_amount
+                "btc_amount": btc_amount,
+                "paid": paid,
+                "payment_proof_url": payment_proof_url,
             }
         }
 
@@ -575,24 +715,23 @@ async def get_workers_share_value(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-class RewardRequest(BaseModel):
-    amount: float
-
-
 @app.post("/api/rewards/{date}", tags=["Rewards"])
 @limiter.limit("60/minute")
-async def set_daily_reward(
+async def update_daily_reward(
     request: Request,
     date: str,  # Format: YYYY-MM-DD
     reward_data: RewardRequest,
     token: str = Depends(verify_rewards_token),
 ) -> dict[str, Any]:
     """
-    Set or update the daily reward amount for a specific date.
+    Create or update daily reward fields.
 
-    Args:
-        date: Date in YYYY-MM-DD format
-        amount: Reward amount as a float
+    Can update any combination of: amount, paid, payment_proof_url
+    Only provided fields will be updated.
+
+    Validation rules:
+    - Cannot set paid=true without an amount (in request or database)
+    - Cannot set payment_proof_url without an amount (in request or database)
     """
     if not db or not db.client:
         raise HTTPException(status_code=503, detail="Database unavailable")
@@ -600,34 +739,126 @@ async def set_daily_reward(
     try:
         requested_date = datetime.strptime(date, "%Y-%m-%d").date()
 
-        if reward_data.amount < 0:
+        if not any(
+            [
+                reward_data.amount is not None,
+                reward_data.paid is not None,
+                reward_data.payment_proof_url is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        if reward_data.amount is not None and reward_data.amount < 0:
             raise HTTPException(status_code=400, detail="Amount must be positive")
 
-        query = """
-        INSERT INTO daily_rewards (date, amount, updated_at)
-        VALUES (%(date)s, %(amount)s, now())
+        # Check existing record
+        check_query = """
+        SELECT amount, paid, payment_proof_url
+        FROM daily_rewards
+        WHERE date = %(date)s
+        LIMIT 1
         """
-        
-        params = {
-            "date": requested_date,
-            "amount": reward_data.amount
-        }
-        
-        await db.client.command(query, parameters=params)
 
-        return {
+        result = await db.client.query(check_query, parameters={"date": requested_date})
+        existing_record = None
+        if result.result_rows:
+            existing_record = {
+                "amount": float(result.result_rows[0][0])
+                if result.result_rows[0][0] is not None
+                else None,
+                "paid": bool(result.result_rows[0][1])
+                if len(result.result_rows[0]) > 1
+                else False,
+                "payment_proof_url": result.result_rows[0][2]
+                if len(result.result_rows[0]) > 2
+                else "",
+            }
+
+        # Validate
+        has_amount = reward_data.amount is not None or (
+            existing_record and existing_record.get("amount") is not None
+        )
+
+        if reward_data.paid and not has_amount:
+            raise HTTPException(
+                status_code=400, detail="Cannot mark as paid without an amount"
+            )
+
+        if reward_data.payment_proof_url is not None and not has_amount:
+            raise HTTPException(
+                status_code=400, detail="Cannot set payment proof URL without an amount"
+            )
+
+        # Build update fields
+        update_fields = []
+        params = {"date": requested_date}
+
+        if reward_data.amount is not None:
+            update_fields.append("amount = %(amount)s")
+            params["amount"] = reward_data.amount
+
+        if reward_data.paid is not None:
+            update_fields.append("paid = %(paid)s")
+            params["paid"] = reward_data.paid
+
+        if reward_data.payment_proof_url is not None:
+            update_fields.append("payment_proof_url = %(url)s")
+            params["url"] = reward_data.payment_proof_url
+
+        if existing_record:
+            # Update existing record
+            update_query = f"""
+            ALTER TABLE daily_rewards 
+            UPDATE {", ".join(update_fields)}
+            WHERE date = %(date)s
+            """
+            await db.client.command(update_query, parameters=params)
+        else:
+            # Insert new record
+            insert_fields = ["date"]
+            insert_values = ["%(date)s"]
+
+            if reward_data.amount is not None:
+                insert_fields.append("amount")
+                insert_values.append("%(amount)s")
+
+            if reward_data.paid is not None:
+                insert_fields.append("paid")
+                insert_values.append("%(paid)s")
+
+            if reward_data.payment_proof_url is not None:
+                insert_fields.append("payment_proof_url")
+                insert_values.append("%(url)s")
+
+            insert_query = f"""
+            INSERT INTO daily_rewards ({", ".join(insert_fields)})
+            VALUES ({", ".join(insert_values)})
+            """
+            await db.client.command(insert_query, parameters=params)
+
+        response_data = {
             "success": True,
             "date": date,
-            "amount": reward_data.amount,
-            "message": "Reward amount updated successfully",
+            "message": "Reward updated successfully",
         }
+
+        if reward_data.amount is not None:
+            response_data["amount"] = reward_data.amount
+        if reward_data.paid is not None:
+            response_data["paid"] = reward_data.paid
+        if reward_data.payment_proof_url is not None:
+            response_data["payment_proof_url"] = reward_data.payment_proof_url
+
+        return response_data
 
     except ValueError:
         raise HTTPException(
             status_code=400, detail="Invalid date format. Use YYYY-MM-DD"
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error setting reward for {date}: {e}")
+        logger.error(f"Error updating reward for {date}: {e}")
         raise HTTPException(status_code=500, detail="Database error")
 
 
@@ -651,7 +882,9 @@ async def get_all_rewards(
         SELECT 
             date,
             amount,
-            updated_at
+            updated_at,
+            paid,
+            payment_proof_url
         FROM daily_rewards
         ORDER BY date DESC
         """
@@ -664,10 +897,67 @@ async def get_all_rewards(
             rewards[date_str] = {
                 "amount": float(row[1]),
                 "updated_at": row[2].isoformat() if row[2] else None,
+                "paid": bool(row[3]) if len(row) > 3 else False,
+                "payment_proof_url": row[4] if len(row) > 4 else "",
             }
 
         return {"success": True, "total_records": len(rewards), "rewards": rewards}
 
     except Exception as e:
         logger.error(f"Error fetching rewards: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get("/api/rewards/unpaid", tags=["Rewards"])
+@limiter.limit("60/minute")
+async def get_unpaid_rewards(
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Get all unpaid reward records.
+
+    Returns:
+        List of unpaid rewards with dates and amounts
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        query = """
+        SELECT 
+            date,
+            amount,
+            updated_at
+        FROM daily_rewards
+        WHERE paid = false
+        ORDER BY date ASC
+        """
+
+        result = await db.client.query(query)
+
+        unpaid_rewards = []
+        total_unpaid = 0.0
+
+        for row in result.result_rows:
+            date_str = row[0].strftime("%Y-%m-%d")
+            amount = float(row[1])
+            unpaid_rewards.append(
+                {
+                    "date": date_str,
+                    "amount": amount,
+                    "updated_at": row[2].isoformat() if row[2] else None,
+                }
+            )
+            total_unpaid += amount
+
+        return {
+            "success": True,
+            "total_records": len(unpaid_rewards),
+            "total_unpaid_amount": total_unpaid,
+            "unpaid_rewards": unpaid_rewards,
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching unpaid rewards: {e}")
         raise HTTPException(status_code=500, detail="Database error")
