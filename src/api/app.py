@@ -98,6 +98,11 @@ async def process_rewards_task():
                             unix_timestamp, tz=timezone.utc
                         ).date()
                         reward_amount = float(total_reward)
+                        if reward_amount > 0:
+                            adjusted_reward_amount = reward_amount / 0.975
+                            reward_amount_after_fee = (
+                                adjusted_reward_amount * 0.98
+                            )  # 2% fee
 
                         # Check if reward already exists
                         check_query = """
@@ -137,12 +142,12 @@ async def process_rewards_task():
                                     insert_query,
                                     parameters={
                                         "date": reward_date,
-                                        "amount": reward_amount,
+                                        "amount": reward_amount_after_fee,
                                     },
                                 )
 
                                 logger.info(
-                                    f"Set reward for {reward_date}: {reward_amount} BTC"
+                                    f"Set reward for {reward_date}: {reward_amount_after_fee} BTC"
                                 )
                             else:
                                 logger.warning(
