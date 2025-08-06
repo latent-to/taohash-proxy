@@ -48,6 +48,9 @@ ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
 REWARD_CHECK_INTERVAL = int(os.environ.get("REWARD_CHECK_INTERVAL", ""))
 BRAIINS_API_TOKEN = os.environ.get("BRAIINS_API_TOKEN", "")
 BRAIINS_API_URL = os.environ.get("BRAIINS_API_URL", "")
+POOL_FEE = float(os.environ.get("POOL_FEE", "0.02"))
+MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", "0.00005"))
+MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
 
 db: Optional[StatsDB] = None
 
@@ -248,6 +251,53 @@ async def health_check():
         "timestamp": int(time.time()),
         "database": "connected" if db and db.client else "disconnected",
     }
+
+
+@app.get("/api/stats/summary", tags=["Historical Data"])
+@limiter.limit("10/minute")
+async def get_stats_summary(request: Request) -> dict[str, Any]:
+    """
+    Get pool statistics summary (public endpoint).
+
+    Returns core mining metrics and pool configuration.
+    Rate limited to 10 requests per minute.
+    No authentication required.
+
+    **Requires ClickHouse database to be running.**
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        stats_5m = await _get_pool_stats_for_window("5m")
+        stats_60m = await _get_pool_stats_for_window("60m")
+        stats_24h = await _get_pool_stats_for_window("24h")
+
+        return {
+            "hash_rate_unit": "Gh/s",
+            "hash_rate_5m": stats_5m.get("hashrate", 0) / 1e9
+            if stats_5m.get("hashrate", 0)
+            else 0,
+            "hash_rate_60m": stats_60m.get("hashrate", 0) / 1e9
+            if stats_60m.get("hashrate", 0)
+            else 0,
+            "hash_rate_24h": stats_24h.get("hashrate", 0) / 1e9
+            if stats_24h.get("hashrate", 0)
+            else 0,
+            "shares_5m": stats_5m.get("total_shares", 0),
+            "shares_60m": stats_60m.get("total_shares", 0),
+            "shares_24h": stats_24h.get("total_shares", 0),
+            "shares_value_5m": stats_5m.get("share_value", 0),
+            "shares_value_60m": stats_60m.get("share_value", 0),
+            "shares_value_24h": stats_24h.get("share_value", 0),
+            "pool_fee": POOL_FEE,
+            "minimum_payout_threshold": MINIMUM_PAYOUT_THRESHOLD,
+            "minimum_payout_threshold_unit": MINIMUM_PAYOUT_THRESHOLD_UNIT,
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching stats summary: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
