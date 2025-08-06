@@ -48,8 +48,8 @@ ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
 REWARD_CHECK_INTERVAL = int(os.environ.get("REWARD_CHECK_INTERVAL", ""))
 BRAIINS_API_TOKEN = os.environ.get("BRAIINS_API_TOKEN", "")
 BRAIINS_API_URL = os.environ.get("BRAIINS_API_URL", "")
-POOL_FEE = float(os.environ.get("POOL_FEE", "0.02"))
-MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", "0.00005"))
+POOL_FEE = float(os.environ.get("POOL_FEE", ""))
+MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
 
 db: Optional[StatsDB] = None
