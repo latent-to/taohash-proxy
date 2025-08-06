@@ -57,6 +57,9 @@ services:
       - BRAIINS_API_TOKEN=${BRAIINS_API_TOKEN}
       - BRAIINS_API_URL=${BRAIINS_API_URL:-https://pool.braiins.com/accounts/rewards/json/btc}
       - REWARD_CHECK_INTERVAL=${REWARD_CHECK_INTERVAL:-3600}
+      - POOL_FEE=${POOL_FEE:-0.02}
+      - MINIMUM_PAYOUT_THRESHOLD=${MINIMUM_PAYOUT_THRESHOLD:-0.00005}
+      - MINIMUM_PAYOUT_THRESHOLD_UNIT=${MINIMUM_PAYOUT_THRESHOLD_UNIT:-BTC}
     restart: unless-stopped
     depends_on:
       clickhouse:
