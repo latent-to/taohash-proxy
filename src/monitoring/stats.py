@@ -167,17 +167,17 @@ class MinerStats:
             return 0.0
 
         now = time.time()
-        five_min_ago = now - 300
+        ten_min_ago = now - 600
 
-        recent = [(t, d) for t, d in self.recent_shares if t > five_min_ago]
+        recent = [(t, d) for t, d in self.recent_shares if t > ten_min_ago]
 
         if not recent:
             return 0.0
 
-        if len(recent) < 10:
+        if len(recent) < 5:
             return 0.0
 
-        time_span = 300.0
+        time_span = 600.0
         total_hashes = sum(diff * (2**32) for _, diff in recent)
 
         return total_hashes / time_span
