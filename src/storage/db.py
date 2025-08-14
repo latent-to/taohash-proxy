@@ -1,4 +1,6 @@
 import os
+from datetime import datetime, timezone
+from typing import Optional
 
 import clickhouse_connect
 import urllib3
@@ -387,6 +389,7 @@ class StatsDB:
         pool_difficulty: float,
         actual_difficulty: float,
         block_hash: str = "",
+        share_timestamp: Optional[datetime] = None,
         **kwargs,
     ) -> None:
         """
@@ -399,16 +402,19 @@ class StatsDB:
             pool_difficulty: Pool difficulty
             actual_difficulty: Actual share difficulty
             block_hash: Block hash (will be reversed before storage)
+            share_timestamp: Timestamp when share was received
         """
         if not self.client:
             logger.error("ClickHouse client is not initialised")
             return
 
+        ts = share_timestamp or datetime.now(timezone.utc)
         try:
             await self.client.insert(
                 "shares",
                 [
                     [
+                        ts,
                         miner,
                         worker,
                         pool,
@@ -420,6 +426,7 @@ class StatsDB:
                     ]
                 ],
                 column_names=[
+                    "ts",
                     "miner",
                     "worker",
                     "pool",

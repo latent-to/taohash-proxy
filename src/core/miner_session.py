@@ -8,6 +8,7 @@ calculation, and state transitions.
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 
 from ..utils.logger import get_logger, log_stratum_message
@@ -177,6 +178,7 @@ class MinerSession:
                         )
 
                     elif method == "mining.submit":
+                        share_received_at = datetime.now(timezone.utc)
                         params = message.get("params", [])
                         if len(params) >= 5 and msg_id is not None:
                             submit_data = {
@@ -186,6 +188,7 @@ class MinerSession:
                                 "ntime": params[3],
                                 "nonce": params[4],
                                 "version": params[5] if len(params) > 5 else None,
+                                "received_at": share_received_at,
                             }
                             self.pending_submits[msg_id] = submit_data
                             logger.debug(
@@ -368,6 +371,7 @@ class MinerSession:
                     block_hash=block_hash if "block_hash" in locals() else "",
                     pool_requested_difficulty=self.pool_difficulty,
                     pool_label=self.pool_label,
+                    share_timestamp=submit_data.get("received_at"),
                 )
             except Exception as e:
                 logger.error(f"[{self.miner_id}] Failed to insert share: {e}")
