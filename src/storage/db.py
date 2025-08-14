@@ -45,7 +45,7 @@ class StatsDB:
                     "wait_for_async_insert": 0,
                     "async_insert_busy_timeout_min_ms": 5_000,
                     "async_insert_max_data_size": 1048576,
-                    "async_insert_busy_timeout_max_ms": 20_000,
+                    "async_insert_busy_timeout_max_ms": 15_000,
                 },
             )
 
