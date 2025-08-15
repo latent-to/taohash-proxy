@@ -4,159 +4,51 @@ FastAPI application for TaoHash mining statistics API.
 Provides RESTful endpoints for querying mining pool and worker statistics.
 """
 
+import asyncio
 import os
 import time
-import asyncio
-from typing import Any, Optional
-from datetime import datetime, timezone
-
-import aiohttp
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Depends, Security, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
-from ..storage.db import StatsDB
-from ..utils.logger import get_logger
-from .models import (
+from src.rewards_extraction.monitor import rewards_monitor_task
+from src.storage.db import StatsDB
+from src.utils.logger import get_logger
+
+from src.api.auth import verify_token, verify_rewards_token
+
+from src.api.models import (
     HealthResponse,
     PoolStatsResponse,
+    RewardRequest,
+    WorkersShareValueResponse,
     WorkersStatsResponse,
     WorkersTimerangeResponse,
-    WorkersShareValueResponse,
-    RewardRequest,
+)
+from src.api.services.pool_queries import get_pool_stats_for_window
+from src.api.services.worker_queries import (
+    get_worker_counts,
+    get_worker_stats,
+    get_worker_timerange_stats,
+    get_worker_daily_share_value,
 )
 
 logger = get_logger(__name__)
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
-
-security = HTTPBearer()
-
-API_TOKENS = set(
-    token.strip()
-    for token in os.environ.get("API_TOKENS", "").split(",")
-    if token.strip()
-)
-
-REWARDS_POST_TOKEN = os.environ.get("REWARDS_POST_TOKEN", "")
 ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
-REWARD_CHECK_INTERVAL = int(os.environ.get("REWARD_CHECK_INTERVAL", ""))
-BRAIINS_API_TOKEN = os.environ.get("BRAIINS_API_TOKEN", "")
-BRAIINS_API_URL = os.environ.get("BRAIINS_API_URL", "")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
 
 db: Optional[StatsDB] = None
-
-
-async def process_rewards_task():
-    """Bg task to automatically fetch and set daily rewards from configured provider."""
-    logger.info("Starting daily rewards loop")
-
-    provider_type = os.environ.get("REWARD_PROVIDER", "braiins").lower()
-
-    provider = None
-    if provider_type == "antpool":
-        api_key = os.environ.get("ANTPOOL_API_KEY", "")
-        api_secret = os.environ.get("ANTPOOL_API_SECRET", "")
-        user_id = os.environ.get("ANTPOOL_USER_ID", "")
-
-        if not all([api_key, api_secret, user_id]):
-            logger.error("AntPool credentials not configured, disabling rewards loop")
-            return
-
-        from ..rewards_extraction.antpool import AntPoolProvider
-
-        provider = AntPoolProvider(api_key, api_secret, user_id)
-        logger.info("Using AntPool rewards provider")
-
-    else:  # Default to braiins
-        if not BRAIINS_API_TOKEN:
-            logger.error("BRAIINS_API_TOKEN not configured, disabling rewards loop")
-            return
-
-        from ..rewards_extraction.braiins import BraiinsProvider
-
-        provider = BraiinsProvider(BRAIINS_API_TOKEN)
-        logger.info("Using Braiins rewards provider")
-
-    while True:
-        try:
-            if not db or not db.client:
-                logger.warning("Database not available for reward processing")
-                await asyncio.sleep(300)
-                continue
-
-            rewards = await provider.fetch_daily_rewards(10)
-
-            for reward_data in rewards:
-                reward_date = reward_data["date"]
-                reward_amount = reward_data["amount"]
-
-                # Check if reward already exists
-                check_query = """
-                SELECT amount, paid
-                FROM daily_rewards
-                WHERE date = %(date)s
-                LIMIT 1
-                """
-
-                result = await db.client.query(
-                    check_query, parameters={"date": reward_date}
-                )
-
-                if not result.result_rows:
-                    # Check if there's worker activity before inserting
-                    activity_query = """
-                    SELECT COUNT(DISTINCT worker) as worker_count
-                    FROM worker_daily_share_value
-                    WHERE date = %(date)s
-                    """
-
-                    activity_result = await db.client.query(
-                        activity_query, parameters={"date": reward_date}
-                    )
-
-                    if (
-                        activity_result.result_rows
-                        and activity_result.result_rows[0][0] > 0
-                    ):
-                        # Insert new reward only if workers were active
-                        insert_query = """
-                        INSERT INTO daily_rewards (date, amount)
-                        VALUES (%(date)s, %(amount)s)
-                        """
-
-                        await db.client.command(
-                            insert_query,
-                            parameters={
-                                "date": reward_date,
-                                "amount": reward_amount,
-                            },
-                        )
-
-                        logger.info(
-                            f"Set reward for {reward_date}: {reward_amount} BTC ({provider_type})"
-                        )
-                    else:
-                        logger.warning(
-                            f"No worker activity for {reward_date}, skipping reward"
-                        )
-                else:
-                    logger.debug(
-                        f"Reward already exists for {reward_date}, keeping existing value"
-                    )
-
-        except Exception as e:
-            logger.error(f"Error in reward processing task: {e}")
-
-        await asyncio.sleep(REWARD_CHECK_INTERVAL)
 
 
 @asynccontextmanager
@@ -172,7 +64,7 @@ async def lifespan(app: FastAPI):
     task = None
     if ENABLE_REWARD_POLLING:
         logger.info("Daily rewards loop is enabled")
-        task = asyncio.create_task(process_rewards_task())
+        task = asyncio.create_task(rewards_monitor_task(db))
     else:
         logger.info("Daily rewards loop is disabled")
 
@@ -215,26 +107,6 @@ app.add_middleware(
 )
 
 
-async def verify_token(
-    credentials: HTTPAuthorizationCredentials = Security(security),
-) -> str:
-    """Verify API token."""
-    token = credentials.credentials
-    if not API_TOKENS or token not in API_TOKENS:
-        raise HTTPException(status_code=403, detail="Invalid API token")
-    return token
-
-
-async def verify_rewards_token(
-    credentials: HTTPAuthorizationCredentials = Security(security),
-) -> str:
-    """Verify rewards POST token."""
-    token = credentials.credentials
-    if not REWARDS_POST_TOKEN or token != REWARDS_POST_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid rewards token")
-    return token
-
-
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Health check endpoint (no auth required)."""
@@ -261,9 +133,9 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        stats_5m = await _get_pool_stats_for_window("5m")
-        stats_60m = await _get_pool_stats_for_window("60m")
-        stats_24h = await _get_pool_stats_for_window("24h")
+        stats_5m = await get_pool_stats_for_window(db, "5m")
+        stats_60m = await get_pool_stats_for_window(db, "60m")
+        stats_24h = await get_pool_stats_for_window(db, "24h")
 
         return {
             "hash_rate_unit": "Gh/s",
@@ -292,6 +164,7 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# Access to holders
 @app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
 @limiter.limit("60/minute")
 async def get_pool_stats(
@@ -308,11 +181,11 @@ async def get_pool_stats(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        stats_5m = await _get_pool_stats_for_window("5m")
-        stats_60m = await _get_pool_stats_for_window("60m")
-        stats_24h = await _get_pool_stats_for_window("24h")
+        stats_5m = await get_pool_stats_for_window(db, "5m")
+        stats_60m = await get_pool_stats_for_window(db, "60m")
+        stats_24h = await get_pool_stats_for_window(db, "24h")
 
-        worker_counts = await _get_worker_counts()
+        worker_counts = await get_worker_counts(db)
 
         response = {
             "pool": "all",
@@ -351,6 +224,7 @@ async def get_pool_stats(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+# Access to holders
 @app.get(
     "/api/workers/stats", response_model=WorkersStatsResponse, tags=["Historical Data"]
 )
@@ -374,7 +248,7 @@ async def get_workers_stats(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        workers = await _get_worker_stats(worker)
+        workers = await get_worker_stats(db, worker)
 
         workers_dict = {}
         for w in workers:
@@ -437,227 +311,12 @@ async def get_workers_timerange(
     if time_diff > 30 * 24 * 3600:  # 30 days max
         raise HTTPException(status_code=400, detail="Time range cannot exceed 30 days")
 
-    if time_diff == 0:
-        time_diff = 1
-
     try:
-        start_dt = datetime.fromtimestamp(start_time)
-        end_dt = datetime.fromtimestamp(end_time)
-
-        query = """
-        SELECT
-            worker,
-            CASE
-                WHEN max(ts) > fromUnixTimestamp(%(end_time_int)s) - INTERVAL 10 MINUTE THEN 'ok'
-                ELSE 'offline'
-            END as state,
-            toUnixTimestamp(max(ts)) as last_share,
-            count() as shares,
-            sum(actual_difficulty) as share_value,
-            sum(pool_difficulty) * 4294967296 / %(duration)s as hashrate
-        FROM shares
-        WHERE ts >= %(start_time_dt)s AND ts < %(end_time_dt)s
-        GROUP BY worker
-        ORDER BY worker
-        """
-
-        params = {
-            "start_time_dt": start_dt,
-            "end_time_dt": end_dt,
-            "end_time_int": end_time,
-            "duration": time_diff,
-        }
-
-        result = await db.client.query(query, parameters=params)
-
-        workers_dict = {}
-        for row in result.result_rows:
-            worker_name = row[0]
-            workers_dict[worker_name] = {
-                "state": row[1],
-                "last_share": int(row[2]) if row[2] else None,
-                "shares": int(row[3]),
-                "share_value": float(row[4]),
-                "hashrate": float(row[5]) / 1e9,
-                "hash_rate_unit": "Gh/s",
-            }
-
-        return {"btc": {"workers": workers_dict}}
+        return await get_worker_timerange_stats(db, start_time, end_time)
 
     except Exception as e:
         logger.error(f"Error fetching workers timerange data: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
-
-
-async def _get_pool_stats_for_window(window: str) -> dict[str, Any]:
-    """Get pool statistics for a specific time window."""
-    try:
-        if window == "5m":
-            query = """
-            SELECT 
-                count(DISTINCT worker) as active_workers,
-                count() as shares,
-                count() as accepted,
-                0 as rejected,
-                sum(pool_difficulty) as total_difficulty,
-                sum(actual_difficulty) as share_value,
-                sum(pool_difficulty) * 4294967296 / 300 as hashrate
-            FROM shares
-            WHERE ts > now() - INTERVAL 5 MINUTE
-            """
-        else:
-            view_name = f"pool_stats_{window}"
-            query = f"""
-            SELECT 
-                active_workers,
-                shares,
-                shares as accepted,
-                0 as rejected,
-                pool_difficulty_sum as total_difficulty,
-                actual_difficulty_sum as share_value,
-                hashrate
-            FROM {view_name}
-            """
-
-        result = await db.client.query(query)
-
-        if result.result_rows and result.result_rows[0]:
-            row = result.result_rows[0]
-            response = {
-                "active_workers": int(row[0] or 0),
-                "total_shares": int(row[1] or 0),
-                "accepted": int(row[2] or 0),
-                "rejected": int(row[3] or 0),
-                "total_difficulty": float(row[4] or 0),
-                "share_value": float(row[5] or 0),
-                "hashrate": float(row[6] or 0) if row[6] else 0,
-            }
-
-            return response
-
-    except Exception as e:
-        logger.error(f"Error in _get_pool_stats_for_window: {e}")
-
-    return {
-        "active_workers": 0,
-        "total_shares": 0,
-        "accepted": 0,
-        "rejected": 0,
-        "total_difficulty": 0,
-        "hashrate": 0,
-        "share_value": 0,
-    }
-
-
-async def _get_worker_counts() -> dict[str, int]:
-    """Get counts of workers in different states."""
-    try:
-        query = """
-        SELECT 
-            COUNT(DISTINCT CASE WHEN last_share_ts > now() - INTERVAL 120 MINUTE THEN worker END) as ok_workers,
-            COUNT(DISTINCT CASE WHEN last_share_ts <= now() - INTERVAL 120 MINUTE THEN worker END) as off_workers
-        FROM worker_pool_latest_share_mv
-        """
-
-        result = await db.client.query(query)
-
-        if result.result_rows and result.result_rows[0]:
-            row = result.result_rows[0]
-            return {"ok_workers": int(row[0] or 0), "off_workers": int(row[1] or 0)}
-    except Exception as e:
-        logger.error(f"Error in _get_worker_counts: {e}")
-
-    return {"ok_workers": 0, "off_workers": 0}
-
-
-async def _get_worker_stats(
-    worker: Optional[str] = None,
-) -> list[dict[str, Any]]:
-    """
-    Fetches all worker statistics which were active in the last 24 hours.
-    """
-    params = {}
-    where_clause = ""
-
-    if worker:
-        where_clause = "WHERE worker = %(worker)s"
-        params["worker"] = worker
-
-    query = f"""
-    WITH
-        all_active_workers AS (
-            SELECT DISTINCT worker
-            FROM worker_stats_24h
-            {where_clause}
-        ),
-        
-        stats_5m AS (
-            SELECT
-                worker,
-                argMax(miner, ts) as latest_miner,
-                count() as shares,
-                sum(actual_difficulty) as share_value,
-                sum(pool_difficulty) * 4294967296 / 300 as hashrate
-            FROM shares
-            WHERE ts > now() - INTERVAL 5 MINUTE
-            {"AND " + where_clause.replace("WHERE ", "") if where_clause else ""}
-            GROUP BY worker
-        )
-
-    SELECT
-        w.worker,
-        -- Get miner from the most recent source available
-        COALESCE(s5.latest_miner, s60.latest_miner, s24.latest_miner) as latest_miner,
-        
-        -- Get the live state and last share from the fast MV
-        toUnixTimestamp(latest_share_data.last_share_ts) as last_share_ts,
-        CASE
-            WHEN latest_share_data.last_share_ts > now() - INTERVAL 10 MINUTE THEN 'ok'
-            ELSE 'offline'
-        END as state,
-
-        s5.shares as shares_5m,
-        s5.hashrate as hashrate_5m,
-        s5.share_value as share_value_5m,
-
-        s60.shares as shares_60m,
-        s60.hashrate as hashrate_60m,
-        s60.actual_difficulty_sum as share_value_60m,
-
-        s24.shares as shares_24h,
-        s24.hashrate as hashrate_24h,
-        s24.actual_difficulty_sum as share_value_24h
-        
-    FROM all_active_workers AS w
-    LEFT JOIN worker_stats_24h AS s24 ON w.worker = s24.worker
-    LEFT JOIN worker_stats_60m AS s60 ON w.worker = s60.worker
-    LEFT JOIN stats_5m AS s5 ON w.worker = s5.worker
-    LEFT JOIN worker_pool_latest_share_mv AS latest_share_data ON w.worker = latest_share_data.worker
-    ORDER BY w.worker
-    """
-
-    result = await db.client.query(query, parameters=params)
-
-    workers = []
-    for row in result.result_rows:
-        workers.append(
-            {
-                "worker": row[0],
-                "miner": row[1],
-                "last_share_ts": row[2],
-                "state": row[3],
-                "shares_5m": row[4] or 0,
-                "hashrate_5m": row[5] or 0,
-                "share_value_5m": row[6] or 0,
-                "shares_60m": row[7] or 0,
-                "hashrate_60m": row[8] or 0,
-                "share_value_60m": row[9] or 0,
-                "shares_24h": row[10] or 0,
-                "hashrate_24h": row[11] or 0,
-                "share_value_24h": row[12] or 0,
-            }
-        )
-    return workers
 
 
 @app.get(
@@ -695,30 +354,7 @@ async def get_workers_share_value(
                 detail=f"Cannot query future dates. Today is {today_utc}",
             )
 
-        query = """
-        SELECT
-            worker,
-            countMerge(shares) as shares,
-            sumMerge(share_value) as share_value,
-            sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
-        FROM worker_daily_share_value
-        WHERE date = %(date)s
-        GROUP BY worker
-        ORDER BY worker
-        """
-
-        params = {"date": requested_date}
-        result = await db.client.query(query, parameters=params)
-
-        workers_dict = {}
-        for row in result.result_rows:
-            worker_name = row[0]
-            workers_dict[worker_name] = {
-                "shares": int(row[1]),
-                "share_value": float(row[2]),
-                "hashrate": float(row[3]) / 1e9,  # Convert to GH/s
-                "hash_rate_unit": "Gh/s",
-            }
+        workers_dict = await get_worker_daily_share_value(db, requested_date)
 
         reward_query = """
         SELECT amount, paid, payment_proof_url
@@ -727,6 +363,7 @@ async def get_workers_share_value(
         LIMIT 1
         """
 
+        params = {"date": requested_date}
         reward_result = await db.client.query(reward_query, parameters=params)
         btc_amount = None
         paid = None
