@@ -122,6 +122,7 @@ async def health_check():
     }
 
 
+# Public API
 @app.get("/api/stats/summary", tags=["Historical Data"])
 @limiter.limit("10/minute")
 async def get_stats_summary(request: Request) -> dict[str, Any]:
@@ -169,7 +170,6 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# Access to holders
 @app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
 @limiter.limit("60/minute")
 async def get_pool_stats(
@@ -229,7 +229,6 @@ async def get_pool_stats(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-# Access to holders
 @app.get(
     "/api/workers/stats", response_model=WorkersStatsResponse, tags=["Historical Data"]
 )
