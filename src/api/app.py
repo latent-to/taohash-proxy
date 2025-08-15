@@ -38,6 +38,11 @@ from src.api.services.worker_queries import (
     get_worker_timerange_stats,
     get_worker_daily_share_value,
 )
+from src.api.services.reward_queries import (
+    get_daily_reward_by_date,
+    get_all_daily_rewards,
+    get_unpaid_daily_rewards,
+)
 
 logger = get_logger(__name__)
 
@@ -356,30 +361,14 @@ async def get_workers_share_value(
 
         workers_dict = await get_worker_daily_share_value(db, requested_date)
 
-        reward_query = """
-        SELECT amount, paid, payment_proof_url
-        FROM daily_rewards
-        WHERE date = %(date)s
-        LIMIT 1
-        """
-
-        params = {"date": requested_date}
-        reward_result = await db.client.query(reward_query, parameters=params)
+        reward_data = await get_daily_reward_by_date(db, requested_date)
         btc_amount = None
         paid = None
         payment_proof_url = None
-        if reward_result.result_rows and reward_result.result_rows[0]:
-            btc_amount = float(reward_result.result_rows[0][0])
-            paid = (
-                bool(reward_result.result_rows[0][1])
-                if len(reward_result.result_rows[0]) > 1
-                else False
-            )
-            payment_proof_url = (
-                reward_result.result_rows[0][2]
-                if len(reward_result.result_rows[0]) > 2
-                else None
-            )
+        if reward_data:
+            btc_amount = reward_data["amount"]
+            paid = reward_data["paid"]
+            payment_proof_url = reward_data["payment_proof_url"]
 
         return {
             "btc": {
@@ -562,27 +551,16 @@ async def get_all_rewards(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        query = """
-        SELECT 
-            date,
-            amount,
-            updated_at,
-            paid,
-            payment_proof_url
-        FROM daily_rewards
-        ORDER BY date DESC
-        """
-
-        result = await db.client.query(query)
+        reward_records = await get_all_daily_rewards(db)
 
         rewards = {}
-        for row in result.result_rows:
-            date_str = row[0].strftime("%Y-%m-%d")
+        for record in reward_records:
+            date_str = record["date"].strftime("%Y-%m-%d")
             rewards[date_str] = {
-                "amount": float(row[1]),
-                "updated_at": row[2].isoformat() if row[2] else None,
-                "paid": bool(row[3]) if len(row) > 3 else False,
-                "payment_proof_url": row[4] if len(row) > 4 else "",
+                "amount": record["amount"],
+                "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
+                "paid": record["paid"],
+                "payment_proof_url": record["payment_proof_url"],
             }
 
         return {"success": True, "total_records": len(rewards), "rewards": rewards}
@@ -608,29 +586,19 @@ async def get_unpaid_rewards(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        query = """
-        SELECT 
-            date,
-            amount,
-            updated_at
-        FROM daily_rewards
-        WHERE paid = false
-        ORDER BY date ASC
-        """
-
-        result = await db.client.query(query)
+        unpaid_records = await get_unpaid_daily_rewards(db)
 
         unpaid_rewards = []
         total_unpaid = 0.0
 
-        for row in result.result_rows:
-            date_str = row[0].strftime("%Y-%m-%d")
-            amount = float(row[1])
+        for record in unpaid_records:
+            date_str = record["date"].strftime("%Y-%m-%d")
+            amount = record["amount"]
             unpaid_rewards.append(
                 {
                     "date": date_str,
                     "amount": amount,
-                    "updated_at": row[2].isoformat() if row[2] else None,
+                    "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
                 }
             )
             total_unpaid += amount
