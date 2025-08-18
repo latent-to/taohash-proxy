@@ -5,7 +5,7 @@ AntPool rewards extraction implementation.
 import hmac
 import hashlib
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict
 import aiohttp
 
@@ -74,8 +74,7 @@ class AntPoolProvider:
                         try:
                             # Parse "2025-08-10 00:00:00" format
                             dt = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
-                            # "Antpool" way of reporting rewards is 1 day behind
-                            reward_date = (dt - timedelta(days=1)).date()
+                            reward_date = dt.date()
 
                             pplns_amount = float(row.get("pplnsAmount", 0))
 
