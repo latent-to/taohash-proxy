@@ -31,6 +31,40 @@ class AntPoolProvider:
             .hexdigest()
             .upper()
         )
+    
+    async def fetch_account_overview(self) -> Dict:
+        """Fetch account overview from AntPool API."""
+        api_url = "https://antpool.com/api/accountOverview.htm"
+
+        nonce = str(int(time.time() * 1000))
+        payload = {
+            "key": self.api_key,
+            "userId": self.user_id,
+            "nonce": nonce,
+            "signature": self._generate_signature(nonce),
+            "coin": "BTC",
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    api_url, data=payload, timeout=aiohttp.ClientTimeout(total=20)
+                ) as response:
+                    if response.status != 200:
+                        logger.error(f"AntPool API HTTP error: {response.status}")
+                        return {}
+                    
+                    data = await response.json()
+                    
+                    if data.get("code") != 0:
+                        logger.error(f"AntPool API error: {data.get('message')}")
+                        return {}
+                    
+                    return data.get("data", {})
+                    
+        except Exception as e:
+            logger.error(f"AntPool API request failed: {e}")
+            return {}
 
     async def fetch_daily_rewards(self, days: int = 10) -> List[Dict]:
         """
