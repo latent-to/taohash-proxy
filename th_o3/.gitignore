@@ -1,0 +1,9 @@
+# Rust
+target
+# Python
+.conda
+*.ipynb
+*.egg-info
+__pycache__
+# IDE
+.vscode

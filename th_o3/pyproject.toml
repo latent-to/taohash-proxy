@@ -1,0 +1,52 @@
+[project]
+name = "th_o3"
+description = "A collection of rust bindings for the TAOHash proxy"
+readme = "README.md"
+license = {file = "LICENSE"}
+keywords = ["taohash", "pyo3"]
+
+requires-python = ">= 3.9"
+
+authors = [
+  {name = "Cameron Fairchild", email = "c@latent.to"},
+]
+maintainers = [
+  {name = "Cameron Fairchild", email = "c@latent.to"}
+]
+classifiers = [
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Developers",
+        "Topic :: Software Development :: Build Tools",
+        "License :: OSI Approved :: MIT License",
+        "Programming Language :: Python :: 3 :: Only",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+        "Topic :: Scientific/Engineering",
+        "Topic :: Software Development",
+        "Topic :: Software Development :: Libraries",
+        "Topic :: Software Development :: Libraries :: Python Modules",]
+
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/latent-to/taohash-proxy"
+
+[project.optional-dependencies]
+dev = ["black==23.7.0","maturin", "ruff==0.4.7"]
+test = [
+    "pytest==7.2.0",
+    "pytest-asyncio==0.23.7",
+    "pytest-mock==3.12.0",
+    "pytest-split==0.8.0",
+    "pytest-xdist==3.0.2",
+    "pytest-rerunfailures==10.2",
+    "ddt==1.6.0",
+]
+
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]

@@ -1,0 +1,29 @@
+[package]
+name = "th_o3"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+name = "th_o3"
+crate-type = ["cdylib"]
+
+[dependencies.pyo3]
+version = "0.25.1"
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+log = { version = "0.4.25", default-features = false }
+pyo3-log = { version = "0.12.1", default-features = false }
+blake2 = "0.10"
+base58 = "0.2"
+hex = "0.4.3"
+sha2 = "0.10.9"
+u256-literal = "1.2.1"
+primitive-types = "0.13.1"
+itertools = "0.14.0"
+bitcoin = "0.32.7"
+fixed = "1.29.0"
+bitcoin_hashes = "0.14.0"
+

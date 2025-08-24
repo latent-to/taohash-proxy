@@ -1,1 +1,0 @@
-# Rewards extraction module
