@@ -10,7 +10,7 @@ fn th_o3(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 fn register_child_module(parent_module: &Bound<'_, PyModule>) -> PyResult<()> {
     let protocol_module = PyModule::new(parent_module.py(), "protocol")?;
-    protocol_module.add_function(wrap_pyfunction!(protocol::py_test_fn, &protocol_module)?)?;
     protocol_module.add_wrapped(wrap_pymodule!(protocol::difficulty::difficulty))?;
+    protocol_module.add_wrapped(wrap_pymodule!(protocol::tides::tides))?;
     parent_module.add_submodule(&protocol_module)
 }
