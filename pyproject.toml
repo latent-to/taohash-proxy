@@ -1,0 +1,25 @@
+[project]
+name = "th_proxy"
+version = "0.0.1"
+description = "TAOHash Proxy"
+requires-python = ">=3.9"
+
+dependencies = [
+    "aiohttp~=3.9",
+    "requests>=2.0.0,<3.0",
+    "toml==0.10.2",
+    "clickhouse-connect>=0.8.16",
+    "python-bitcoinlib",
+    "fastapi==0.104.1",
+    "uvicorn==0.24.0",
+    "slowapi==0.1.9",
+    "python-multipart==0.0.6",
+    "httpx==0.25.2",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
