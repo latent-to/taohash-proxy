@@ -82,7 +82,6 @@ class OceanProvider:
             # Skip outputs with no addresses (OP_RETURN, null-data, etc.)
             if not addresses:
                 continue
-            logger.debug(f"Addresses: {addresses}")
 
             if self.btc_address in addresses:
                 received += output.get("value", 0)
