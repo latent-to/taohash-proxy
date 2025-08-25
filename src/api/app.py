@@ -10,7 +10,6 @@ import asyncio
 from typing import Any, Optional
 from datetime import datetime, timezone
 
-import aiohttp
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -76,6 +75,18 @@ async def process_rewards_task():
         provider = AntPoolProvider(api_key, api_secret, user_id)
         logger.info("Using AntPool rewards provider")
 
+    elif provider_type == "ocean":
+        btc_address = os.environ.get("OCEAN_BTC_ADDRESS", "")
+
+        if not btc_address:
+            logger.error("OCEAN_BTC_ADDRESS not configured, disabling rewards loop")
+            return
+
+        from ..rewards_extraction.ocean import OceanProvider
+
+        provider = OceanProvider(btc_address)
+        logger.info("Using Ocean rewards provider")
+
     else:  # Default to braiins
         if not BRAIINS_API_TOKEN:
             logger.error("BRAIINS_API_TOKEN not configured, disabling rewards loop")
@@ -93,7 +104,8 @@ async def process_rewards_task():
                 await asyncio.sleep(300)
                 continue
 
-            rewards = await provider.fetch_daily_rewards(10)
+            fetch_days = 2 if provider_type == "ocean" else 10
+            rewards = await provider.fetch_daily_rewards(fetch_days)
 
             for reward_data in rewards:
                 reward_date = reward_data["date"]
@@ -146,12 +158,38 @@ async def process_rewards_task():
                         )
                     else:
                         logger.warning(
-                            f"No worker activity for {reward_date}, skipping reward"
+                            f"No worker activity for {reward_date}, skipping reward {reward_amount} BTC ({provider_type})"
                         )
                 else:
-                    logger.debug(
-                        f"Reward already exists for {reward_date}, keeping existing value"
-                    )
+                    # Only for Ocean, update last day's reward if sum changed
+                    if provider_type == "ocean":
+                        existing_amount = float(result.result_rows[0][0])
+                        if abs(existing_amount - reward_amount) > 0.00000001:
+                            update_query = """
+                            UPDATE daily_rewards 
+                            SET amount = %(amount)s 
+                            WHERE date = %(date)s
+                            """
+
+                            await db.client.command(
+                                update_query,
+                                parameters={
+                                    "date": reward_date,
+                                    "amount": reward_amount,
+                                },
+                            )
+
+                            logger.info(
+                                f"Updated Ocean reward for {reward_date}: {existing_amount:.8f} -> {reward_amount:.8f} BTC"
+                            )
+                        else:
+                            logger.debug(
+                                f"Ocean reward unchanged for {reward_date}: {reward_amount:.8f} BTC"
+                            )
+                    else:
+                        logger.debug(
+                            f"Reward already exists for {reward_date}, keeping existing value"
+                        )
 
         except Exception as e:
             logger.error(f"Error in reward processing task: {e}")
