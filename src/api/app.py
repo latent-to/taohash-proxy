@@ -161,10 +161,10 @@ async def process_rewards_task():
                             f"No worker activity for {reward_date}, skipping reward {reward_amount} BTC ({provider_type})"
                         )
                 else:
-                    # Only for Ocean, update last day's reward if sum changed
+                    # Only for Ocean, update last day's reward if sum increased
                     if provider_type == "ocean":
                         existing_amount = float(result.result_rows[0][0])
-                        if abs(existing_amount - reward_amount) > 0.00000001:
+                        if (reward_amount - existing_amount) > 0.00000001:
                             update_query = """
                             UPDATE daily_rewards 
                             SET amount = %(amount)s 
