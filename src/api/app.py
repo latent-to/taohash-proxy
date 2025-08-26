@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from src.rewards_extraction.monitor import rewards_monitor_task
+from src.difficulty_monitoring.monitor import difficulty_monitor_task
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -53,7 +54,10 @@ logger = get_logger(__name__)
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
+
+# Controllers configuration
 ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
+ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -71,21 +75,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without database connection")
 
-    task = None
+    reward_task = None
+    difficulty_task = None
+
     if ENABLE_REWARD_POLLING:
         logger.info("Daily rewards loop is enabled")
-        task = asyncio.create_task(rewards_monitor_task(db))
+        reward_task = asyncio.create_task(rewards_monitor_task(db))
     else:
         logger.info("Daily rewards loop is disabled")
 
+    if ENABLE_DIFFICULTY_MONITORING:
+        logger.info("Difficulty monitoring is enabled")
+        difficulty_task = asyncio.create_task(difficulty_monitor_task(db))
+    else:
+        logger.info("Difficulty monitoring is disabled")
+
     yield
 
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for task in [reward_task, difficulty_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     if db:
         await db.close()
