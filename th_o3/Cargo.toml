@@ -26,4 +26,5 @@ itertools = "0.14.0"
 bitcoin = "0.32.7"
 fixed = "1.29.0"
 bitcoin_hashes = "0.14.0"
+sqlite = "0.37.0"
 
