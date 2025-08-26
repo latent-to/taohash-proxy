@@ -313,7 +313,7 @@ class StatsDB:
                 multiplier Float64,
                 network_difficulty Float64,
                 updated_at DateTime DEFAULT now()
-            ) ENGINE = ReplacingMergeTree(updated_at)
+            ) ENGINE = MergeTree()
             ORDER BY id""",
             # Insert default config when creating the table
             """INSERT INTO tides_config (id, multiplier, network_difficulty, updated_at)
