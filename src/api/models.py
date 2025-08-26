@@ -148,3 +148,19 @@ class RewardRequest(BaseModel):
     payment_proof_url: Optional[str] = Field(
         None, description="URL to payment proof documentation"
     )
+
+
+class TidesConfig(BaseModel):
+    """
+    Model for updating the TIDES share window configuration.
+    Supports partial updates - at least one field must be provided.
+    """
+
+    network_difficulty: Optional[float] = Field(
+        None, gt=0, description="The target network difficulty for the share window."
+    )
+    multiplier: Optional[float] = Field(
+        None,
+        gt=0,
+        description="The multiplier used to calculate the target share value.",
+    )
