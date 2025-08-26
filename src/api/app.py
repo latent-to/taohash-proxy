@@ -30,6 +30,7 @@ from src.api.models import (
     WorkersShareValueResponse,
     WorkersStatsResponse,
     WorkersTimerangeResponse,
+    TidesConfig,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -42,6 +43,10 @@ from src.api.services.reward_queries import (
     get_daily_reward_by_date,
     get_all_daily_rewards,
     get_unpaid_daily_rewards,
+)
+from src.api.services.config_queries import (
+    get_config,
+    update_config,
 )
 
 logger = get_logger(__name__)
@@ -557,7 +562,9 @@ async def get_all_rewards(
             date_str = record["date"].strftime("%Y-%m-%d")
             rewards[date_str] = {
                 "amount": record["amount"],
-                "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
+                "updated_at": record["updated_at"].isoformat()
+                if record["updated_at"]
+                else None,
                 "paid": record["paid"],
                 "payment_proof_url": record["payment_proof_url"],
             }
@@ -597,7 +604,9 @@ async def get_unpaid_rewards(
                 {
                     "date": date_str,
                     "amount": amount,
-                    "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
+                    "updated_at": record["updated_at"].isoformat()
+                    if record["updated_at"]
+                    else None,
                 }
             )
             total_unpaid += amount
@@ -612,3 +621,141 @@ async def get_unpaid_rewards(
     except Exception as e:
         logger.error(f"Error fetching unpaid rewards: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get(
+    "/config/tides",
+    tags=["Configuration"],
+    summary="Get TIDES Configuration",
+    response_description="Current TIDES configuration values",
+)
+async def get_tides_config(
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Retrieves the current TIDES configuration.
+
+    Returns the current multiplier, network_difficulty, and last updated timestamp.
+
+    ### Sample Request (GET):
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/config/tides" -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+    ```
+
+    ### Sample Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "config": {
+        "multiplier": 8.5,
+        "network_difficulty": 400000000.0,
+        "updated_at": "2025-01-15T10:30:00"
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        config_data = await get_config(db)
+
+        if not config_data:
+            raise HTTPException(
+                status_code=404,
+                detail="TIDES configuration not found. Please initialize with a PUT request.",
+            )
+
+        if config_data["updated_at"]:
+            config_data["updated_at"] = config_data["updated_at"].isoformat()
+
+        return {
+            "status": "success",
+            "config": config_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get TIDES config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while retrieving the configuration.",
+        )
+
+
+@app.put(
+    "/config/tides",
+    tags=["Configuration"],
+    summary="Update TIDES Configuration (Partial Updates)",
+    response_description="Confirmation of the configuration update.",
+)
+async def update_tides_config(
+    config: TidesConfig,
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Updates the global configuration for the TIDES payout system.
+
+    Can update any combination of: network_difficulty, multiplier
+    Only provided fields will be updated.
+
+    ---
+
+    ### Sample Request (partial update):
+    ```bash
+    curl -X PUT "http://127.0.0.1:8000/config/tides" \\
+    -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -d '{
+      "network_difficulty": 400000000.0
+    }'
+    ```
+
+    ### Successful Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "message": "TIDES configuration updated successfully.",
+      "updated_fields": {
+        "network_difficulty": 400000000.0
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                config.network_difficulty is not None,
+                config.multiplier is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        updated_fields = await update_config(
+            db,
+            network_difficulty=config.network_difficulty,
+            multiplier=config.multiplier,
+        )
+
+        return {
+            "status": "success",
+            "message": "TIDES configuration updated successfully.",
+            "updated_fields": updated_fields,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update TIDES config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while updating the configuration.",
+        )
