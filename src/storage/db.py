@@ -307,6 +307,18 @@ class StatsDB:
             )
             ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY date""",
+            # Difficulty window configuration - single row config table
+            """CREATE TABLE IF NOT EXISTS tides_config (
+                id UInt8 DEFAULT 1,
+                multiplier Float64,
+                network_difficulty Float64,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY id""",
+            # Insert default config when creating the table
+            """INSERT INTO tides_config (id, multiplier, network_difficulty, updated_at)
+            SELECT 1, 8, 129700000000000, now()
+            WHERE NOT EXISTS (SELECT 1 FROM tides_config WHERE id = 1)""",
         ]
 
     async def _create_tables(self):
