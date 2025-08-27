@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use std::collections::VecDeque;
+use std::fmt::Display;
 use std::sync::{Arc, Mutex};
 
 use sqlite;
@@ -17,6 +18,12 @@ pub enum Error {
     Unknown,
 }
 
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 impl From<sqlite::Error> for Error {
     fn from(e: sqlite::Error) -> Self {
         Error::DatabaseError(e)
@@ -25,7 +32,9 @@ impl From<sqlite::Error> for Error {
 
 #[pymodule(submodule, name = "tides")]
 pub mod tides {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, ops::Deref};
+
+    use pyo3::exceptions::PyValueError;
 
     use super::*;
 
@@ -35,10 +44,22 @@ pub mod tides {
         pub index: i64,
     }
 
-    #[pyclass]
     struct Database {
         pub connection: String,
         pub conn: Option<sqlite::ConnectionThreadSafe>,
+    }
+
+    impl Clone for Database {
+        fn clone(&self) -> Self {
+            let mut new = Self {
+                connection: self.connection.clone(),
+                conn: None,
+            };
+            if self.conn.is_some() {
+                new.connect().unwrap();
+            };
+            new
+        }
     }
 
     impl Database {
@@ -49,9 +70,12 @@ pub mod tides {
             }
         }
 
-        pub fn connect(&mut self) -> Result<(), String> {
-            let conn = sqlite::Connection::open_thread_safe(&self.connection)
-                .map_err(|e| e.to_string())?;
+        pub fn is_connected(&self) -> bool {
+            self.conn.is_some()
+        }
+
+        pub fn connect(&mut self) -> Result<(), Error> {
+            let conn = sqlite::Connection::open_thread_safe(&self.connection)?;
             self.conn = Some(conn);
             Ok(())
         }
@@ -276,7 +300,52 @@ pub mod tides {
         pub fee_rate: f64,            // fee rate of the share
     }
 
-    #[pyclass]
+    #[pymethods]
+    impl Share {
+        #[new]
+        pub fn new(
+            user_id: i64,
+            difficulty: f64,
+            block_hash: Vec<u8>,
+            nonce: Vec<u8>,
+            timestamp: u64,
+            prevhash: Vec<u8>,
+            version: Vec<u8>,
+            index: i64,
+            job_version: Vec<u8>,
+            job_ntime: Vec<u8>,
+            job_nbits: Vec<u8>,
+            job_merkle_root: Vec<u8>,
+            job_coinb1: Vec<u8>,
+            job_coinb2: Vec<u8>,
+            job_extranonce1: Vec<u8>,
+            job_extranonce2: Vec<u8>,
+            diff_used: f64,
+            fee_rate: f64,
+        ) -> Self {
+            Self {
+                user_id,
+                difficulty,
+                block_hash,
+                nonce,
+                timestamp,
+                prevhash,
+                version,
+                index: ShareIndex { index },
+                job_version,
+                job_ntime,
+                job_nbits,
+                job_merkle_root,
+                job_coinb1,
+                job_coinb2,
+                job_extranonce1,
+                job_extranonce2,
+                diff_used,
+                fee_rate,
+            }
+        }
+    }
+
     struct ShareDeque {
         shares: VecDeque<Share>,
         pub curr_difficulty: f64,       // current difficulty
@@ -445,14 +514,13 @@ pub mod tides {
         }
     }
 
-    #[pyclass]
     struct Tides {
-        pub share_queue: ShareDeque,
-        pub share_buffer: ShareBufferDeque,
+        pub share_queue: Arc<Mutex<ShareDeque>>,
+        pub share_buffer: Arc<Mutex<ShareBufferDeque>>,
         pub share_buffer_size: usize,
         pub curr_difficulty: f64,  // current difficulty
         pub share_log_window: u32, // multiple of current difficulty
-        pub database: Arc<Mutex<Database>>,
+        pub database: Arc<Database>,
     }
 
     impl Tides {
@@ -460,11 +528,14 @@ pub mod tides {
             share_log_window: u32,
             curr_difficulty: f64,
             share_buffer_size: usize,
-            database: Arc<Mutex<Database>>,
+            database: Arc<Database>,
         ) -> Self {
             Self {
-                share_queue: ShareDeque::new(share_log_window, curr_difficulty),
-                share_buffer: ShareBufferDeque::new(),
+                share_queue: Arc::new(Mutex::new(ShareDeque::new(
+                    share_log_window,
+                    curr_difficulty,
+                ))),
+                share_buffer: Arc::new(Mutex::new(ShareBufferDeque::new())),
                 share_buffer_size,
                 curr_difficulty,
                 share_log_window,
@@ -473,52 +544,55 @@ pub mod tides {
         }
 
         pub fn fill_share_queue(&mut self) -> Result<(), Error> {
+            let Ok(mut share_queue) = self.share_queue.lock() else {
+                return Err(Error::DatabaseLockError);
+            };
+            let Ok(mut share_buffer) = self.share_buffer.lock() else {
+                return Err(Error::DatabaseLockError);
+            };
+
             // Then grab some shares from the buffer
-            let diff_to_add = self.share_queue.share_log_window() - self.share_queue.curr_sum;
+            let diff_to_add = share_queue.share_log_window() - share_queue.curr_sum;
             if diff_to_add <= 0.0 {
                 // Window is full
                 return Ok(());
             }
 
             // Check if we need to add more shares from the DB
-            if diff_to_add > self.share_buffer.curr_sum {
-                let mut overage = diff_to_add - self.share_buffer.curr_sum;
+            if diff_to_add > share_buffer.curr_sum {
+                let mut overage = diff_to_add - share_buffer.curr_sum;
 
                 let mut last_index = ShareIndex { index: 0 };
-                if let Some(last_share) = self.share_buffer.last_share() {
+                if let Some(last_share) = share_buffer.last_share() {
                     last_index = last_share.index;
                 }
 
                 let mut shares_from_db = Vec::new();
-                let db = self.database.lock();
-                if let Ok(db) = db {
-                    while overage > 0.0 {
-                        let shares_ = db.get_shares(last_index.clone(), DB_FETCH_SIZE)?;
+                let db = &self.database;
+                while overage > 0.0 {
+                    let shares_ = db.get_shares(last_index.clone(), DB_FETCH_SIZE)?;
 
-                        for share in shares_.iter() {
-                            shares_from_db.push(share.clone());
-                            overage -= share.difficulty;
-                        }
-                        if let Some(last_share) = shares_.last() {
-                            last_index = last_share.index.clone();
-                        } else {
-                            break; // No more shares in the DB
-                        }
+                    for share in shares_.iter() {
+                        shares_from_db.push(share.clone());
+                        overage -= share.difficulty;
                     }
-                } else {
-                    println!("Failed to lock database");
+                    if let Some(last_share) = shares_.last() {
+                        last_index = last_share.index.clone();
+                    } else {
+                        break; // No more shares in the DB
+                    }
                 }
 
                 // Add the shares from the DB to the buffer
-                self.share_buffer.extend(shares_from_db.clone());
+                share_buffer.extend(shares_from_db.clone());
             }
 
             // Add shares from the buffer to the queue until the queue is full or the buffer is empty
-            while self.share_queue.curr_sum < self.share_queue.share_log_window() {
-                let Some(share) = self.share_buffer.pop_back() else {
+            while share_queue.curr_sum < share_queue.share_log_window() {
+                let Some(share) = share_buffer.pop_back() else {
                     break;
                 };
-                self.share_queue.push_front_shares(vec![share]);
+                share_queue.push_front_shares(vec![share]);
             }
 
             Ok(())
@@ -530,11 +604,18 @@ pub mod tides {
         }
 
         pub fn add_share(&mut self, share: Share) -> Result<(), Error> {
+            let Ok(mut share_queue) = self.share_queue.lock() else {
+                return Err(Error::DatabaseLockError);
+            };
+            let Ok(mut share_buffer) = self.share_buffer.lock() else {
+                return Err(Error::DatabaseLockError);
+            };
+
             self.add_share_to_db(share.clone())?; // Add to DB
 
-            let removed = self.share_queue.add_share(share);
-            self.share_buffer.extend(removed);
-            let _ = self.share_buffer.truncate(self.share_buffer_size);
+            let removed = share_queue.add_share(share);
+            share_buffer.extend(removed);
+            let _ = share_buffer.truncate(self.share_buffer_size);
 
             Ok(())
         }
@@ -545,52 +626,54 @@ pub mod tides {
             }
 
             let old_difficulty = self.curr_difficulty;
-            self.curr_difficulty = difficulty;
+            if let Ok(mut share_queue) = self.share_queue.lock() {
+                if let Ok(mut share_buffer) = self.share_buffer.lock() {
+                    self.curr_difficulty = difficulty;
 
-            let removed = self.share_queue.adjust_difficulty(difficulty);
-            self.share_buffer.extend(removed);
-            let _ = self.share_buffer.truncate(self.share_buffer_size);
+                    let removed = share_queue.adjust_difficulty(difficulty);
+                    share_buffer.extend(removed);
+                    let _ = share_buffer.truncate(self.share_buffer_size);
+                }
+            };
 
             if old_difficulty > difficulty {
                 self.fill_share_queue()?; // Fill window
-
-                Ok(())
-            } else {
-                Ok(()) // Already removed above
             }
+            Ok(())
         }
 
         pub fn get_btc_address_for_user(&self, user_id: i64) -> Result<String, Error> {
-            let db = self.database.lock();
-            if let Ok(db) = db {
+            let db = &self.database;
+            if db.is_connected() {
                 db.get_btc_address_for_user(user_id)
             } else {
-                Err(Error::DatabaseLockError)
+                Err(Error::DatabaseNotConnected)
             }
         }
 
-        fn add_share_to_db(&mut self, share: Share) -> Result<(), Error> {
-            let db = self
-                .database
-                .lock()
-                .map_err(|_| Error::DatabaseNotConnected);
-            if let Ok(db) = db {
+        fn add_share_to_db(&self, share: Share) -> Result<(), Error> {
+            let db = &self.database;
+            if db.is_connected() {
                 db.add_share(share)
             } else {
-                Err(Error::DatabaseLockError)
+                Err(Error::DatabaseNotConnected)
             }
         }
 
         pub fn get_shares_in_window(&self) -> Result<Vec<Share>, Error> {
-            let shares = self.share_queue.get_shares_in_window();
-            Ok(shares)
+            if let Ok(share_queue) = self.share_queue.lock() {
+                let shares = share_queue.get_shares_in_window();
+                Ok(shares)
+            } else {
+                Err(Error::DatabaseLockError)
+            }
         }
 
         // Takes a payment in satoshis and returns a distribution in sats for the window and the fee for the pool
         pub fn get_distribution_for_window(
             &self,
             payment: u64,
-            mut cached_users: HashMap<i64, String>,
+            cached_users: &mut HashMap<i64, String>,
         ) -> Result<(Vec<(String, u64)>, u64), Error> {
             // TODO: make math accurate/round down to the SAT-level
 
@@ -626,6 +709,104 @@ pub mod tides {
             log::info!("Remainder: {}", remainder);
 
             Ok((distribution, total_fees + remainder))
+        }
+    }
+
+    #[pyclass(name = "Database")]
+    struct PyDatabase {
+        pub database: Option<Database>,
+        #[pyo3(get)]
+        pub connection: String,
+    }
+
+    #[pymethods]
+    impl PyDatabase {
+        #[new]
+        pub fn new(_py: Python, connection: &str) -> Self {
+            Self {
+                database: Some(Database::new(connection.to_string())),
+                connection: connection.to_string(),
+            }
+        }
+
+        pub fn connect(&mut self) -> PyResult<()> {
+            self.database
+                .as_mut()
+                .unwrap()
+                .connect()
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+    }
+
+    #[pyclass(name = "Tides")]
+    struct TidesPy {
+        tides: Tides,
+        cached_users: HashMap<i64, String>,
+    }
+
+    #[pymethods]
+    impl TidesPy {
+        #[new]
+        pub fn new(
+            py: Python,
+            share_log_window: u32,
+            curr_difficulty: f64,
+            share_buffer_size: usize,
+            database: Py<PyDatabase>,
+        ) -> Self {
+            Self {
+                tides: Tides::new(
+                    share_log_window,
+                    curr_difficulty,
+                    share_buffer_size,
+                    Arc::new(database.borrow(py).database.clone().unwrap()),
+                ),
+                cached_users: HashMap::new(),
+            }
+        }
+
+        pub fn add_share(&mut self, share: Share) -> PyResult<()> {
+            self.tides
+                .add_share(share)
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+
+        pub fn get_shares_in_window(&self) -> PyResult<Vec<Share>> {
+            self.tides
+                .get_shares_in_window()
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+
+        pub fn get_distribution_for_window(
+            &mut self,
+            payment: u64,
+        ) -> PyResult<(Vec<(String, u64)>, u64)> {
+            self.tides
+                .get_distribution_for_window(payment, &mut self.cached_users)
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+
+        pub fn adjust_difficulty(&mut self, difficulty: f64) -> PyResult<()> {
+            self.tides
+                .adjust_difficulty(difficulty)
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+
+        pub fn restore_share_queue(&mut self) -> PyResult<()> {
+            self.tides
+                .restore_share_queue()
+                .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))
+        }
+
+        pub fn get_btc_address_for_user(&mut self, user_id: i64) -> PyResult<String> {
+            if !self.cached_users.contains_key(&user_id) {
+                let btc_address = self
+                    .tides
+                    .get_btc_address_for_user(user_id)
+                    .map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
+                self.cached_users.insert(user_id, btc_address);
+            }
+            Ok(self.cached_users.get(&user_id).unwrap().clone())
         }
     }
 }
