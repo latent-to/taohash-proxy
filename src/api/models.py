@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -164,3 +165,19 @@ class TidesConfig(BaseModel):
         gt=0,
         description="The multiplier used to calculate the target share value.",
     )
+
+
+class TidesRewardSummary(BaseModel):
+    """TIDES reward summary information"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    processed: bool = Field(description="Whether this reward has been processed")
+
+
+class TidesRewardsResponse(BaseModel):
+    """TIDES rewards summary API response"""
+
+    rewards: List[TidesRewardSummary] = Field(description="List of TIDES rewards")
+
