@@ -181,3 +181,26 @@ class TidesRewardsResponse(BaseModel):
 
     rewards: List[TidesRewardSummary] = Field(description="List of TIDES rewards")
 
+
+class TidesRewardDetails(BaseModel):
+    """Full TIDES reward details"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: Dict[str, Any] = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
+    updated_at: datetime = Field(description="Last update timestamp")
+
+
+class TidesRewardUpdateRequest(BaseModel):
+    """Request model for updating TIDES reward fields"""
+
+    btc_amount: Optional[float] = Field(None, description="BTC reward amount", gt=0)
+    processed: Optional[bool] = Field(
+        None, description="Whether this reward has been processed"
+    )
