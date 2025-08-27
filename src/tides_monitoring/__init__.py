@@ -1,0 +1,1 @@
+"""TIDES window monitoring module for automatic window updates."""
