@@ -938,10 +938,10 @@ async def get_tides_reward_details(
 
     try:
         reward = await get_tides_reward_by_tx_hash(db, tx_hash)
-        
+
         if not reward:
             raise HTTPException(status_code=404, detail="TIDES reward not found")
-        
+
         return reward
 
     except HTTPException:
@@ -949,3 +949,72 @@ async def get_tides_reward_details(
     except Exception as e:
         logger.error(f"Error fetching TIDES reward {tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.put(
+    "/api/tides/rewards/{tx_hash}",
+    tags=["TIDES"],
+    summary="Update TIDES Reward",
+    response_description="Confirmation of the reward update",
+)
+@limiter.limit("60/minute")
+async def update_tides_reward_endpoint(
+    request: Request,
+    tx_hash: str,
+    reward_data: TidesRewardUpdateRequest,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Update TIDES reward fields (btc_amount and/or processed status).
+
+    Can update any combination of: btc_amount, processed
+    Only provided fields will be updated. Other fields remain unchanged.
+
+    Args:
+        tx_hash: Bitcoin transaction hash to update
+        reward_data: Fields to update
+
+    ### Sample Request:
+    ```bash
+    curl -X PUT "http://127.0.0.1:8888/api/tides/rewards/abc123..." \
+         -H "Authorization: Bearer YOUR_REWARDS_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"btc_amount": 6.25, "processed": true}'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                reward_data.btc_amount is not None,
+                reward_data.processed is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        updated_fields = await update_tides_reward(
+            db,
+            tx_hash=tx_hash,
+            btc_amount=reward_data.btc_amount,
+            processed=reward_data.processed,
+        )
+
+        if updated_fields is None:
+            raise HTTPException(status_code=404, detail="TIDES reward not found")
+
+        return {
+            "success": True,
+            "tx_hash": tx_hash,
+            "message": "TIDES reward updated successfully",
+            "updated_fields": updated_fields,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating TIDES reward {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
