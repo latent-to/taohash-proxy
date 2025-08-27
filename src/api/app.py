@@ -903,3 +903,49 @@ async def get_tides_rewards(
     except Exception as e:
         logger.error(f"Error fetching TIDES rewards: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get(
+    "/api/tides/rewards/{tx_hash}",
+    response_model=TidesRewardDetails,
+    tags=["TIDES"],
+    summary="Get TIDES Reward Details",
+    response_description="Full details for a specific TIDES reward",
+)
+@limiter.limit("60/minute")
+async def get_tides_reward_details(
+    request: Request,
+    tx_hash: str,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get full details for a specific TIDES reward by transaction hash.
+
+    Returns complete reward information including the TIDES window snapshot
+    that was captured when the reward was discovered.
+
+    Args:
+        tx_hash: Bitcoin transaction hash (64 character hex string)
+
+    ### Sample Request:
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/api/tides/rewards/abc123..." \
+         -H "Authorization: Bearer YOUR_TOKEN"
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        reward = await get_tides_reward_by_tx_hash(db, tx_hash)
+        
+        if not reward:
+            raise HTTPException(status_code=404, detail="TIDES reward not found")
+        
+        return reward
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching TIDES reward {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
