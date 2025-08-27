@@ -19,6 +19,7 @@ from slowapi.util import get_remote_address
 
 from src.rewards_extraction.monitor import rewards_monitor_task
 from src.difficulty_monitoring.monitor import difficulty_monitor_task
+from src.tides_monitoring.monitor import tides_monitor_task
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -49,6 +50,9 @@ from src.api.services.config_queries import (
     get_config,
     update_config,
 )
+from src.api.services.tides_queries import (
+    get_tides_window,
+)
 
 logger = get_logger(__name__)
 
@@ -58,6 +62,7 @@ limiter = Limiter(key_func=get_remote_address)
 # Controllers configuration
 ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
 ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
+ENABLE_TIDES_MONITORING = os.environ.get("ENABLE_TIDES_MONITORING", "")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -77,6 +82,7 @@ async def lifespan(app: FastAPI):
 
     reward_task = None
     difficulty_task = None
+    tides_task = None
 
     if ENABLE_REWARD_POLLING:
         logger.info("Daily rewards loop is enabled")
@@ -90,9 +96,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Difficulty monitoring is disabled")
 
+    if ENABLE_TIDES_MONITORING:
+        logger.info("TIDES monitoring is enabled")
+        tides_task = asyncio.create_task(tides_monitor_task(db))
+    else:
+        logger.info("TIDES monitoring is disabled")
+
     yield
 
-    for task in [reward_task, difficulty_task]:
+    for task in [reward_task, difficulty_task, tides_task]:
         if task:
             task.cancel()
             try:
@@ -771,4 +783,69 @@ async def update_tides_config(
         raise HTTPException(
             status_code=500,
             detail="An error occurred while updating the configuration.",
+        )
+
+
+@app.get(
+    "/api/tides/window",
+    tags=["TIDES"],
+    summary="Get TIDES Window",
+    response_description="Current TIDES sliding window data",
+)
+async def get_tides_window_endpoint(
+    request: Request,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get current TIDES sliding window data.
+
+    Returns worker statistics for the current TIDES difficulty window,
+    including worker shares, percentages, and window metadata.
+
+    ### Sample Response (200 OK):
+    ```json
+    {
+      "workers": [
+        {
+          "name": "worker1",
+          "shares": 1000,
+          "share_value": 50000000000.0,
+          "percentage": 25.5
+        }
+      ],
+      "share_log_window": 722500000000000.0,
+      "network_difficulty": 85000000000000.0,
+      "multiplier": 8.5,
+      "window_start": "2025-01-10T15:30:00",
+      "window_end": "2025-01-15T10:30:00",
+      "total_difficulty_in_window": 722500000000000.0,
+      "total_workers": 42,
+      "updated_at": "2025-01-15T10:30:00"
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        tides_data = await get_tides_window(db)
+
+        if not tides_data:
+            raise HTTPException(
+                status_code=404,
+                detail="TIDES window data not available. Please wait for initial calculation.",
+            )
+
+        return {
+            "status": "success",
+            "data": tides_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching TIDES window: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while retrieving TIDES data.",
         )
