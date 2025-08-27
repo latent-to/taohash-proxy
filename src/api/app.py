@@ -20,6 +20,7 @@ from slowapi.util import get_remote_address
 from src.rewards_extraction.monitor import rewards_monitor_task
 from src.difficulty_monitoring.monitor import difficulty_monitor_task
 from src.tides_monitoring.monitor import tides_monitor_task
+from src.tides_monitoring.rewards_monitor import tides_rewards_monitor_task
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -33,6 +34,9 @@ from src.api.models import (
     WorkersStatsResponse,
     WorkersTimerangeResponse,
     TidesConfig,
+    TidesRewardDetails,
+    TidesRewardsResponse,
+    TidesRewardUpdateRequest,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -63,6 +67,7 @@ limiter = Limiter(key_func=get_remote_address)
 ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
 ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
 ENABLE_TIDES_MONITORING = os.environ.get("ENABLE_TIDES_MONITORING", "")
+ENABLE_TIDES_REWARDS_MONITORING = os.environ.get("ENABLE_TIDES_REWARDS_MONITORING", "")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -83,6 +88,7 @@ async def lifespan(app: FastAPI):
     reward_task = None
     difficulty_task = None
     tides_task = None
+    tides_rewards_task = None
 
     if ENABLE_REWARD_POLLING:
         logger.info("Daily rewards loop is enabled")
@@ -102,9 +108,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("TIDES monitoring is disabled")
 
+    if ENABLE_TIDES_REWARDS_MONITORING:
+        logger.info("TIDES rewards monitoring is enabled")
+        tides_rewards_task = asyncio.create_task(tides_rewards_monitor_task(db))
+    else:
+        logger.info("TIDES rewards monitoring is disabled")
+
     yield
 
-    for task in [reward_task, difficulty_task, tides_task]:
+    for task in [reward_task, difficulty_task, tides_task, tides_rewards_task]:
         if task:
             task.cancel()
             try:
