@@ -333,6 +333,18 @@ class StatsDB:
                 updated_at DateTime DEFAULT now()
             ) ENGINE = MergeTree()
             ORDER BY id""",
+            # TIDES rewards table
+            """CREATE TABLE IF NOT EXISTS tides_rewards (
+                tx_hash String,
+                block_height UInt64,
+                btc_amount Float64,
+                confirmed_at DateTime DEFAULT now(),
+                discovered_at DateTime DEFAULT now(),
+                tides_window String,
+                processed Boolean DEFAULT false,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY (block_height, tx_hash)""",
         ]
 
     async def _create_tables(self):
