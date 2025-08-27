@@ -57,6 +57,11 @@ from src.api.services.config_queries import (
 from src.api.services.tides_queries import (
     get_tides_window,
 )
+from src.api.services.tides_rewards_queries import (
+    get_all_tides_rewards,
+    get_tides_reward_by_tx_hash,
+    update_tides_reward,
+)
 
 logger = get_logger(__name__)
 
@@ -861,3 +866,40 @@ async def get_tides_window_endpoint(
             status_code=500,
             detail="An error occurred while retrieving TIDES data.",
         )
+
+
+@app.get(
+    "/api/tides/rewards",
+    response_model=TidesRewardsResponse,
+    tags=["TIDES"],
+    summary="Get TIDES Rewards Summary",
+    response_description="List of all discovered TIDES rewards",
+)
+@limiter.limit("60/minute")
+async def get_tides_rewards(
+    request: Request,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get summary of all TIDES rewards.
+
+    Returns a list of all discovered Bitcoin rewards for TIDES with essential
+    information: transaction hash, BTC amount, confirmation date, and processing status.
+    Results are ordered by confirmation date (newest first).
+
+    ### Sample Request:
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/api/tides/rewards" \
+         -H "Authorization: Bearer YOUR_TOKEN"
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        rewards = await get_all_tides_rewards(db)
+        return {"rewards": rewards}
+
+    except Exception as e:
+        logger.error(f"Error fetching TIDES rewards: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
