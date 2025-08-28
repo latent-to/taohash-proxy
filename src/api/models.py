@@ -1,4 +1,5 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+from datetime import datetime
 from pydantic import BaseModel, Field
 
 
@@ -148,3 +149,89 @@ class RewardRequest(BaseModel):
     payment_proof_url: Optional[str] = Field(
         None, description="URL to payment proof documentation"
     )
+
+
+class TidesConfig(BaseModel):
+    """
+    Model for updating the TIDES share window configuration.
+    Supports partial updates - at least one field must be provided.
+    """
+
+    network_difficulty: Optional[float] = Field(
+        None, gt=0, description="The target network difficulty for the share window."
+    )
+    multiplier: Optional[float] = Field(
+        None,
+        gt=0,
+        description="The multiplier used to calculate the target share value.",
+    )
+
+
+class TidesRewardSummary(BaseModel):
+    """TIDES reward summary information"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    processed: bool = Field(description="Whether this reward has been processed")
+
+
+class TidesRewardsResponse(BaseModel):
+    """TIDES rewards summary API response"""
+
+    rewards: List[TidesRewardSummary] = Field(description="List of TIDES rewards")
+
+
+class TidesRewardDetails(BaseModel):
+    """Full TIDES reward details"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: Dict[str, Any] = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
+    updated_at: datetime = Field(description="Last update timestamp")
+
+
+class TidesRewardUpdateRequest(BaseModel):
+    """Request model for updating TIDES reward fields"""
+
+    btc_amount: Optional[float] = Field(None, description="BTC reward amount", gt=0)
+    processed: Optional[bool] = Field(
+        None, description="Whether this reward has been processed"
+    )
+
+
+class TidesWindowCalculateRequest(BaseModel):
+    """Request model for custom TIDES window calculation"""
+
+    end_datetime: datetime = Field(
+        description="Calculate TIDES window backwards from this datetime"
+    )
+
+
+class CustomTidesRewardRequest(BaseModel):
+    """Request model for manually creating TIDES rewards"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height", gt=0)
+    btc_amount: float = Field(description="BTC reward amount", gt=0)
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+
+
+class CustomTidesRewardResponse(BaseModel):
+    """Response model for created TIDES reward"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: Dict[str, Any] = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
