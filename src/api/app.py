@@ -37,6 +37,7 @@ from src.api.models import (
     TidesRewardDetails,
     TidesRewardsResponse,
     TidesRewardUpdateRequest,
+    TidesWindowCalculateRequest,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -56,6 +57,7 @@ from src.api.services.config_queries import (
 )
 from src.api.services.tides_queries import (
     get_tides_window,
+    calculate_custom_tides_window,
 )
 from src.api.services.tides_rewards_queries import (
     get_all_tides_rewards,
@@ -1018,3 +1020,52 @@ async def update_tides_reward_endpoint(
     except Exception as e:
         logger.error(f"Error updating TIDES reward {tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.post(
+    "/api/tides/window/calculate",
+    tags=["TIDES"],
+    summary="Calculate TIDES Window at Custom Time",
+    response_description="TIDES window calculated from specified datetime",
+)
+@limiter.limit("10/minute")
+async def calculate_tides_window_endpoint(
+    request: Request,
+    calculate_request: TidesWindowCalculateRequest,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Calculate TIDES window from a specific datetime (without storing).
+
+    Calculates the TIDES window backwards from the specified datetime:
+    SPECIFIED_TIME → Remaining Day (partial) → Full Days → Start Date (partial) → Target Reached
+
+    ### Sample Request:
+    ```bash
+    curl -X POST "http://127.0.0.1:8888/api/tides/window/calculate" \
+         -H "Authorization: Bearer YOUR_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"end_datetime": "2025-08-27T15:30:00Z"}'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        window_data = await calculate_custom_tides_window(
+            db, calculate_request.end_datetime
+        )
+
+        return {
+            "status": "success",
+            "data": window_data,
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Error calculating TIDES window at {calculate_request.end_datetime}: {e}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while calculating the TIDES window.",
+        )
