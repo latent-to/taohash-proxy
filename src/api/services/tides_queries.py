@@ -1,7 +1,7 @@
 """TIDES window queries and operations."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from src.api.services.config_queries import get_config
@@ -94,26 +94,9 @@ async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
 
     complete_data = _merge_worker_totals(included_days_data, start_date_data)
 
-    # Calculate percentages and format
+    # Format workers response
+    workers_list = _format_workers_response(complete_data)
     total_difficulty = sum(w["share_value"] for w in complete_data.values())
-    workers_list = []
-
-    for worker_name, worker_data in complete_data.items():
-        percentage = (
-            (worker_data["share_value"] / total_difficulty) * 100
-            if total_difficulty > 0
-            else 0
-        )
-        workers_list.append(
-            {
-                "name": worker_name,
-                "shares": worker_data["shares"],
-                "share_value": worker_data["share_value"],
-                "percentage": percentage,
-            }
-        )
-
-    workers_list.sort(key=lambda x: x["share_value"], reverse=True)
     window_end_timestamp = await _get_window_end_timestamp(db)
     window_start_timestamp = start_date_timestamp
 
@@ -144,18 +127,39 @@ async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
     return tides_data
 
 
-async def _find_included_days(db: StatsDB, target_difficulty: float) -> dict[str, Any]:
-    """Find included days using daily totals"""
+async def _find_included_days(
+    db: StatsDB, target_difficulty: float, end_date: Optional[datetime.date] = None
+) -> dict[str, Any]:
+    """
+    Find included days using daily totals.
 
-    query = """
-    SELECT date, COALESCE(sumMerge(share_value), 0) as daily_total
-    FROM worker_daily_share_value
-    WHERE date >= today() - INTERVAL 120 DAY
-    GROUP BY date 
-    ORDER BY date DESC
+    Args:
+        target_difficulty: Target difficulty to accumulate
+        end_date: End date to work backwards from. If None, uses today()
     """
 
-    result = await db.client.query(query)
+    if end_date is None:
+        # Work backwards from latest shares - default
+        query = """
+        SELECT date, COALESCE(sumMerge(share_value), 0) as daily_total
+        FROM worker_daily_share_value
+        WHERE date >= today() - INTERVAL 120 DAY
+        GROUP BY date 
+        ORDER BY date DESC
+        """
+        params = {}
+    else:
+        # Work backwards from specified end_date (excluding it), for custom calculations
+        query = """
+        SELECT date, COALESCE(sumMerge(share_value), 0) as daily_total
+        FROM worker_daily_share_value
+        WHERE date >= %(start_limit)s AND date < %(end_date)s
+        GROUP BY date 
+        ORDER BY date DESC
+        """
+        params = {"start_limit": end_date - timedelta(days=120), "end_date": end_date}
+
+    result = await db.client.query(query, parameters=params)
 
     cumulative_difficulty = 0
     included_days = []
@@ -254,6 +258,31 @@ def _merge_worker_totals(complete_workers: dict, start_date_data: dict) -> dict:
     return final_workers
 
 
+def _format_workers_response(complete_data: dict) -> list:
+    """Format worker data into the standard response format with percentages"""
+    
+    total_difficulty = sum(w["share_value"] for w in complete_data.values())
+    workers_list = []
+
+    for worker_name, worker_data in complete_data.items():
+        percentage = (
+            (worker_data["share_value"] / total_difficulty) * 100
+            if total_difficulty > 0
+            else 0
+        )
+        workers_list.append(
+            {
+                "name": worker_name,
+                "shares": worker_data["shares"],
+                "share_value": worker_data["share_value"],
+                "percentage": percentage,
+            }
+        )
+
+    workers_list.sort(key=lambda x: x["share_value"], reverse=True)
+    return workers_list
+
+
 async def _store_tides_window(db: StatsDB, tides_data: dict[str, Any]) -> None:
     """Store TIDES results in database using ALTER TABLE UPDATE"""
 
@@ -266,7 +295,7 @@ async def _store_tides_window(db: StatsDB, tides_data: dict[str, Any]) -> None:
     result = await db.client.query(check_query)
 
     if result.result_rows:
-        # Update existing 
+        # Update existing
         update_query = """
         ALTER TABLE tides_window
         UPDATE 
@@ -306,3 +335,127 @@ async def _store_tides_window(db: StatsDB, tides_data: dict[str, Any]) -> None:
     }
 
     await db.client.command(update_query, parameters=params)
+
+
+async def calculate_custom_tides_window(
+    db: StatsDB, end_datetime: datetime
+) -> dict[str, Any]:
+    """
+    Calculate TIDES window from a specific datetime.
+
+    Follows the flow:
+    SPECIFIED_TIME → Remaining Day (partial) → Full Days → Start Date (partial) → Target Reached
+
+    Args:
+        db: Database connection
+        end_datetime: Calculate window backwards from this time
+
+    Returns:
+        Dictionary with TIDES window data
+    """
+
+    config = await get_config(db)
+    if not config:
+        raise Exception("No TIDES configuration found")
+
+    target_difficulty = config["network_difficulty"] * config["multiplier"]
+
+    # Remaining End Day (partial) - consume from end_datetime backwards on same day
+    (
+        remaining_day_data,
+        consumed_difficulty,
+        earliest_end_day_timestamp,
+    ) = await _fetch_end_day_data(db, end_datetime, target_difficulty)
+
+    if consumed_difficulty >= target_difficulty:
+        complete_data = remaining_day_data
+        window_start_timestamp = earliest_end_day_timestamp
+    else:
+        # Full Days - consume complete previous days
+        remaining_target = target_difficulty - consumed_difficulty
+        included_days_info = await _find_included_days(
+            db, remaining_target, end_datetime.date()
+        )
+
+        full_days_data = await _fetch_full_days_data(
+            db, included_days_info["included_days"]
+        )
+
+        # Start Date (partial) - for remaining target
+        start_date_data, start_date_timestamp = await _fetch_start_date_data(
+            db, included_days_info["start_date"], included_days_info["remaining_target"]
+        )
+        complete_data = _merge_worker_totals(
+            _merge_worker_totals(remaining_day_data, full_days_data), start_date_data
+        )
+
+        window_start_timestamp = start_date_timestamp
+
+        if not window_start_timestamp and included_days_info["included_days"]:
+            earliest_date = min(included_days_info["included_days"])
+            query = "SELECT min(ts) FROM shares WHERE toDate(ts) = %(date)s"
+            result = await db.client.query(query, {"date": earliest_date})
+            if result.result_rows and result.result_rows[0][0]:
+                window_start_timestamp = result.result_rows[0][0]
+
+    # Format workers response
+    workers_list = _format_workers_response(complete_data)
+    total_difficulty = sum(w["share_value"] for w in complete_data.values())
+
+    return {
+        "workers": workers_list,
+        "share_log_window": target_difficulty,
+        "network_difficulty": config["network_difficulty"],
+        "multiplier": config["multiplier"],
+        "window_start": window_start_timestamp.isoformat()
+        if window_start_timestamp
+        else None,
+        "window_end": end_datetime.isoformat(),
+        "total_difficulty_in_window": total_difficulty,
+        "total_workers": len(workers_list),
+        "calculated_at": datetime.now().isoformat(),
+    }
+
+
+async def _fetch_end_day_data(
+    db: StatsDB, end_datetime: datetime, target_difficulty: float
+) -> tuple[dict[str, dict], float, datetime]:
+    """
+    Get shares from end_datetime backwards to start of that same day.
+
+    Returns:
+        - worker_data: Dict of workers and their shares
+        - consumed_difficulty: How much difficulty was consumed from that day
+        - earliest_timestamp: Earliest share timestamp used from that day
+    """
+
+    query = """
+    SELECT worker, actual_difficulty, ts
+    FROM shares 
+    WHERE toDate(ts) = toDate(%(end_datetime)s)
+      AND ts <= %(end_datetime)s
+    ORDER BY ts DESC
+    """
+
+    result = await db.client.query(query, {"end_datetime": end_datetime})
+
+    workers = {}
+    consumed_difficulty = 0
+    earliest_timestamp = None
+
+    for row in result.result_rows:
+        worker, actual_difficulty, ts = row[0], float(row[1]), row[2]
+
+        if consumed_difficulty + actual_difficulty >= target_difficulty:
+            break
+
+        if worker not in workers:
+            workers[worker] = {"shares": 0, "share_value": 0.0}
+
+        workers[worker]["shares"] += 1
+        workers[worker]["share_value"] += actual_difficulty
+        consumed_difficulty += actual_difficulty
+
+        earliest_timestamp = ts
+
+    return workers, consumed_difficulty, earliest_timestamp
