@@ -1,8 +1,10 @@
 """TIDES rewards queries and operations."""
 
 import json
+from datetime import datetime
 from typing import Any, List, Optional
 
+from src.api.services.tides_queries import calculate_custom_tides_window
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -140,3 +142,69 @@ async def update_tides_reward(
         updated_fields["processed"] = processed
     
     return updated_fields
+
+
+async def create_tides_reward(
+    db: StatsDB,
+    tx_hash: str,
+    block_height: int,
+    btc_amount: float,
+    confirmed_at: datetime,
+) -> dict[str, Any]:
+    """
+    Create a new TIDES reward with calculated window at the confirmed datetime.
+    
+    Args:
+        db: Database connection
+        tx_hash: Transaction hash
+        block_height: Bitcoin block height
+        btc_amount: BTC reward amount
+        confirmed_at: When the transaction was confirmed
+    
+    Returns:
+        Dictionary with the created reward data
+    """
+    
+    check_query = "SELECT tx_hash FROM tides_rewards WHERE tx_hash = %(tx_hash)s LIMIT 1"
+    result = await db.client.query(check_query, {"tx_hash": tx_hash})
+    
+    if result.result_rows:
+        raise ValueError(f"TIDES reward with tx_hash {tx_hash} already exists")
+    
+    # Calculate TIDES window at the confirmed datetime
+    tides_window = await calculate_custom_tides_window(db, confirmed_at)
+    tides_window_json = json.dumps(tides_window)
+    
+    insert_query = """
+    INSERT INTO tides_rewards (
+        tx_hash, block_height, btc_amount, 
+        confirmed_at, discovered_at, tides_window
+    )
+    VALUES (
+        %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
+        %(confirmed_at)s, %(discovered_at)s, %(tides_window)s
+    )
+    """
+    
+    params = {
+        "tx_hash": tx_hash,
+        "block_height": block_height,
+        "btc_amount": btc_amount,
+        "confirmed_at": confirmed_at,
+        "discovered_at": confirmed_at,
+        "tides_window": tides_window_json,
+    }
+    
+    await db.client.command(insert_query, parameters=params)
+    
+    logger.info(f"Created TIDES reward: {tx_hash} (Block {block_height}, {btc_amount} BTC)")
+    
+    return {
+        "tx_hash": tx_hash,
+        "block_height": block_height,
+        "btc_amount": btc_amount,
+        "confirmed_at": confirmed_at,
+        "discovered_at": confirmed_at,
+        "tides_window": tides_window,
+        "processed": False,
+    }
