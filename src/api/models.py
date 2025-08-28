@@ -204,3 +204,11 @@ class TidesRewardUpdateRequest(BaseModel):
     processed: Optional[bool] = Field(
         None, description="Whether this reward has been processed"
     )
+
+
+class TidesWindowCalculateRequest(BaseModel):
+    """Request model for custom TIDES window calculation"""
+
+    end_datetime: datetime = Field(
+        description="Calculate TIDES window backwards from this datetime"
+    )
