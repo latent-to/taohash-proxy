@@ -307,6 +307,44 @@ class StatsDB:
             )
             ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY date""",
+            # Difficulty window configuration - single row config table
+            """CREATE TABLE IF NOT EXISTS tides_config (
+                id UInt8 DEFAULT 1,
+                multiplier Float64,
+                network_difficulty Float64,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # Insert default config when creating the config table
+            """INSERT INTO tides_config (id, multiplier, network_difficulty, updated_at)
+            SELECT 1, 8, 129700000000000, now()
+            WHERE NOT EXISTS (SELECT 1 FROM tides_config WHERE id = 1)""",
+            # TIDES window table
+            """CREATE TABLE IF NOT EXISTS tides_window (
+                id UInt8 DEFAULT 1,
+                share_log_window Float64,
+                network_difficulty Float64,
+                multiplier Float64,
+                window_start DateTime,
+                window_end DateTime,
+                total_difficulty_in_window Float64,
+                total_workers UInt32,
+                workers_json String,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # TIDES rewards table
+            """CREATE TABLE IF NOT EXISTS tides_rewards (
+                tx_hash String,
+                block_height UInt64,
+                btc_amount Float64,
+                confirmed_at DateTime DEFAULT now(),
+                discovered_at DateTime DEFAULT now(),
+                tides_window String,
+                processed Boolean DEFAULT false,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY (block_height, tx_hash)""",
         ]
 
     async def _create_tables(self):

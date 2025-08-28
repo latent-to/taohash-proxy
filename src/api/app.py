@@ -18,6 +18,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from src.rewards_extraction.monitor import rewards_monitor_task
+from src.difficulty_monitoring.monitor import difficulty_monitor_task
+from src.tides_monitoring.monitor import tides_monitor_task
+from src.tides_monitoring.rewards_monitor import tides_rewards_monitor_task
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -30,6 +33,13 @@ from src.api.models import (
     WorkersShareValueResponse,
     WorkersStatsResponse,
     WorkersTimerangeResponse,
+    TidesConfig,
+    TidesRewardDetails,
+    TidesRewardsResponse,
+    TidesRewardUpdateRequest,
+    CustomTidesRewardRequest,
+    CustomTidesRewardResponse,
+    TidesWindowCalculateRequest,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -43,12 +53,31 @@ from src.api.services.reward_queries import (
     get_all_daily_rewards,
     get_unpaid_daily_rewards,
 )
+from src.api.services.config_queries import (
+    get_config,
+    update_config,
+)
+from src.api.services.tides_queries import (
+    get_tides_window,
+    calculate_custom_tides_window,
+)
+from src.api.services.tides_rewards_queries import (
+    get_all_tides_rewards,
+    get_tides_reward_by_tx_hash,
+    update_tides_reward,
+    create_tides_reward,
+)
 
 logger = get_logger(__name__)
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
+
+# Controllers configuration
 ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
+ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
+ENABLE_TIDES_MONITORING = os.environ.get("ENABLE_TIDES_MONITORING", "")
+ENABLE_TIDES_REWARDS_MONITORING = os.environ.get("ENABLE_TIDES_REWARDS_MONITORING", "")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -66,21 +95,44 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without database connection")
 
-    task = None
+    reward_task = None
+    difficulty_task = None
+    tides_task = None
+    tides_rewards_task = None
+
     if ENABLE_REWARD_POLLING:
         logger.info("Daily rewards loop is enabled")
-        task = asyncio.create_task(rewards_monitor_task(db))
+        reward_task = asyncio.create_task(rewards_monitor_task(db))
     else:
         logger.info("Daily rewards loop is disabled")
 
+    if ENABLE_DIFFICULTY_MONITORING:
+        logger.info("Difficulty monitoring is enabled")
+        difficulty_task = asyncio.create_task(difficulty_monitor_task(db))
+    else:
+        logger.info("Difficulty monitoring is disabled")
+
+    if ENABLE_TIDES_MONITORING:
+        logger.info("TIDES monitoring is enabled")
+        tides_task = asyncio.create_task(tides_monitor_task(db))
+    else:
+        logger.info("TIDES monitoring is disabled")
+
+    if ENABLE_TIDES_REWARDS_MONITORING:
+        logger.info("TIDES rewards monitoring is enabled")
+        tides_rewards_task = asyncio.create_task(tides_rewards_monitor_task(db))
+    else:
+        logger.info("TIDES rewards monitoring is disabled")
+
     yield
 
-    if task:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for task in [reward_task, difficulty_task, tides_task, tides_rewards_task]:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     if db:
         await db.close()
@@ -557,7 +609,9 @@ async def get_all_rewards(
             date_str = record["date"].strftime("%Y-%m-%d")
             rewards[date_str] = {
                 "amount": record["amount"],
-                "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
+                "updated_at": record["updated_at"].isoformat()
+                if record["updated_at"]
+                else None,
                 "paid": record["paid"],
                 "payment_proof_url": record["payment_proof_url"],
             }
@@ -597,7 +651,9 @@ async def get_unpaid_rewards(
                 {
                     "date": date_str,
                     "amount": amount,
-                    "updated_at": record["updated_at"].isoformat() if record["updated_at"] else None,
+                    "updated_at": record["updated_at"].isoformat()
+                    if record["updated_at"]
+                    else None,
                 }
             )
             total_unpaid += amount
@@ -612,3 +668,463 @@ async def get_unpaid_rewards(
     except Exception as e:
         logger.error(f"Error fetching unpaid rewards: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get(
+    "/config/tides",
+    tags=["Configuration"],
+    summary="Get TIDES Configuration",
+    response_description="Current TIDES configuration values",
+)
+async def get_tides_config(
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Retrieves the current TIDES configuration.
+
+    Returns the current multiplier, network_difficulty, and last updated timestamp.
+
+    ### Sample Request (GET):
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/config/tides" -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+    ```
+
+    ### Sample Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "config": {
+        "multiplier": 8.5,
+        "network_difficulty": 400000000.0,
+        "updated_at": "2025-01-15T10:30:00"
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        config_data = await get_config(db)
+
+        if not config_data:
+            raise HTTPException(
+                status_code=404,
+                detail="TIDES configuration not found. Please initialize with a PUT request.",
+            )
+
+        if config_data["updated_at"]:
+            config_data["updated_at"] = config_data["updated_at"].isoformat()
+
+        return {
+            "status": "success",
+            "config": config_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get TIDES config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while retrieving the configuration.",
+        )
+
+
+@app.put(
+    "/config/tides",
+    tags=["Configuration"],
+    summary="Update TIDES Configuration (Partial Updates)",
+    response_description="Confirmation of the configuration update.",
+)
+async def update_tides_config(
+    config: TidesConfig,
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Updates the global configuration for the TIDES payout system.
+
+    Can update any combination of: network_difficulty, multiplier
+    Only provided fields will be updated.
+
+    ---
+
+    ### Sample Request (partial update):
+    ```bash
+    curl -X PUT "http://127.0.0.1:8000/config/tides" \\
+    -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -d '{
+      "network_difficulty": 400000000.0
+    }'
+    ```
+
+    ### Successful Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "message": "TIDES configuration updated successfully.",
+      "updated_fields": {
+        "network_difficulty": 400000000.0
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                config.network_difficulty is not None,
+                config.multiplier is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        updated_fields = await update_config(
+            db,
+            network_difficulty=config.network_difficulty,
+            multiplier=config.multiplier,
+        )
+
+        return {
+            "status": "success",
+            "message": "TIDES configuration updated successfully.",
+            "updated_fields": updated_fields,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update TIDES config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while updating the configuration.",
+        )
+
+
+@app.get(
+    "/api/tides/window",
+    tags=["TIDES"],
+    summary="Get TIDES Window",
+    response_description="Current TIDES sliding window data",
+)
+async def get_tides_window_endpoint(
+    request: Request,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get current TIDES sliding window data.
+
+    Returns worker statistics for the current TIDES difficulty window,
+    including worker shares, percentages, and window metadata.
+
+    ### Sample Response (200 OK):
+    ```json
+    {
+      "workers": [
+        {
+          "name": "worker1",
+          "shares": 1000,
+          "share_value": 50000000000.0,
+          "percentage": 25.5
+        }
+      ],
+      "share_log_window": 722500000000000.0,
+      "network_difficulty": 85000000000000.0,
+      "multiplier": 8.5,
+      "window_start": "2025-01-10T15:30:00",
+      "window_end": "2025-01-15T10:30:00",
+      "total_difficulty_in_window": 722500000000000.0,
+      "total_workers": 42,
+      "updated_at": "2025-01-15T10:30:00"
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        tides_data = await get_tides_window(db)
+
+        if not tides_data:
+            raise HTTPException(
+                status_code=404,
+                detail="TIDES window data not available. Please wait for initial calculation.",
+            )
+
+        return {
+            "status": "success",
+            "data": tides_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching TIDES window: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while retrieving TIDES data.",
+        )
+
+
+@app.get(
+    "/api/tides/rewards",
+    response_model=TidesRewardsResponse,
+    tags=["TIDES"],
+    summary="Get TIDES Rewards Summary",
+    response_description="List of all discovered TIDES rewards",
+)
+@limiter.limit("60/minute")
+async def get_tides_rewards(
+    request: Request,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get summary of all TIDES rewards.
+
+    Returns a list of all discovered Bitcoin rewards for TIDES with essential
+    information: transaction hash, BTC amount, confirmation date, and processing status.
+    Results are ordered by confirmation date (newest first).
+
+    ### Sample Request:
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/api/tides/rewards" \
+         -H "Authorization: Bearer YOUR_TOKEN"
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        rewards = await get_all_tides_rewards(db)
+        return {"rewards": rewards}
+
+    except Exception as e:
+        logger.error(f"Error fetching TIDES rewards: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get(
+    "/api/tides/rewards/{tx_hash}",
+    response_model=TidesRewardDetails,
+    tags=["TIDES"],
+    summary="Get TIDES Reward Details",
+    response_description="Full details for a specific TIDES reward",
+)
+@limiter.limit("60/minute")
+async def get_tides_reward_details(
+    request: Request,
+    tx_hash: str,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get full details for a specific TIDES reward by transaction hash.
+
+    Returns complete reward information including the TIDES window snapshot
+    that was captured when the reward was discovered.
+
+    Args:
+        tx_hash: Bitcoin transaction hash (64 character hex string)
+
+    ### Sample Request:
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/api/tides/rewards/abc123..." \
+         -H "Authorization: Bearer YOUR_TOKEN"
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        reward = await get_tides_reward_by_tx_hash(db, tx_hash)
+
+        if not reward:
+            raise HTTPException(status_code=404, detail="TIDES reward not found")
+
+        return reward
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching TIDES reward {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.put(
+    "/api/tides/rewards/{tx_hash}",
+    tags=["TIDES"],
+    summary="Update TIDES Reward",
+    response_description="Confirmation of the reward update",
+)
+@limiter.limit("60/minute")
+async def update_tides_reward_endpoint(
+    request: Request,
+    tx_hash: str,
+    reward_data: TidesRewardUpdateRequest,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Update TIDES reward fields (btc_amount and/or processed status).
+
+    Can update any combination of: btc_amount, processed
+    Only provided fields will be updated. Other fields remain unchanged.
+
+    Args:
+        tx_hash: Bitcoin transaction hash to update
+        reward_data: Fields to update
+
+    ### Sample Request:
+    ```bash
+    curl -X PUT "http://127.0.0.1:8888/api/tides/rewards/abc123..." \
+         -H "Authorization: Bearer YOUR_REWARDS_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"btc_amount": 6.25, "processed": true}'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                reward_data.btc_amount is not None,
+                reward_data.processed is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        updated_fields = await update_tides_reward(
+            db,
+            tx_hash=tx_hash,
+            btc_amount=reward_data.btc_amount,
+            processed=reward_data.processed,
+        )
+
+        if updated_fields is None:
+            raise HTTPException(status_code=404, detail="TIDES reward not found")
+
+        return {
+            "success": True,
+            "tx_hash": tx_hash,
+            "message": "TIDES reward updated successfully",
+            "updated_fields": updated_fields,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating TIDES reward {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.post(
+    "/api/tides/rewards",
+    response_model=CustomTidesRewardResponse,
+    tags=["TIDES"],
+    summary="Create TIDES Reward",
+    response_description="The created TIDES reward with calculated window",
+)
+@limiter.limit("60/minute")
+async def create_tides_reward_endpoint(
+    request: Request,
+    reward_data: CustomTidesRewardRequest,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Create a new TIDES reward with automatically calculated window snapshot.
+    
+    Calculates the TIDES window at the specified confirmed_at datetime and
+    stores the reward with the window data for historical analysis.
+
+    Args:
+        reward_data: TIDES reward data to create
+
+    ### Sample Request:
+    ```bash
+    curl -X POST "http://127.0.0.1:8888/api/tides/rewards" \
+         -H "Authorization: Bearer YOUR_REWARDS_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "tx_hash": "abc123...",
+           "block_height": 850000,
+           "btc_amount": 3.125,
+           "confirmed_at": "2024-08-15T14:30:00Z"
+         }'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        reward = await create_tides_reward(
+            db,
+            tx_hash=reward_data.tx_hash,
+            block_height=reward_data.block_height,
+            btc_amount=reward_data.btc_amount,
+            confirmed_at=reward_data.confirmed_at,
+        )
+        
+        return reward
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating TIDES reward {reward_data.tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.post(
+    "/api/tides/window/calculate",
+    tags=["TIDES"],
+    summary="Calculate TIDES Window at Custom Time",
+    response_description="TIDES window calculated from specified datetime",
+)
+@limiter.limit("10/minute")
+async def calculate_tides_window_endpoint(
+    request: Request,
+    calculate_request: TidesWindowCalculateRequest,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Calculate TIDES window from a specific datetime (without storing).
+
+    Calculates the TIDES window backwards from the specified datetime:
+    SPECIFIED_TIME → Remaining Day (partial) → Full Days → Start Date (partial) → Target Reached
+
+    ### Sample Request:
+    ```bash
+    curl -X POST "http://127.0.0.1:8888/api/tides/window/calculate" \
+         -H "Authorization: Bearer YOUR_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{"end_datetime": "2025-08-27T15:30:00Z"}'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        window_data = await calculate_custom_tides_window(
+            db, calculate_request.end_datetime
+        )
+
+        return {
+            "status": "success",
+            "data": window_data,
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Error calculating TIDES window at {calculate_request.end_datetime}: {e}"
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while calculating the TIDES window.",
+        )
