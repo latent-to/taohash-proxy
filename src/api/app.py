@@ -37,6 +37,8 @@ from src.api.models import (
     TidesRewardDetails,
     TidesRewardsResponse,
     TidesRewardUpdateRequest,
+    CustomTidesRewardRequest,
+    CustomTidesRewardResponse,
     TidesWindowCalculateRequest,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
@@ -63,6 +65,7 @@ from src.api.services.tides_rewards_queries import (
     get_all_tides_rewards,
     get_tides_reward_by_tx_hash,
     update_tides_reward,
+    create_tides_reward,
 )
 
 logger = get_logger(__name__)
@@ -1019,6 +1022,62 @@ async def update_tides_reward_endpoint(
         raise
     except Exception as e:
         logger.error(f"Error updating TIDES reward {tx_hash}: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.post(
+    "/api/tides/rewards",
+    response_model=CustomTidesRewardResponse,
+    tags=["TIDES"],
+    summary="Create TIDES Reward",
+    response_description="The created TIDES reward with calculated window",
+)
+@limiter.limit("60/minute")
+async def create_tides_reward_endpoint(
+    request: Request,
+    reward_data: CustomTidesRewardRequest,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Create a new TIDES reward with automatically calculated window snapshot.
+    
+    Calculates the TIDES window at the specified confirmed_at datetime and
+    stores the reward with the window data for historical analysis.
+
+    Args:
+        reward_data: TIDES reward data to create
+
+    ### Sample Request:
+    ```bash
+    curl -X POST "http://127.0.0.1:8888/api/tides/rewards" \
+         -H "Authorization: Bearer YOUR_REWARDS_TOKEN" \
+         -H "Content-Type: application/json" \
+         -d '{
+           "tx_hash": "abc123...",
+           "block_height": 850000,
+           "btc_amount": 3.125,
+           "confirmed_at": "2024-08-15T14:30:00Z"
+         }'
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        reward = await create_tides_reward(
+            db,
+            tx_hash=reward_data.tx_hash,
+            block_height=reward_data.block_height,
+            btc_amount=reward_data.btc_amount,
+            confirmed_at=reward_data.confirmed_at,
+        )
+        
+        return reward
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error creating TIDES reward {reward_data.tx_hash}: {e}")
         raise HTTPException(status_code=500, detail="Database error")
 
 
