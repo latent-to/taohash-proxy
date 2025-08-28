@@ -212,3 +212,26 @@ class TidesWindowCalculateRequest(BaseModel):
     end_datetime: datetime = Field(
         description="Calculate TIDES window backwards from this datetime"
     )
+
+
+class CustomTidesRewardRequest(BaseModel):
+    """Request model for manually creating TIDES rewards"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height", gt=0)
+    btc_amount: float = Field(description="BTC reward amount", gt=0)
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+
+
+class CustomTidesRewardResponse(BaseModel):
+    """Response model for created TIDES reward"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: Dict[str, Any] = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
