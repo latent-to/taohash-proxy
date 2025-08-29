@@ -10,7 +10,6 @@ import asyncio
 from typing import Any, Optional
 from datetime import datetime, timezone
 
-import aiohttp
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -280,9 +279,9 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
             "shares_5m": stats_5m.get("total_shares", 0),
             "shares_60m": stats_60m.get("total_shares", 0),
             "shares_24h": stats_24h.get("total_shares", 0),
-            "shares_value_5m": stats_5m.get("share_value", 0),
-            "shares_value_60m": stats_60m.get("share_value", 0),
-            "shares_value_24h": stats_24h.get("share_value", 0),
+            "shares_value_5m": stats_5m.get("total_difficulty", 0),
+            "shares_value_60m": stats_60m.get("total_difficulty", 0),
+            "shares_value_24h": stats_24h.get("total_difficulty", 0),
             "pool_fee": POOL_FEE,
             "minimum_payout_threshold": MINIMUM_PAYOUT_THRESHOLD,
             "minimum_payout_threshold_unit": MINIMUM_PAYOUT_THRESHOLD_UNIT,
