@@ -694,18 +694,30 @@ async def get_workers_share_value(
                 status_code=400,
                 detail=f"Cannot query future dates. Today is {today_utc}",
             )
-
-        query = """
-        SELECT
-            worker,
-            countMerge(shares) as shares,
-            sumMerge(share_value) as share_value,
-            sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
-        FROM worker_daily_share_value
-        WHERE date = %(date)s
-        GROUP BY worker
-        ORDER BY worker
-        """
+        if date < "2025-08-29":
+            query = """
+            SELECT
+                worker,
+                countMerge(shares) as shares,
+                sumMerge(share_value) as share_value,
+                sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
+            FROM worker_daily_share_value
+            WHERE date = %(date)s
+            GROUP BY worker
+            ORDER BY worker
+            """
+        else:
+            query = """
+            SELECT
+                worker,
+                countMerge(shares) as shares,
+                sumMerge(pool_difficulty_sum) as share_value,
+                sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
+            FROM worker_daily_share_value
+            WHERE date = %(date)s
+            GROUP BY worker
+            ORDER BY worker
+            """
 
         params = {"date": requested_date}
         result = await db.client.query(query, parameters=params)
