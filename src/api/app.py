@@ -10,7 +10,6 @@ import asyncio
 from typing import Any, Optional
 from datetime import datetime, timezone
 
-import aiohttp
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Depends, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -280,9 +279,9 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
             "shares_5m": stats_5m.get("total_shares", 0),
             "shares_60m": stats_60m.get("total_shares", 0),
             "shares_24h": stats_24h.get("total_shares", 0),
-            "shares_value_5m": stats_5m.get("share_value", 0),
-            "shares_value_60m": stats_60m.get("share_value", 0),
-            "shares_value_24h": stats_24h.get("share_value", 0),
+            "shares_value_5m": stats_5m.get("total_difficulty", 0),
+            "shares_value_60m": stats_60m.get("total_difficulty", 0),
+            "shares_value_24h": stats_24h.get("total_difficulty", 0),
             "pool_fee": POOL_FEE,
             "minimum_payout_threshold": MINIMUM_PAYOUT_THRESHOLD,
             "minimum_payout_threshold_unit": MINIMUM_PAYOUT_THRESHOLD_UNIT,
@@ -339,9 +338,9 @@ async def get_pool_stats(
                 "shares_5m": stats_5m.get("total_shares", 0),
                 "shares_60m": stats_60m.get("total_shares", 0),
                 "shares_24h": stats_24h.get("total_shares", 0),
-                "shares_value_5m": stats_5m.get("share_value", 0),
-                "shares_value_60m": stats_60m.get("share_value", 0),
-                "shares_value_24h": stats_24h.get("share_value", 0),
+                "shares_value_5m": stats_5m.get("total_difficulty", 0),
+                "shares_value_60m": stats_60m.get("total_difficulty", 0),
+                "shares_value_24h": stats_24h.get("total_difficulty", 0),
             },
         }
 
@@ -454,7 +453,7 @@ async def get_workers_timerange(
             END as state,
             toUnixTimestamp(max(ts)) as last_share,
             count() as shares,
-            sum(actual_difficulty) as share_value,
+            sum(pool_difficulty) as share_value,
             sum(pool_difficulty) * 4294967296 / %(duration)s as hashrate
         FROM shares
         WHERE ts >= %(start_time_dt)s AND ts < %(end_time_dt)s
@@ -597,7 +596,7 @@ async def _get_worker_stats(
                 worker,
                 argMax(miner, ts) as latest_miner,
                 count() as shares,
-                sum(actual_difficulty) as share_value,
+                sum(pool_difficulty) as share_value,
                 sum(pool_difficulty) * 4294967296 / 300 as hashrate
             FROM shares
             WHERE ts > now() - INTERVAL 5 MINUTE
@@ -623,11 +622,11 @@ async def _get_worker_stats(
 
         s60.shares as shares_60m,
         s60.hashrate as hashrate_60m,
-        s60.actual_difficulty_sum as share_value_60m,
+        s60.pool_difficulty_sum as share_value_60m,
 
         s24.shares as shares_24h,
         s24.hashrate as hashrate_24h,
-        s24.actual_difficulty_sum as share_value_24h
+        s24.pool_difficulty_sum as share_value_24h
         
     FROM all_active_workers AS w
     LEFT JOIN worker_stats_24h AS s24 ON w.worker = s24.worker
@@ -695,18 +694,30 @@ async def get_workers_share_value(
                 status_code=400,
                 detail=f"Cannot query future dates. Today is {today_utc}",
             )
-
-        query = """
-        SELECT
-            worker,
-            countMerge(shares) as shares,
-            sumMerge(share_value) as share_value,
-            sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
-        FROM worker_daily_share_value
-        WHERE date = %(date)s
-        GROUP BY worker
-        ORDER BY worker
-        """
+        if date < "2025-08-29":
+            query = """
+            SELECT
+                worker,
+                countMerge(shares) as shares,
+                sumMerge(share_value) as share_value,
+                sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
+            FROM worker_daily_share_value
+            WHERE date = %(date)s
+            GROUP BY worker
+            ORDER BY worker
+            """
+        else:
+            query = """
+            SELECT
+                worker,
+                countMerge(shares) as shares,
+                sumMerge(pool_difficulty_sum) as share_value,
+                sumMerge(pool_difficulty_sum) * 4294967296 / 86400 as hashrate
+            FROM worker_daily_share_value
+            WHERE date = %(date)s
+            GROUP BY worker
+            ORDER BY worker
+            """
 
         params = {"date": requested_date}
         result = await db.client.query(query, parameters=params)
