@@ -141,7 +141,7 @@ async def _find_included_days(
     if end_date is None:
         # Work backwards from latest shares - default
         query = """
-        SELECT date, COALESCE(sumMerge(share_value), 0) as daily_total
+        SELECT date, COALESCE(sumMerge(pool_difficulty_sum), 0) as daily_total
         FROM worker_daily_share_value
         WHERE date >= today() - INTERVAL 120 DAY
         GROUP BY date 
@@ -151,7 +151,7 @@ async def _find_included_days(
     else:
         # Work backwards from specified end_date (excluding it), for custom calculations
         query = """
-        SELECT date, COALESCE(sumMerge(share_value), 0) as daily_total
+        SELECT date, COALESCE(sumMerge(pool_difficulty_sum), 0) as daily_total
         FROM worker_daily_share_value
         WHERE date >= %(start_limit)s AND date < %(end_date)s
         GROUP BY date 
@@ -189,7 +189,7 @@ async def _fetch_full_days_data(db: StatsDB, included_days: list) -> dict[str, d
         return {}
 
     query = """
-    SELECT worker, COALESCE(countMerge(shares), 0) as total_shares, COALESCE(sumMerge(share_value), 0) as total_share_value
+    SELECT worker, COALESCE(countMerge(shares), 0) as total_shares, COALESCE(sumMerge(pool_difficulty_sum), 0) as total_share_value
     FROM worker_daily_share_value
     WHERE date IN %(dates)s
     GROUP BY worker
@@ -212,7 +212,7 @@ async def _fetch_start_date_data(
         return {}, None
 
     query = """
-    SELECT worker, actual_difficulty, ts
+    SELECT worker, pool_difficulty, ts
     FROM shares 
     WHERE toDate(ts) = %(start_date)s
     ORDER BY ts DESC
@@ -225,17 +225,17 @@ async def _fetch_start_date_data(
     start_date_timestamp = None
 
     for row in result.result_rows:
-        worker, actual_difficulty, ts = row[0], float(row[1]), row[2]
+        worker, difficulty, ts = row[0], float(row[1]), row[2]
 
-        if cumulative_difficulty + actual_difficulty >= remaining_target:
+        if cumulative_difficulty + difficulty >= remaining_target:
             break
 
         if worker not in workers:
             workers[worker] = {"shares": 0, "share_value": 0.0}
 
         workers[worker]["shares"] += 1
-        workers[worker]["share_value"] += actual_difficulty
-        cumulative_difficulty += actual_difficulty
+        workers[worker]["share_value"] += difficulty
+        cumulative_difficulty += difficulty
 
         # Track the starting timestamp
         start_date_timestamp = ts
@@ -430,7 +430,7 @@ async def _fetch_end_day_data(
     """
 
     query = """
-    SELECT worker, actual_difficulty, ts
+    SELECT worker, pool_difficulty, ts
     FROM shares 
     WHERE toDate(ts) = toDate(%(end_datetime)s)
       AND ts <= %(end_datetime)s
@@ -444,17 +444,17 @@ async def _fetch_end_day_data(
     earliest_timestamp = None
 
     for row in result.result_rows:
-        worker, actual_difficulty, ts = row[0], float(row[1]), row[2]
+        worker, difficulty, ts = row[0], float(row[1]), row[2]
 
-        if consumed_difficulty + actual_difficulty >= target_difficulty:
+        if consumed_difficulty + difficulty >= target_difficulty:
             break
 
         if worker not in workers:
             workers[worker] = {"shares": 0, "share_value": 0.0}
 
         workers[worker]["shares"] += 1
-        workers[worker]["share_value"] += actual_difficulty
-        consumed_difficulty += actual_difficulty
+        workers[worker]["share_value"] += difficulty
+        consumed_difficulty += difficulty
 
         earliest_timestamp = ts
 
