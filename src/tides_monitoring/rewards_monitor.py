@@ -3,8 +3,9 @@
 import asyncio
 import json
 import os
+import uuid
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
 import aiohttp
 from tenacity import (
@@ -18,6 +19,167 @@ from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+async def process_tides_reward_earnings(
+    db: StatsDB,
+    tx_hash: str,
+    total_btc_amount: float,
+    tides_window: Optional[Dict[str, Any]],
+    confirmed_at: datetime,
+) -> None:
+    """
+    Creates individual worker earnings and updates balances.
+
+    Args:
+        db: Database connection
+        tx_hash: Bitcoin transaction hash
+        total_btc_amount: Total BTC amount from the reward
+        tides_window: TIDES window data with worker percentages
+        confirmed_at: When the reward was confirmed
+    """
+    try:
+        if not tides_window or "workers" not in tides_window:
+            logger.warning(
+                f"No worker data in TIDES window for {tx_hash}, skipping earnings processing"
+            )
+            return
+
+        workers = tides_window["workers"]
+        if not workers:
+            logger.warning(f"Empty workers list in TIDES window for {tx_hash}")
+            return
+
+        logger.info(
+            f"Processing TIDES earnings for {len(workers)} workers from reward {tx_hash}"
+        )
+
+        for worker_data in workers:
+            worker_name = worker_data.get("name")
+            percentage = worker_data.get("percentage", 0)
+
+            if not worker_name:
+                logger.warning(f"Worker missing name in TIDES window: {worker_data}")
+                continue
+
+            worker_btc_amount = (total_btc_amount * percentage) / 100.0
+
+            if worker_btc_amount <= 0:
+                logger.debug(f"Worker {worker_name} has zero earnings, skipping")
+                continue
+
+            earning_id = str(uuid.uuid4())
+            metadata = {
+                "percentage": percentage,
+                "share_value": worker_data.get("share_value", 0),
+                "shares": worker_data.get("shares", 0),
+                "tides_window_start": tides_window.get("window_start"),
+                "tides_window_end": tides_window.get("window_end"),
+            }
+
+            earnings_insert = """
+            INSERT INTO user_earnings (
+                earning_id, worker, btc_amount, earning_type, reference,
+                tides_reward_id, metadata, earned_at, created_at
+            ) VALUES (
+                %(earning_id)s, %(worker)s, %(btc_amount)s, %(earning_type)s,
+                %(reference)s, %(tides_reward_id)s, %(metadata)s, %(earned_at)s, %(created_at)s
+            )
+            """
+
+            earnings_params = {
+                "earning_id": earning_id,
+                "worker": worker_name,
+                "btc_amount": worker_btc_amount,
+                "earning_type": "tides",
+                "reference": tx_hash,
+                "tides_reward_id": tx_hash,
+                "metadata": json.dumps(metadata),
+                "earned_at": confirmed_at,
+                "created_at": datetime.now(),
+            }
+
+            await db.client.command(earnings_insert, parameters=earnings_params)
+
+            await update_user_balance(
+                db, worker_name, worker_btc_amount, "tides_earnings"
+            )
+
+            logger.debug(
+                f"Processed earnings for {worker_name}: {worker_btc_amount:.8f} BTC "
+                f"({percentage:.2f}% of {total_btc_amount:.8f} BTC)"
+            )
+
+        logger.info(
+            f"Successfully processed TIDES reward {tx_hash} for {len(workers)} workers"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to process TIDES reward earnings for {tx_hash}: {e}")
+        raise
+
+
+async def update_user_balance(
+    db: StatsDB,
+    worker: str,
+    btc_amount: float,
+    updated_by: str,
+) -> None:
+    """
+    Update user balance by adding to unpaid_amount and total_earned.
+    Uses ClickHouse INSERT with ReplacingMergeTree to handle upserts.
+    """
+    try:
+        current_balance_query = """
+        SELECT unpaid_amount, paid_amount, total_earned
+        FROM user_rewards
+        WHERE worker = %(worker)s
+        ORDER BY last_updated DESC
+        LIMIT 1
+        """
+
+        result = await db.client.query(
+            current_balance_query, parameters={"worker": worker}
+        )
+
+        if result.result_rows:
+            current_unpaid = float(result.result_rows[0][0])
+            current_paid = float(result.result_rows[0][1])
+            current_total_earned = float(result.result_rows[0][2])
+        else:
+            current_unpaid = 0.0
+            current_paid = 0.0
+            current_total_earned = 0.0
+
+        new_unpaid = current_unpaid + btc_amount
+        new_total_earned = current_total_earned + btc_amount
+
+        balance_insert = """
+        INSERT INTO user_rewards (
+            worker, unpaid_amount, paid_amount, total_earned, last_updated, updated_by
+        ) VALUES (
+            %(worker)s, %(unpaid_amount)s, %(paid_amount)s, %(total_earned)s, %(last_updated)s, %(updated_by)s
+        )
+        """
+
+        balance_params = {
+            "worker": worker,
+            "unpaid_amount": new_unpaid,
+            "paid_amount": current_paid,
+            "total_earned": new_total_earned,
+            "last_updated": datetime.now(),
+            "updated_by": updated_by,
+        }
+
+        await db.client.command(balance_insert, parameters=balance_params)
+
+        logger.debug(
+            f"Updated balance for {worker}: +{btc_amount:.8f} BTC (unpaid: {new_unpaid:.8f})"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update balance for {worker}: {e}")
+        raise
 
 
 async def load_existing_tx_hashes(db: StatsDB) -> set:
@@ -172,6 +334,9 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         }
 
                         await db.client.command(insert_query, parameters=params)
+                        await process_tides_reward_earnings(
+                            db, tx_hash, btc_amount, tides_window, confirmed_at
+                        )
 
                         logger.info(
                             f"Stored TIDES reward: {tx_hash} "
