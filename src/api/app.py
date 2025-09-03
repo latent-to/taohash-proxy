@@ -1343,3 +1343,84 @@ async def delete_earning_record(
         logger.error(f"Error deleting earning {earning_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+
+@app.post("/api/payouts/batch", response_model=BatchPayoutResponse, tags=["Payouts"])
+@limiter.limit("10/minute")
+async def create_batch_payout_endpoint(
+    request: Request,
+    payout_request: BatchPayoutRequest,
+    token: str = Depends(verify_rewards_token),
+) -> BatchPayoutResponse:
+    """
+    Create a batch payout to multiple workers.
+
+    Validates worker balances before processing. If any worker would have
+    insufficient balance, returns error unless admin_override=true.
+
+    Request body:
+    {
+        "payouts": [{"worker": "worker1", "btc_amount": 0.001}],
+        "bitcoin_tx_hash": "abc123...",
+        "payment_method": "bitcoin",
+        "notes": "Weekly payout",
+        "admin_override": false,
+        "tides_tx_hash": "optional_reward_to_mark_processed"
+    }
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not payout_request.payouts:
+            raise HTTPException(
+                status_code=400, detail="At least one payout must be provided"
+            )
+
+        payouts_data = [
+            {"worker": item.worker, "btc_amount": item.btc_amount}
+            for item in payout_request.payouts
+        ]
+
+        result = await create_batch_payout(
+            db,
+            payouts_data,
+            payout_request.bitcoin_tx_hash,
+            payout_request.payment_method,
+            payout_request.notes,
+            payout_request.admin_override,
+            payout_request.tides_tx_hash,
+            "api_admin",
+        )
+
+        if result["success"]:
+            return BatchPayoutResponse(
+                success=True,
+                batch_id=result["batch_id"],
+                total_amount=result["total_amount"],
+                processed_workers=result["processed_workers"],
+                admin_override_used=result.get("admin_override_used"),
+                error=None,
+                validation_failures=None,
+                negative_balance_warnings=result.get("negative_balance_warnings"),
+                suggestion=None,
+            )
+        else:
+            return BatchPayoutResponse(
+                success=False,
+                batch_id=None,
+                total_amount=None,
+                processed_workers=None,
+                admin_override_used=False,
+                error=result["error"],
+                validation_failures=result.get("validation_failures"),
+                negative_balance_warnings=result.get("negative_balance_warnings"),
+                suggestion=result.get("suggestion"),
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating batch payout: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
