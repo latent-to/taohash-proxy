@@ -396,3 +396,15 @@ class WorkerBalance(BaseModel):
     last_updated: datetime = Field(description="When balance was last updated")
     updated_by: str = Field(description="What system/process last updated this")
 
+
+class BalanceResponse(BaseModel):
+    """Response model for single worker balance"""
+
+    balance: WorkerBalance = Field(description="Worker balance information")
+
+
+class BalancesResponse(BaseModel):
+    """Response model for all worker balances"""
+
+    balances: List[WorkerBalance] = Field(description="List of all worker balances")
+    total_count: int = Field(description="Total number of workers with balances")
