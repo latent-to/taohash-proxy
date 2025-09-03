@@ -23,9 +23,8 @@ async def validate_worker_balances(
         payouts: List of {"worker": str, "btc_amount": float}
 
     Returns:
-        Tuple of (validation_failures, negative_balance_warnings)
+        List of negative balance warnings
     """
-    validation_failures = []
     negative_balance_warnings = []
 
     try:
@@ -56,10 +55,9 @@ async def validate_worker_balances(
                     "payout_requested": requested_amount,
                     "net_balance": net_balance,
                 }
-                validation_failures.append(validation_failure)
                 negative_balance_warnings.append(validation_failure)
 
-        return validation_failures, negative_balance_warnings
+        return negative_balance_warnings
 
     except Exception as e:
         logger.error(f"Failed to validate worker balances: {e}")
@@ -93,12 +91,12 @@ async def create_batch_payout(
         Batch payout result with validation details
     """
     try:
-        validation_failures, negative_balance_warnings = await validate_worker_balances(
+        negative_balance_warnings = await validate_worker_balances(
             db, payouts
         )
 
         # If validation fails and no admin override, return error
-        if validation_failures and not admin_override:
+        if negative_balance_warnings and not admin_override:
             return {
                 "success": False,
                 "batch_id": None,
@@ -106,7 +104,6 @@ async def create_batch_payout(
                 "processed_workers": None,
                 "admin_override_used": False,
                 "error": "Insufficient balances for payout",
-                "validation_failures": validation_failures,
                 "negative_balance_warnings": negative_balance_warnings,
                 "suggestion": "Use admin_override=true to proceed or reduce payout amounts",
             }
