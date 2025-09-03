@@ -652,3 +652,122 @@ async def update_individual_payout(
         logger.error(f"Failed to update payout {payout_id}: {e}")
         raise
 
+
+async def delete_individual_payout(db: StatsDB, payout_id: str) -> bool:
+    """
+    Delete an individual payout record and rollback balances.
+
+    Args:
+        db: Database connection
+        payout_id: Payout ID to delete
+
+    Returns:
+        True if deleted successfully, False if not found
+    """
+    try:
+        select_query = """
+        SELECT worker, btc_amount
+        FROM user_payouts
+        WHERE payout_id = %(payout_id)s
+        LIMIT 1
+        """
+
+        result = await db.client.query(
+            select_query, parameters={"payout_id": payout_id}
+        )
+
+        if not result.result_rows:
+            logger.warning(f"Payout not found for deletion: {payout_id}")
+            return False
+
+        worker = result.result_rows[0][0]
+        btc_amount = float(result.result_rows[0][1])
+
+        delete_query = """
+        ALTER TABLE user_payouts
+        DELETE WHERE payout_id = %(payout_id)s
+        """
+
+        await db.client.command(delete_query, parameters={"payout_id": payout_id})
+
+        # Rollback balance: add back to unpaid, subtract from paid
+        await update_user_balance_for_payout_adjustment(db, worker, -btc_amount)
+
+        logger.info(
+            f"Deleted payout {payout_id} for {worker} (rollback: +{btc_amount} BTC)"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to delete payout {payout_id}: {e}")
+        raise
+
+
+async def update_user_balance_for_payout_adjustment(
+    db: StatsDB,
+    worker: str,
+    amount_diff: float,
+) -> None:
+    """
+    Update user balance for payout adjustments.
+
+    Args:
+        worker: Worker name
+        amount_diff: Amount difference (+/- for payout amount changes)
+                    Positive = increased payout (decrease unpaid more)
+                    Negative = decreased payout/deletion (increase unpaid back)
+    """
+    try:
+        # Current balance
+        current_balance_query = """
+        SELECT unpaid_amount, paid_amount, total_earned
+        FROM user_rewards
+        WHERE worker = %(worker)s
+        ORDER BY last_updated DESC
+        LIMIT 1
+        """
+
+        result = await db.client.query(
+            current_balance_query, parameters={"worker": worker}
+        )
+
+        if result.result_rows:
+            current_unpaid = float(result.result_rows[0][0])
+            current_paid = float(result.result_rows[0][1])
+            current_total_earned = float(result.result_rows[0][2])
+        else:
+            current_unpaid = 0.0
+            current_paid = 0.0
+            current_total_earned = 0.0
+
+        # Adjust
+        new_unpaid = current_unpaid - amount_diff  # Opposite of payout
+        new_paid = current_paid + amount_diff  # Same as payout change
+
+        # Insert new balance
+        balance_insert = """
+        INSERT INTO user_rewards (
+            worker, unpaid_amount, paid_amount, total_earned, last_updated, updated_by
+        ) VALUES (
+            %(worker)s, %(unpaid_amount)s, %(paid_amount)s, %(total_earned)s, %(last_updated)s, %(updated_by)s
+        )
+        """
+
+        balance_params = {
+            "worker": worker,
+            "unpaid_amount": new_unpaid,
+            "paid_amount": new_paid,
+            "total_earned": current_total_earned,  # Unchanged
+            "last_updated": datetime.now(),
+            "updated_by": "payout_adjustment",
+        }
+
+        await db.client.command(balance_insert, parameters=balance_params)
+
+        logger.debug(
+            f"Adjusted balance for {worker}: {amount_diff:+.8f} BTC (unpaid: {new_unpaid:.8f})"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to adjust balance for {worker}: {e}")
+        raise
