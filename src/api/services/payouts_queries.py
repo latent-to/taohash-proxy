@@ -179,3 +179,47 @@ async def create_batch_payout(
     except Exception as e:
         logger.error(f"Failed to create batch payout: {e}")
         raise
+
+
+async def create_individual_payout(
+    db: StatsDB,
+    worker: str,
+    btc_amount: float,
+    batch_id: str,
+    bitcoin_tx_hash: str,
+    notes: str,
+) -> None:
+    """Create individual payout record and update worker balance."""
+    try:
+        payout_id = str(uuid.uuid4())
+        paid_at = datetime.now()
+
+        payout_insert = """
+        INSERT INTO user_payouts (
+            payout_id, worker, btc_amount, payout_batch_id, bitcoin_tx_hash,
+            notes, paid_at, created_at
+        ) VALUES (
+            %(payout_id)s, %(worker)s, %(btc_amount)s, %(payout_batch_id)s,
+            %(bitcoin_tx_hash)s, %(notes)s, %(paid_at)s, %(created_at)s
+        )
+        """
+
+        payout_params = {
+            "payout_id": payout_id,
+            "worker": worker,
+            "btc_amount": btc_amount,
+            "payout_batch_id": batch_id,
+            "bitcoin_tx_hash": bitcoin_tx_hash,
+            "notes": notes,
+            "paid_at": paid_at,
+            "created_at": paid_at,
+        }
+
+        await db.client.command(payout_insert, parameters=payout_params)
+        await update_user_balance_for_payout(db, worker, btc_amount)
+
+        logger.debug(f"Created payout {payout_id} for {worker}: {btc_amount} BTC")
+
+    except Exception as e:
+        logger.error(f"Failed to create individual payout for {worker}: {e}")
+        raise
