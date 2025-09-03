@@ -202,7 +202,7 @@ async def update_earning(
     try:
         # First, get current earning to calculate balance difference
         current_query = """
-        SELECT worker, btc_amount, earning_type, reference, metadata, earned_at
+        SELECT worker, btc_amount, earning_type, reference, metadata, earned_at, created_at
         FROM user_earnings
         WHERE earning_id = %(earning_id)s
         LIMIT 1
@@ -223,7 +223,7 @@ async def update_earning(
         current_reference = current_row[3]
         current_metadata = current_row[4]
         earned_at = current_row[5]
-
+        created_at = current_row[6]
         try:
             current_metadata_dict = (
                 json.loads(current_metadata) if current_metadata else {}
@@ -239,36 +239,28 @@ async def update_earning(
         # Balance difference
         balance_diff = new_amount - current_amount
 
-        delete_query = """
-        ALTER TABLE user_earnings
-        DELETE WHERE earning_id = %(earning_id)s
-        """
-        await db.client.command(delete_query, parameters={"earning_id": earning_id})
+        update_fields = []
+        params = {"earning_id": earning_id}
 
-        # Insert updated
-        insert_query = """
-        INSERT INTO user_earnings (
-            earning_id, worker, btc_amount, earning_type, reference,
-            tides_reward_id, metadata, earned_at, created_at
-        ) VALUES (
-            %(earning_id)s, %(worker)s, %(btc_amount)s, %(earning_type)s,
-            %(reference)s, %(tides_reward_id)s, %(metadata)s, %(earned_at)s, %(created_at)s
-        )
-        """
+        if btc_amount is not None:
+            update_fields.append("btc_amount = %(btc_amount)s")
+            params["btc_amount"] = new_amount
 
-        params = {
-            "earning_id": earning_id,
-            "worker": worker,
-            "btc_amount": new_amount,
-            "earning_type": current_earning_type,
-            "reference": new_reference,
-            "tides_reward_id": None,
-            "metadata": json.dumps(new_metadata),
-            "earned_at": earned_at,
-            "created_at": datetime.now(),
-        }
+        if metadata is not None:
+            update_fields.append("metadata = %(metadata)s")
+            params["metadata"] = json.dumps(new_metadata)
 
-        await db.client.command(insert_query, parameters=params)
+        if reference is not None:
+            update_fields.append("reference = %(reference)s")
+            params["reference"] = new_reference
+
+        if update_fields:
+            update_query = f"""
+            ALTER TABLE user_earnings
+            UPDATE {", ".join(update_fields)}
+            WHERE earning_id = %(earning_id)s
+            """
+            await db.client.command(update_query, parameters=params)
 
         # Update balance if amount changed
         if balance_diff != 0:
@@ -287,7 +279,7 @@ async def update_earning(
             "tides_reward_id": None,
             "metadata": new_metadata,
             "earned_at": earned_at,
-            "created_at": params["created_at"],
+            "created_at": created_at,
         }
 
     except Exception as e:

@@ -97,7 +97,6 @@ from src.api.services.payouts_queries import (
 from src.api.services.balance_queries import (
     get_worker_balance,
     get_all_worker_balances,
-    get_worker_balance_count,
 )
 
 logger = get_logger(__name__)

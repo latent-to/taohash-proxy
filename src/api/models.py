@@ -407,4 +407,3 @@ class BalancesResponse(BaseModel):
     """Response model for all worker balances"""
 
     balances: List[WorkerBalance] = Field(description="List of all worker balances")
-    total_count: int = Field(description="Total number of workers with balances")
