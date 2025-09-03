@@ -319,3 +319,18 @@ class NegativeBalanceWarning(BaseModel):
     current_balance: float = Field(description="Current unpaid balance")
     payout_requested: float = Field(description="Requested payout amount")
     net_balance: float = Field(description="Resulting negative balance")
+
+
+class BatchPayoutResponse(BaseModel):
+    """Response model for batch payout operations"""
+
+    success: bool = Field(description="Whether batch payout succeeded")
+    batch_id: Optional[str] = Field(description="Created batch ID")
+    total_amount: Optional[float] = Field(description="Total BTC amount in batch")
+    processed_workers: Optional[int] = Field(description="Number of workers processed")
+    admin_override_used: Optional[bool] = Field(description="Whether admin override was used")
+    error: Optional[str] = Field(description="Error message if failed")
+    validation_failures: Optional[List[ValidationFailure]] = Field(description="Balance validation failures")
+    negative_balance_warnings: Optional[List[NegativeBalanceWarning]] = Field(description="Negative balance warnings")
+    suggestion: Optional[str] = Field(description="Suggestion for fixing validation failures")
+
