@@ -1513,3 +1513,62 @@ async def get_batch_details(
         logger.error(f"Error getting batch details for {batch_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.get("/api/payouts", response_model=PayoutsResponse, tags=["Payouts"])
+@limiter.limit("60/minute")
+async def get_all_payouts_endpoint(
+    request: Request,
+    worker: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    token: str = Depends(verify_rewards_token),
+) -> PayoutsResponse:
+    """
+    Get payouts with optional filters.
+
+    Query parameters:
+    - worker: Filter by worker name
+    - batch_id: Filter by batch ID
+    - date_from: Filter payouts from this date (YYYY-MM-DD)
+    - date_to: Filter payouts to this date (YYYY-MM-DD)
+    - limit: Maximum number of results (default 100)
+    - offset: Number of results to skip (default 0)
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        parsed_date_from = None
+        parsed_date_to = None
+
+        if date_from:
+            try:
+                parsed_date_from = datetime.strptime(date_from, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="Invalid date_from format. Use YYYY-MM-DD"
+                )
+
+        if date_to:
+            try:
+                parsed_date_to = datetime.strptime(date_to, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="Invalid date_to format. Use YYYY-MM-DD"
+                )
+
+        payouts = await get_all_payouts(
+            db, worker, batch_id, parsed_date_from, parsed_date_to, limit, offset
+        )
+
+        return PayoutsResponse(payouts=payouts, total_count=None)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting payouts: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
