@@ -1572,3 +1572,53 @@ async def get_all_payouts_endpoint(
         logger.error(f"Error getting payouts: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.put(
+    "/api/payouts/{payout_id}", response_model=PayoutOperationResponse, tags=["Payouts"]
+)
+@limiter.limit("30/minute")
+async def update_payout(
+    request: Request,
+    payout_id: str,
+    update_request: UpdatePayoutRequest,
+    token: str = Depends(verify_rewards_token),
+) -> PayoutOperationResponse:
+    """
+    Update an individual payout record and recalculate balances.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                update_request.btc_amount is not None,
+                update_request.bitcoin_tx_hash is not None,
+                update_request.notes is not None,
+            ]
+        ):
+            raise HTTPException(
+                status_code=400, detail="At least one field must be provided for update"
+            )
+
+        payout = await update_individual_payout(
+            db,
+            payout_id,
+            update_request.btc_amount,
+            update_request.bitcoin_tx_hash,
+            update_request.notes,
+        )
+
+        if not payout:
+            raise HTTPException(status_code=404, detail="Payout not found")
+
+        return PayoutOperationResponse(
+            success=True, payout_id=payout_id, message=f"Updated payout {payout_id}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating payout {payout_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
