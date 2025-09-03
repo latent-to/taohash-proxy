@@ -176,3 +176,115 @@ async def create_manual_earning(
         logger.error(f"Failed to create manual earning for {worker}: {e}")
         raise
 
+
+async def update_earning(
+    db: StatsDB,
+    earning_id: str,
+    btc_amount: Optional[float] = None,
+    metadata: Optional[dict] = None,
+    reference: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """
+    Update an existing earning record.
+    
+    Args:
+        db: Database connection
+        earning_id: Earning ID to update
+        btc_amount: New BTC amount
+        metadata: New metadata dict
+        reference: New reference
+    
+    Returns:
+        Updated earning record or None if not found
+    """
+    try:
+        # First, get current earning to calculate balance difference
+        current_query = """
+        SELECT worker, btc_amount, earning_type, reference, metadata, earned_at
+        FROM user_earnings
+        WHERE earning_id = %(earning_id)s
+        LIMIT 1
+        """
+
+        result = await db.client.query(current_query, parameters={"earning_id": earning_id})
+
+        if not result.result_rows:
+            logger.warning(f"Earning not found: {earning_id}")
+            return None
+
+        current_row = result.result_rows[0]
+        worker = current_row[0]
+        current_amount = float(current_row[1])
+        current_earning_type = current_row[2]
+        current_reference = current_row[3]
+        current_metadata = current_row[4]
+        earned_at = current_row[5]
+
+        # Parse current metadata
+        try:
+            current_metadata_dict = json.loads(current_metadata) if current_metadata else {}
+        except (json.JSONDecodeError, TypeError):
+            current_metadata_dict = {}
+
+        # Prepare update fields
+        new_amount = btc_amount if btc_amount is not None else current_amount
+        new_metadata = metadata if metadata is not None else current_metadata_dict
+        new_reference = reference if reference is not None else current_reference
+
+        # Calculate balance difference
+        balance_diff = new_amount - current_amount
+
+        # Delete old record and insert new one (ClickHouse pattern)
+        delete_query = """
+        ALTER TABLE user_earnings
+        DELETE WHERE earning_id = %(earning_id)s
+        """
+        await db.client.command(delete_query, parameters={"earning_id": earning_id})
+
+        # Insert updated record
+        insert_query = """
+        INSERT INTO user_earnings (
+            earning_id, worker, btc_amount, earning_type, reference,
+            tides_reward_id, metadata, earned_at, created_at
+        ) VALUES (
+            %(earning_id)s, %(worker)s, %(btc_amount)s, %(earning_type)s,
+            %(reference)s, %(tides_reward_id)s, %(metadata)s, %(earned_at)s, %(created_at)s
+        )
+        """
+
+        params = {
+            "earning_id": earning_id,
+            "worker": worker,
+            "btc_amount": new_amount,
+            "earning_type": current_earning_type,
+            "reference": new_reference,
+            "tides_reward_id": None,
+            "metadata": json.dumps(new_metadata),
+            "earned_at": earned_at,
+            "created_at": datetime.now(),
+        }
+
+        await db.client.command(insert_query, parameters=params)
+
+        # Update user balance if amount changed
+        if balance_diff != 0:
+            await update_user_balance(db, worker, balance_diff, "earning_update")
+
+        logger.info(f"Updated earning {earning_id} for {worker} (amount: {new_amount} BTC)")
+
+        return {
+            "earning_id": earning_id,
+            "worker": worker,
+            "btc_amount": new_amount,
+            "earning_type": current_earning_type,
+            "reference": new_reference,
+            "tides_reward_id": None,
+            "metadata": new_metadata,
+            "earned_at": earned_at,
+            "created_at": params["created_at"],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to update earning {earning_id}: {e}")
+        raise
+
