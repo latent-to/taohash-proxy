@@ -385,3 +385,14 @@ class PayoutOperationResponse(BaseModel):
     payout_id: Optional[str] = Field(description="Payout ID")
     message: str = Field(description="Operation result message")
 
+
+class WorkerBalance(BaseModel):
+    """Individual worker balance information"""
+
+    worker: str = Field(description="Worker name")
+    unpaid_amount: float = Field(description="Current unpaid balance")
+    paid_amount: float = Field(description="Total amount paid out")
+    total_earned: float = Field(description="Total amount earned")
+    last_updated: datetime = Field(description="When balance was last updated")
+    updated_by: str = Field(description="What system/process last updated this")
+
