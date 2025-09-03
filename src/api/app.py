@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -40,6 +40,19 @@ from src.api.models import (
     CustomTidesRewardRequest,
     CustomTidesRewardResponse,
     TidesWindowCalculateRequest,
+    EarningsResponse,
+    CreateEarningRequest,
+    UpdateEarningRequest,
+    EarningOperationResponse,
+    BatchPayoutRequest,
+    BatchPayoutResponse,
+    PayoutsResponse,
+    BatchPayoutDetails,
+    UpdatePayoutRequest,
+    PayoutOperationResponse,
+    BalanceResponse,
+    BalancesResponse,
+    WorkerBalance,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -66,6 +79,25 @@ from src.api.services.tides_rewards_queries import (
     get_tides_reward_by_tx_hash,
     update_tides_reward,
     create_tides_reward,
+)
+from src.api.services.earnings_queries import (
+    get_worker_earnings,
+    create_manual_earning,
+    update_earning,
+    delete_earning,
+)
+from src.api.services.payouts_queries import (
+    create_batch_payout,
+    get_worker_payouts,
+    get_batch_payout_details,
+    get_all_payouts,
+    update_individual_payout,
+    delete_individual_payout,
+)
+from src.api.services.balance_queries import (
+    get_worker_balance,
+    get_all_worker_balances,
+    get_worker_balance_count,
 )
 
 logger = get_logger(__name__)
@@ -1071,7 +1103,7 @@ async def create_tides_reward_endpoint(
             btc_amount=reward_data.btc_amount,
             confirmed_at=reward_data.confirmed_at,
         )
-        
+
         return reward
 
     except ValueError as e:
@@ -1128,3 +1160,65 @@ async def calculate_tides_window_endpoint(
             status_code=500,
             detail="An error occurred while calculating the TIDES window.",
         )
+
+
+@app.get("/api/earnings/{worker}", response_model=EarningsResponse, tags=["Earnings"])
+@limiter.limit("60/minute")
+async def get_earnings(
+    request: Request,
+    worker: str,
+    limit: int = 100,
+    offset: int = 0,
+    earning_type: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    token: str = Depends(verify_rewards_token),
+) -> EarningsResponse:
+    """
+    Get earnings for a specific worker with optional filters.
+
+    Query parameters:
+    - limit: Maximum number of results (default 100)
+    - offset: Number of results to skip (default 0)
+    - earning_type: Filter by earning type ('tides', 'pplns', 'manual')
+    - date_from: Filter earnings from this date (YYYY-MM-DD)
+    - date_to: Filter earnings to this date (YYYY-MM-DD)
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        parsed_date_from = None
+        parsed_date_to = None
+
+        if date_from:
+            try:
+                parsed_date_from = datetime.strptime(date_from, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="Invalid date_from format. Use YYYY-MM-DD"
+                )
+
+        if date_to:
+            try:
+                parsed_date_to = datetime.strptime(date_to, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(
+                    status_code=400, detail="Invalid date_to format. Use YYYY-MM-DD"
+                )
+
+        earnings = await get_worker_earnings(
+            db, worker, limit, offset, earning_type, parsed_date_from, parsed_date_to
+        )
+
+        return EarningsResponse(
+            earnings=earnings,
+            total_count=None,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting earnings for worker {worker}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
