@@ -286,3 +286,21 @@ async def update_user_balance_for_payout(
     except Exception as e:
         logger.error(f"Failed to update payout balance for {worker}: {e}")
         raise
+
+
+async def mark_tides_reward_processed(db: StatsDB, tx_hash: str) -> None:
+    """Mark TIDES reward as processed."""
+    try:
+        update_query = """
+        ALTER TABLE tides_rewards
+        UPDATE processed = true
+        WHERE tx_hash = %(tx_hash)s
+        """
+
+        await db.client.command(update_query, parameters={"tx_hash": tx_hash})
+        logger.info(f"Marked TIDES reward {tx_hash} as processed")
+
+    except Exception as e:
+        logger.error(f"Failed to mark TIDES reward {tx_hash} as processed: {e}")
+        raise
+
