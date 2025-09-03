@@ -91,9 +91,7 @@ async def create_batch_payout(
         Batch payout result with validation details
     """
     try:
-        negative_balance_warnings = await validate_worker_balances(
-            db, payouts
-        )
+        negative_balance_warnings = await validate_worker_balances(db, payouts)
 
         # If validation fails and no admin override, return error
         if negative_balance_warnings and not admin_override:
@@ -105,10 +103,9 @@ async def create_batch_payout(
                 "admin_override_used": False,
                 "error": "Insufficient balances for payout",
                 "negative_balance_warnings": negative_balance_warnings,
-                "suggestion": "Use admin_override=true to proceed or reduce payout amounts",
+                "suggestion": "Use admin_override=true to proceed or reduce payout amounts or create manual earning record first.",
             }
 
-        # Gen batch ID
         batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         total_amount = sum(payout["btc_amount"] for payout in payouts)
         processed_at = datetime.now()
@@ -564,7 +561,7 @@ async def update_individual_payout(
     try:
         # Current payout details
         current_query = """
-        SELECT worker, btc_amount, payout_batch_id, bitcoin_tx_hash, notes, paid_at
+        SELECT worker, btc_amount, payout_batch_id, bitcoin_tx_hash, notes, paid_at, created_at
         FROM user_payouts
         WHERE payout_id = %(payout_id)s
         LIMIT 1
@@ -585,6 +582,7 @@ async def update_individual_payout(
         current_tx_hash = current_row[3]
         current_notes = current_row[4]
         paid_at = current_row[5]
+        created_at = current_row[6]
 
         # Prepare update
         new_amount = btc_amount if btc_amount is not None else current_amount
@@ -596,35 +594,28 @@ async def update_individual_payout(
         # Balance difference
         balance_diff = new_amount - current_amount
 
-        delete_query = """
-        ALTER TABLE user_payouts
-        DELETE WHERE payout_id = %(payout_id)s
-        """
-        await db.client.command(delete_query, parameters={"payout_id": payout_id})
+        update_fields = []
+        params = {"payout_id": payout_id}
 
-        # Insert updated
-        insert_query = """
-        INSERT INTO user_payouts (
-            payout_id, worker, btc_amount, payout_batch_id, bitcoin_tx_hash,
-            notes, paid_at, created_at
-        ) VALUES (
-            %(payout_id)s, %(worker)s, %(btc_amount)s, %(payout_batch_id)s,
-            %(bitcoin_tx_hash)s, %(notes)s, %(paid_at)s, %(created_at)s
-        )
-        """
+        if btc_amount is not None:
+            update_fields.append("btc_amount = %(btc_amount)s")
+            params["btc_amount"] = new_amount
 
-        params = {
-            "payout_id": payout_id,
-            "worker": worker,
-            "btc_amount": new_amount,
-            "payout_batch_id": payout_batch_id,
-            "bitcoin_tx_hash": new_tx_hash,
-            "notes": new_notes,
-            "paid_at": paid_at,
-            "created_at": datetime.now(),
-        }
+        if bitcoin_tx_hash is not None:
+            update_fields.append("bitcoin_tx_hash = %(bitcoin_tx_hash)s")
+            params["bitcoin_tx_hash"] = new_tx_hash
 
-        await db.client.command(insert_query, parameters=params)
+        if notes is not None:
+            update_fields.append("notes = %(notes)s")
+            params["notes"] = new_notes
+
+        if update_fields:
+            update_query = f"""
+            ALTER TABLE user_payouts
+            UPDATE {", ".join(update_fields)}
+            WHERE payout_id = %(payout_id)s
+            """
+            await db.client.command(update_query, parameters=params)
 
         # Update balance if amount changed
         if balance_diff != 0:
@@ -642,7 +633,7 @@ async def update_individual_payout(
             "bitcoin_tx_hash": new_tx_hash,
             "notes": new_notes,
             "paid_at": paid_at,
-            "created_at": params["created_at"],
+            "created_at": created_at,
         }
 
     except Exception as e:
