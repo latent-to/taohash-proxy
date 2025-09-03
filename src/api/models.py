@@ -354,3 +354,18 @@ class PayoutsResponse(BaseModel):
     payouts: List[PayoutRecord] = Field(description="List of payout records")
     total_count: Optional[int] = Field(description="Total count without pagination")
 
+
+class BatchPayoutDetails(BaseModel):
+    """Detailed batch payout information"""
+
+    batch_id: str = Field(description="Batch identifier")
+    total_amount: float = Field(description="Total BTC amount in batch")
+    user_count: int = Field(description="Number of users in batch")
+    payment_method: str = Field(description="Payment method used")
+    external_reference: str = Field(description="Bitcoin tx hash or bank reference")
+    notes: str = Field(description="Admin notes")
+    processed_at: datetime = Field(description="When batch was processed")
+    processed_by: str = Field(description="Admin who processed")
+    created_at: datetime = Field(description="When batch was created")
+    individual_payouts: List[PayoutRecord] = Field(description="All payouts in this batch")
+
