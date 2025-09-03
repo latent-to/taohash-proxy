@@ -1257,3 +1257,55 @@ async def create_earning(
         logger.error(f"Error creating earning for {earning_request.worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.put(
+    "/api/earnings/{earning_id}",
+    response_model=EarningOperationResponse,
+    tags=["Earnings"],
+)
+@limiter.limit("30/minute")
+async def update_earning_record(
+    request: Request,
+    earning_id: str,
+    update_request: UpdateEarningRequest,
+    token: str = Depends(verify_rewards_token),
+) -> EarningOperationResponse:
+    """
+    Update an existing earning record.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                update_request.btc_amount is not None,
+                update_request.metadata is not None,
+                update_request.reference is not None,
+            ]
+        ):
+            raise HTTPException(
+                status_code=400, detail="At least one field must be provided for update"
+            )
+
+        earning = await update_earning(
+            db,
+            earning_id,
+            update_request.btc_amount,
+            update_request.metadata,
+            update_request.reference,
+        )
+
+        if not earning:
+            raise HTTPException(status_code=404, detail="Earning not found")
+
+        return EarningOperationResponse(
+            success=True, earning_id=earning_id, message=f"Updated earning {earning_id}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating earning {earning_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
