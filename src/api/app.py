@@ -1483,3 +1483,33 @@ async def get_payouts(
         logger.error(f"Error getting payouts for worker {worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.get(
+    "/api/payouts/batch/{batch_id}", response_model=BatchPayoutDetails, tags=["Payouts"]
+)
+@limiter.limit("60/minute")
+async def get_batch_details(
+    request: Request,
+    batch_id: str,
+    token: str = Depends(verify_rewards_token),
+) -> BatchPayoutDetails:
+    """
+    Get detailed batch payout information including all individual payouts.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        batch_details = await get_batch_payout_details(db, batch_id)
+
+        if not batch_details:
+            raise HTTPException(status_code=404, detail="Batch not found")
+
+        return BatchPayoutDetails(**batch_details)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting batch details for {batch_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
