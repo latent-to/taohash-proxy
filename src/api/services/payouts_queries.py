@@ -379,3 +379,82 @@ async def get_worker_payouts(
         logger.error(f"Failed to get payouts for worker {worker}: {e}")
         raise
 
+
+async def get_batch_payout_details(
+    db: StatsDB, batch_id: str
+) -> Optional[Dict[str, Any]]:
+    """
+    Get detailed batch payout information including all individual payouts.
+
+    Args:
+        db: Database connection
+        batch_id: Batch ID to look up
+
+    Returns:
+        Batch details with individual payouts, or None if not found
+    """
+    try:
+        batch_query = """
+        SELECT 
+            batch_id, total_amount, user_count, payout_data, payment_method,
+            external_reference, notes, processed_at, processed_by, created_at
+        FROM payout_batches
+        WHERE batch_id = %(batch_id)s
+        LIMIT 1
+        """
+
+        batch_result = await db.client.query(
+            batch_query, parameters={"batch_id": batch_id}
+        )
+
+        if not batch_result.result_rows:
+            return None
+
+        batch_row = batch_result.result_rows[0]
+
+        # Individual payouts
+        payouts_query = """
+        SELECT 
+            payout_id, worker, btc_amount, payout_batch_id, bitcoin_tx_hash,
+            notes, paid_at, created_at
+        FROM user_payouts
+        WHERE payout_batch_id = %(batch_id)s
+        ORDER BY paid_at DESC
+        """
+
+        payouts_result = await db.client.query(
+            payouts_query, parameters={"batch_id": batch_id}
+        )
+
+        individual_payouts = []
+        for row in payouts_result.result_rows:
+            individual_payouts.append(
+                {
+                    "payout_id": row[0],
+                    "worker": row[1],
+                    "btc_amount": float(row[2]),
+                    "payout_batch_id": row[3],
+                    "bitcoin_tx_hash": row[4],
+                    "notes": row[5],
+                    "paid_at": row[6],
+                    "created_at": row[7],
+                }
+            )
+
+        return {
+            "batch_id": batch_row[0],
+            "total_amount": float(batch_row[1]),
+            "user_count": int(batch_row[2]),
+            "payment_method": batch_row[4],
+            "external_reference": batch_row[5],
+            "notes": batch_row[6],
+            "processed_at": batch_row[7],
+            "processed_by": batch_row[8],
+            "created_at": batch_row[9],
+            "individual_payouts": individual_payouts,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get batch payout details for {batch_id}: {e}")
+        raise
+
