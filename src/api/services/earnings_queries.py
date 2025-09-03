@@ -288,3 +288,54 @@ async def update_earning(
         logger.error(f"Failed to update earning {earning_id}: {e}")
         raise
 
+
+async def delete_earning(
+    db: StatsDB,
+    earning_id: str,
+) -> bool:
+    """
+    Delete an earning record and update balances.
+    
+    Args:
+        db: Database connection
+        earning_id: Earning ID to delete
+    
+    Returns:
+        True if deleted successfully, False if not found
+    """
+    try:
+        # Get earning details before deletion
+        select_query = """
+        SELECT worker, btc_amount
+        FROM user_earnings
+        WHERE earning_id = %(earning_id)s
+        LIMIT 1
+        """
+
+        result = await db.client.query(select_query, parameters={"earning_id": earning_id})
+
+        if not result.result_rows:
+            logger.warning(f"Earning not found for deletion: {earning_id}")
+            return False
+
+        worker = result.result_rows[0][0]
+        btc_amount = float(result.result_rows[0][1])
+
+        # Delete the earning
+        delete_query = """
+        ALTER TABLE user_earnings
+        DELETE WHERE earning_id = %(earning_id)s
+        """
+
+        await db.client.command(delete_query, parameters={"earning_id": earning_id})
+
+        # Update user balance (subtract the deleted amount)
+        await update_user_balance(db, worker, -btc_amount, "earning_deletion")
+
+        logger.info(f"Deleted earning {earning_id} for {worker} (-{btc_amount} BTC)")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to delete earning {earning_id}: {e}")
+        raise
+
