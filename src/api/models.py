@@ -303,15 +303,6 @@ class BatchPayoutRequest(BaseModel):
     tides_tx_hash: Optional[str] = Field(None, description="TIDES reward to mark as processed")
 
 
-class ValidationFailure(BaseModel):
-    """Balance validation failure details"""
-
-    worker: str = Field(description="Worker with insufficient balance")
-    current_balance: float = Field(description="Current unpaid balance")
-    payout_requested: float = Field(description="Requested payout amount")
-    net_balance: float = Field(description="Resulting balance after payout")
-
-
 class NegativeBalanceWarning(BaseModel):
     """Warning for negative balance after payout"""
 
@@ -330,7 +321,6 @@ class BatchPayoutResponse(BaseModel):
     processed_workers: Optional[int] = Field(description="Number of workers processed")
     admin_override_used: Optional[bool] = Field(description="Whether admin override was used")
     error: Optional[str] = Field(description="Error message if failed")
-    validation_failures: Optional[List[ValidationFailure]] = Field(description="Balance validation failures")
     negative_balance_warnings: Optional[List[NegativeBalanceWarning]] = Field(description="Negative balance warnings")
     suggestion: Optional[str] = Field(description="Suggestion for fixing validation failures")
 

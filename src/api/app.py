@@ -1399,7 +1399,6 @@ async def create_batch_payout_endpoint(
                 processed_workers=result["processed_workers"],
                 admin_override_used=result.get("admin_override_used"),
                 error=None,
-                validation_failures=None,
                 negative_balance_warnings=result.get("negative_balance_warnings"),
                 suggestion=None,
             )
@@ -1411,7 +1410,6 @@ async def create_batch_payout_endpoint(
                 processed_workers=None,
                 admin_override_used=False,
                 error=result["error"],
-                validation_failures=result.get("validation_failures"),
                 negative_balance_warnings=result.get("negative_balance_warnings"),
                 suggestion=result.get("suggestion"),
             )
