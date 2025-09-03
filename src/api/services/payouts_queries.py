@@ -223,3 +223,66 @@ async def create_individual_payout(
     except Exception as e:
         logger.error(f"Failed to create individual payout for {worker}: {e}")
         raise
+
+
+async def update_user_balance_for_payout(
+    db: StatsDB,
+    worker: str,
+    payout_amount: float,
+) -> None:
+    """
+    Update user balance for payout: decrease unpaid_amount, increase paid_amount.
+    """
+    try:
+        current_balance_query = """
+        SELECT unpaid_amount, paid_amount, total_earned
+        FROM user_rewards
+        WHERE worker = %(worker)s
+        ORDER BY last_updated DESC
+        LIMIT 1
+        """
+
+        result = await db.client.query(
+            current_balance_query, parameters={"worker": worker}
+        )
+
+        if result.result_rows:
+            current_unpaid = float(result.result_rows[0][0])
+            current_paid = float(result.result_rows[0][1])
+            current_total_earned = float(result.result_rows[0][2])
+        else:
+            current_unpaid = 0.0
+            current_paid = 0.0
+            current_total_earned = 0.0
+
+        # Cal new balances
+        new_unpaid = current_unpaid - payout_amount  # Decrease unpaid
+        new_paid = current_paid + payout_amount  # Increase paid
+
+        balance_insert = """
+        INSERT INTO user_rewards (
+            worker, unpaid_amount, paid_amount, total_earned, last_updated, updated_by
+        ) VALUES (
+            %(worker)s, %(unpaid_amount)s, %(paid_amount)s, %(total_earned)s, %(last_updated)s, %(updated_by)s
+        )
+        """
+
+        balance_params = {
+            "worker": worker,
+            "unpaid_amount": new_unpaid,
+            "paid_amount": new_paid,
+            "total_earned": current_total_earned,  # Unchanged as we increment thru earnings
+            "last_updated": datetime.now(),
+            "updated_by": "batch_payout",
+        }
+
+        await db.client.command(balance_insert, parameters=balance_params)
+
+        logger.debug(
+            f"Updated payout balance for {worker}: unpaid {current_unpaid:.8f} → {new_unpaid:.8f}, "
+            f"paid {current_paid:.8f} → {new_paid:.8f}"
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to update payout balance for {worker}: {e}")
+        raise
