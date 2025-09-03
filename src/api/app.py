@@ -1686,3 +1686,36 @@ async def get_balance(
     except Exception as e:
         logger.error(f"Error getting balance for worker {worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/balances", response_model=BalancesResponse, tags=["Balances"])
+@limiter.limit("30/minute")
+async def get_all_balances(
+    request: Request,
+    limit: Optional[int] = Query(
+        None, description="Maximum number of records to return"
+    ),
+    offset: Optional[int] = Query(None, description="Number of records to skip"),
+    token: str = Depends(verify_token),
+) -> BalancesResponse:
+    """
+    Get current balances for all workers.
+
+    Returns all worker balances from the user_rewards table with optional pagination.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        balances_data = await get_all_worker_balances(db, limit, offset)
+        total_count = await get_worker_balance_count(db)
+
+        balances = [WorkerBalance(**balance) for balance in balances_data]
+
+        return BalancesResponse(balances=balances, total_count=total_count)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting all balances: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
