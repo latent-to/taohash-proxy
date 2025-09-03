@@ -1622,3 +1622,37 @@ async def update_payout(
         logger.error(f"Error updating payout {payout_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.delete(
+    "/api/payouts/{payout_id}", response_model=PayoutOperationResponse, tags=["Payouts"]
+)
+@limiter.limit("30/minute")
+async def delete_payout(
+    request: Request,
+    payout_id: str,
+    token: str = Depends(verify_rewards_token),
+) -> PayoutOperationResponse:
+    """
+    Delete an individual payout record and rollback balances.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        success = await delete_individual_payout(db, payout_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Payout not found")
+
+        return PayoutOperationResponse(
+            success=True,
+            payout_id=payout_id,
+            message=f"Deleted payout {payout_id} and rolled back balances",
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting payout {payout_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
