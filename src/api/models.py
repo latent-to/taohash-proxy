@@ -334,3 +334,23 @@ class BatchPayoutResponse(BaseModel):
     negative_balance_warnings: Optional[List[NegativeBalanceWarning]] = Field(description="Negative balance warnings")
     suggestion: Optional[str] = Field(description="Suggestion for fixing validation failures")
 
+
+class PayoutRecord(BaseModel):
+    """Individual payout record"""
+
+    payout_id: str = Field(description="Unique payout identifier")
+    worker: str = Field(description="Worker who received payout")
+    btc_amount: float = Field(description="BTC amount paid out")
+    payout_batch_id: Optional[str] = Field(description="Link to batch if part of batch payout")
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash")
+    notes: str = Field(description="Payout notes")
+    paid_at: datetime = Field(description="When payout was made")
+    created_at: datetime = Field(description="When record was created")
+
+
+class PayoutsResponse(BaseModel):
+    """Response model for payout queries"""
+
+    payouts: List[PayoutRecord] = Field(description="List of payout records")
+    total_count: Optional[int] = Field(description="Total count without pagination")
+
