@@ -256,3 +256,30 @@ class EarningsResponse(BaseModel):
 
     earnings: List[EarningRecord] = Field(description="List of earning records")
     total_count: Optional[int] = Field(description="Total count without pagination")
+
+
+class CreateEarningRequest(BaseModel):
+    """Request model for creating manual earnings"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to credit", gt=0)
+    earning_type: str = Field(default="manual", description="Type of earning")
+    reference: Optional[str] = Field(None, description="Optional reference")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+    earned_at: Optional[datetime] = Field(None, description="When earned (defaults to now)")
+
+
+class UpdateEarningRequest(BaseModel):
+    """Request model for updating existing earnings"""
+
+    btc_amount: Optional[float] = Field(None, description="New BTC amount", gt=0)
+    metadata: Optional[Dict[str, Any]] = Field(None, description="New metadata")
+    reference: Optional[str] = Field(None, description="New reference")
+
+
+class EarningOperationResponse(BaseModel):
+    """Response model for earning operations (create/update/delete)"""
+
+    success: bool = Field(description="Whether operation succeeded")
+    earning_id: Optional[str] = Field(description="Earning ID (for create/update)")
+    message: str = Field(description="Operation result message")
