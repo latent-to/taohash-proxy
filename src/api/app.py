@@ -1309,3 +1309,37 @@ async def update_earning_record(
         logger.error(f"Error updating earning {earning_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.delete(
+    "/api/earnings/{earning_id}",
+    response_model=EarningOperationResponse,
+    tags=["Earnings"],
+)
+@limiter.limit("30/minute")
+async def delete_earning_record(
+    request: Request,
+    earning_id: str,
+    token: str = Depends(verify_rewards_token),
+) -> EarningOperationResponse:
+    """
+    Delete an earning record and update balances.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        success = await delete_earning(db, earning_id)
+
+        if not success:
+            raise HTTPException(status_code=404, detail="Earning not found")
+
+        return EarningOperationResponse(
+            success=True, earning_id=earning_id, message=f"Deleted earning {earning_id}"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting earning {earning_id}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
