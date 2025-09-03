@@ -235,3 +235,24 @@ class CustomTidesRewardResponse(BaseModel):
         description="TIDES window data at time of discovery"
     )
     processed: bool = Field(description="Whether this reward has been processed")
+
+
+class EarningRecord(BaseModel):
+    """Individual earning record"""
+
+    earning_id: str = Field(description="Unique earning identifier")
+    worker: str = Field(description="Worker who earned this")
+    btc_amount: float = Field(description="BTC amount earned")
+    earning_type: str = Field(description="Type of earning (tides, pplns, manual)")
+    reference: Optional[str] = Field(description="Reference to source (tx_hash, batch_id, etc.)")
+    tides_reward_id: Optional[str] = Field(description="Link to tides_rewards.tx_hash if applicable")
+    metadata: Dict[str, Any] = Field(description="Additional context (percentages, window info, etc.)")
+    earned_at: datetime = Field(description="When this was earned")
+    created_at: datetime = Field(description="When record was created")
+
+
+class EarningsResponse(BaseModel):
+    """Response model for worker earnings"""
+
+    earnings: List[EarningRecord] = Field(description="List of earning records")
+    total_count: Optional[int] = Field(description="Total count without pagination")
