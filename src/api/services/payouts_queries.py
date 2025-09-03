@@ -458,3 +458,88 @@ async def get_batch_payout_details(
         logger.error(f"Failed to get batch payout details for {batch_id}: {e}")
         raise
 
+
+async def get_all_payouts(
+    db: StatsDB,
+    worker: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    date_from: Optional[datetime] = None,
+    date_to: Optional[datetime] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Get payouts with optional filters.
+
+    Args:
+        db: Database connection
+        worker: Filter by worker name
+        batch_id: Filter by batch ID
+        date_from: Filter payouts from this date
+        date_to: Filter payouts to this date
+        limit: Maximum number of results
+        offset: Number of results to skip
+
+    Returns:
+        List of payout records
+    """
+    try:
+        conditions = []
+        params = {}
+
+        if worker:
+            conditions.append("worker = %(worker)s")
+            params["worker"] = worker
+
+        if batch_id:
+            conditions.append("payout_batch_id = %(batch_id)s")
+            params["batch_id"] = batch_id
+
+        if date_from:
+            conditions.append("paid_at >= %(date_from)s")
+            params["date_from"] = date_from
+
+        if date_to:
+            conditions.append("paid_at <= %(date_to)s")
+            params["date_to"] = date_to
+
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        query = f"""
+        SELECT 
+            payout_id, worker, btc_amount, payout_batch_id, bitcoin_tx_hash,
+            notes, paid_at, created_at
+        FROM user_payouts
+        WHERE {where_clause}
+        ORDER BY paid_at DESC
+        """
+
+        if limit:
+            query += f" LIMIT {limit}"
+        if offset:
+            query += f" OFFSET {offset}"
+
+        result = await db.client.query(query, parameters=params)
+
+        payouts = []
+        for row in result.result_rows:
+            payouts.append(
+                {
+                    "payout_id": row[0],
+                    "worker": row[1],
+                    "btc_amount": float(row[2]),
+                    "payout_batch_id": row[3],
+                    "bitcoin_tx_hash": row[4],
+                    "notes": row[5],
+                    "paid_at": row[6],
+                    "created_at": row[7],
+                }
+            )
+
+        logger.debug(f"Retrieved {len(payouts)} payouts with filters")
+        return payouts
+
+    except Exception as e:
+        logger.error(f"Failed to get payouts: {e}")
+        raise
+
