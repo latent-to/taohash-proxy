@@ -1344,7 +1344,6 @@ async def delete_earning_record(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-
 @app.post("/api/payouts/batch", response_model=BatchPayoutResponse, tags=["Payouts"])
 @limiter.limit("10/minute")
 async def create_batch_payout_endpoint(
@@ -1708,11 +1707,10 @@ async def get_all_balances(
 
     try:
         balances_data = await get_all_worker_balances(db, limit, offset)
-        total_count = await get_worker_balance_count(db)
 
         balances = [WorkerBalance(**balance) for balance in balances_data]
 
-        return BalancesResponse(balances=balances, total_count=total_count)
+        return BalancesResponse(balances=balances)
 
     except HTTPException:
         raise

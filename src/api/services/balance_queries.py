@@ -101,27 +101,3 @@ async def get_all_worker_balances(
     except Exception as e:
         logger.error(f"Failed to get all worker balances: {e}")
         raise
-
-
-async def get_worker_balance_count(db: StatsDB) -> int:
-    """
-    Get total count of workers with balances.
-
-    Args:
-        db: Database connection
-
-    Returns:
-        Total number of workers with balance records
-    """
-    try:
-        count_query = """
-        SELECT COUNT(DISTINCT worker)
-        FROM user_rewards
-        """
-
-        result = await db.client.query(count_query)
-        return int(result.result_rows[0][0]) if result.result_rows else 0
-
-    except Exception as e:
-        logger.error(f"Failed to get worker balance count: {e}")
-        raise
