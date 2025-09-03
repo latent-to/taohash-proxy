@@ -283,3 +283,22 @@ class EarningOperationResponse(BaseModel):
     success: bool = Field(description="Whether operation succeeded")
     earning_id: Optional[str] = Field(description="Earning ID (for create/update)")
     message: str = Field(description="Operation result message")
+
+
+class PayoutItem(BaseModel):
+    """Individual worker payout in a batch"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to pay out", gt=0)
+
+
+class BatchPayoutRequest(BaseModel):
+    """Request model for creating batch payouts"""
+
+    payouts: List[PayoutItem] = Field(description="List of worker payouts")
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash for the batch")
+    payment_method: str = Field(default="bitcoin", description="Payment method")
+    notes: str = Field(default="", description="Admin notes about this payout")
+    admin_override: bool = Field(default=False, description="Allow negative balances if true")
+    tides_tx_hash: Optional[str] = Field(None, description="TIDES reward to mark as processed")
+
