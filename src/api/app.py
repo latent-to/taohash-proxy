@@ -1222,3 +1222,38 @@ async def get_earnings(
         logger.error(f"Error getting earnings for worker {worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.post("/api/earnings", response_model=EarningOperationResponse, tags=["Earnings"])
+@limiter.limit("30/minute")
+async def create_earning(
+    request: Request,
+    earning_request: CreateEarningRequest,
+    token: str = Depends(verify_rewards_token),
+) -> EarningOperationResponse:
+    """
+    Create a manual earning record.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        earning = await create_manual_earning(
+            db,
+            earning_request.worker,
+            earning_request.btc_amount,
+            earning_request.earning_type,
+            earning_request.reference,
+            earning_request.metadata,
+            earning_request.earned_at,
+        )
+
+        return EarningOperationResponse(
+            success=True,
+            earning_id=earning["earning_id"],
+            message=f"Created earning for {earning_request.worker}: {earning_request.btc_amount} BTC",
+        )
+
+    except Exception as e:
+        logger.error(f"Error creating earning for {earning_request.worker}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
