@@ -543,3 +543,112 @@ async def get_all_payouts(
         logger.error(f"Failed to get payouts: {e}")
         raise
 
+
+async def update_individual_payout(
+    db: StatsDB,
+    payout_id: str,
+    btc_amount: Optional[float] = None,
+    bitcoin_tx_hash: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Update an individual payout record and recalculate balances.
+
+    Args:
+        db: Database connection
+        payout_id: Payout ID to update
+        btc_amount: New BTC amount
+        bitcoin_tx_hash: New Bitcoin tx hash
+        notes: New notes
+
+    Returns:
+        Updated payout record or None if not found
+    """
+    try:
+        # Current payout details
+        current_query = """
+        SELECT worker, btc_amount, payout_batch_id, bitcoin_tx_hash, notes, paid_at
+        FROM user_payouts
+        WHERE payout_id = %(payout_id)s
+        LIMIT 1
+        """
+
+        result = await db.client.query(
+            current_query, parameters={"payout_id": payout_id}
+        )
+
+        if not result.result_rows:
+            logger.warning(f"Payout not found: {payout_id}")
+            return None
+
+        current_row = result.result_rows[0]
+        worker = current_row[0]
+        current_amount = float(current_row[1])
+        payout_batch_id = current_row[2]
+        current_tx_hash = current_row[3]
+        current_notes = current_row[4]
+        paid_at = current_row[5]
+
+        # Prepare update
+        new_amount = btc_amount if btc_amount is not None else current_amount
+        new_tx_hash = (
+            bitcoin_tx_hash if bitcoin_tx_hash is not None else current_tx_hash
+        )
+        new_notes = notes if notes is not None else current_notes
+
+        # Balance difference
+        balance_diff = new_amount - current_amount
+
+        delete_query = """
+        ALTER TABLE user_payouts
+        DELETE WHERE payout_id = %(payout_id)s
+        """
+        await db.client.command(delete_query, parameters={"payout_id": payout_id})
+
+        # Insert updated
+        insert_query = """
+        INSERT INTO user_payouts (
+            payout_id, worker, btc_amount, payout_batch_id, bitcoin_tx_hash,
+            notes, paid_at, created_at
+        ) VALUES (
+            %(payout_id)s, %(worker)s, %(btc_amount)s, %(payout_batch_id)s,
+            %(bitcoin_tx_hash)s, %(notes)s, %(paid_at)s, %(created_at)s
+        )
+        """
+
+        params = {
+            "payout_id": payout_id,
+            "worker": worker,
+            "btc_amount": new_amount,
+            "payout_batch_id": payout_batch_id,
+            "bitcoin_tx_hash": new_tx_hash,
+            "notes": new_notes,
+            "paid_at": paid_at,
+            "created_at": datetime.now(),
+        }
+
+        await db.client.command(insert_query, parameters=params)
+
+        # Update balance if amount changed
+        if balance_diff != 0:
+            await update_user_balance_for_payout_adjustment(db, worker, balance_diff)
+
+        logger.info(
+            f"Updated payout {payout_id} for {worker} (amount: {new_amount} BTC)"
+        )
+
+        return {
+            "payout_id": payout_id,
+            "worker": worker,
+            "btc_amount": new_amount,
+            "payout_batch_id": payout_batch_id,
+            "bitcoin_tx_hash": new_tx_hash,
+            "notes": new_notes,
+            "paid_at": paid_at,
+            "created_at": params["created_at"],
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to update payout {payout_id}: {e}")
+        raise
+
