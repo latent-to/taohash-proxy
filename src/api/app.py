@@ -1656,3 +1656,33 @@ async def delete_payout(
         logger.error(f"Error deleting payout {payout_id}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.get("/api/balance/{worker}", response_model=BalanceResponse, tags=["Balances"])
+@limiter.limit("60/minute")
+async def get_balance(
+    request: Request,
+    worker: str,
+    token: str = Depends(verify_token),
+) -> BalanceResponse:
+    """
+    Get current balance for a specific worker.
+
+    Returns the worker's current unpaid_amount, paid_amount, total_earned
+    from the user_rewards table.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        balance_data = await get_worker_balance(db, worker)
+
+        if not balance_data:
+            raise HTTPException(status_code=404, detail="Worker balance not found")
+
+        return BalanceResponse(balance=WorkerBalance(**balance_data))
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting balance for worker {worker}: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
