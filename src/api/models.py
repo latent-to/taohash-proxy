@@ -369,3 +369,19 @@ class BatchPayoutDetails(BaseModel):
     created_at: datetime = Field(description="When batch was created")
     individual_payouts: List[PayoutRecord] = Field(description="All payouts in this batch")
 
+
+class UpdatePayoutRequest(BaseModel):
+    """Request model for updating individual payouts"""
+
+    btc_amount: Optional[float] = Field(None, description="New BTC amount", gt=0)
+    bitcoin_tx_hash: Optional[str] = Field(None, description="New Bitcoin tx hash")
+    notes: Optional[str] = Field(None, description="New notes")
+
+
+class PayoutOperationResponse(BaseModel):
+    """Response model for payout operations (update/delete)"""
+
+    success: bool = Field(description="Whether operation succeeded")
+    payout_id: Optional[str] = Field(description="Payout ID")
+    message: str = Field(description="Operation result message")
+
