@@ -53,6 +53,8 @@ from src.api.models import (
     BalanceResponse,
     BalancesResponse,
     WorkerBalance,
+    UpdateBalanceRequest,
+    BalanceUpdateResponse,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -97,6 +99,7 @@ from src.api.services.payouts_queries import (
 from src.api.services.balance_queries import (
     get_worker_balance,
     get_all_worker_balances,
+    update_worker_balance_manually,
 )
 
 logger = get_logger(__name__)
@@ -1713,4 +1716,63 @@ async def get_all_balances(
         raise
     except Exception as e:
         logger.error(f"Error getting all balances: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.put(
+    "/api/balance/{worker}",
+    response_model=BalanceUpdateResponse,
+    tags=["Admin", "Balances"],
+)
+@limiter.limit("30/minute")
+async def update_worker_balance(
+    request: Request,
+    worker: str,
+    balance_request: UpdateBalanceRequest,
+    token: str = Depends(verify_rewards_token),
+) -> BalanceUpdateResponse:
+    """
+    Update worker balance directly.
+
+    Can update unpaid_amount, paid_amount, and/or total_earned.
+    At least one field must be provided.
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if all(
+        field is None
+        for field in [
+            balance_request.unpaid_amount,
+            balance_request.paid_amount,
+            balance_request.total_earned,
+        ]
+    ):
+        raise HTTPException(
+            status_code=400, detail="At least one balance field must be provided"
+        )
+
+    try:
+        current_balance = await get_worker_balance(db, worker)
+        if not current_balance:
+            raise HTTPException(status_code=404, detail="Worker balance not found")
+
+        updated_balance = await update_worker_balance_manually(
+            db, worker, balance_request, str(token)
+        )
+
+        return BalanceUpdateResponse(
+            success=True,
+            worker=worker,
+            old_balance=WorkerBalance(**current_balance),
+            new_balance=WorkerBalance(**updated_balance),
+            message=f"Updated balance for {worker}",
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating balance for {worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
