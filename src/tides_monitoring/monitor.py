@@ -10,7 +10,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 TIDES_CHECK_INTERVAL_MINUTES = int(
-    os.environ.get("TIDES_CHECK_INTERVAL", "30")
+    os.environ.get("TIDES_CHECK_INTERVAL", "5")
 )
 
 
