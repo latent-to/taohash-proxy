@@ -397,3 +397,22 @@ class BalancesResponse(BaseModel):
     """Response model for all worker balances"""
 
     balances: List[WorkerBalance] = Field(description="List of all worker balances")
+
+
+class UpdateBalanceRequest(BaseModel):
+    """Request model for updating worker balance fields"""
+    
+    unpaid_amount: Optional[float] = Field(None, ge=0, description="New unpaid balance")
+    paid_amount: Optional[float] = Field(None, ge=0, description="New paid balance") 
+    total_earned: Optional[float] = Field(None, ge=0, description="New total earned")
+    reason: str = Field(description="Reason for balance change")
+
+
+class BalanceUpdateResponse(BaseModel):
+    """Response for balance update operations"""
+    
+    success: bool = Field(description="Whether operation succeeded")
+    worker: str = Field(description="Worker name")
+    old_balance: WorkerBalance = Field(description="Previous balance")
+    new_balance: WorkerBalance = Field(description="Updated balance") 
+    message: str = Field(description="Result message")
