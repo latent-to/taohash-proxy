@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.storage.db import StatsDB
@@ -106,9 +106,9 @@ async def create_batch_payout(
                 "suggestion": "Use admin_override=true to proceed or reduce payout amounts or create manual earning record first.",
             }
 
-        batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         total_amount = sum(payout["btc_amount"] for payout in payouts)
-        processed_at = datetime.now()
+        processed_at = datetime.now(timezone.utc)
 
         batch_insert = """
         INSERT INTO payout_batches (
@@ -186,7 +186,7 @@ async def create_individual_payout(
     """Create individual payout record and update worker balance."""
     try:
         payout_id = str(uuid.uuid4())
-        paid_at = datetime.now()
+        paid_at = datetime.now(timezone.utc)
 
         payout_insert = """
         INSERT INTO user_payouts (
@@ -266,7 +266,7 @@ async def update_user_balance_for_payout(
             "unpaid_amount": new_unpaid,
             "paid_amount": new_paid,
             "total_earned": current_total_earned,  # Unchanged as we increment thru earnings
-            "last_updated": datetime.now(),
+            "last_updated": datetime.now(timezone.utc),
             "updated_by": "batch_payout",
         }
 
@@ -746,7 +746,7 @@ async def update_user_balance_for_payout_adjustment(
             "unpaid_amount": new_unpaid,
             "paid_amount": new_paid,
             "total_earned": current_total_earned,  # Unchanged
-            "last_updated": datetime.now(),
+            "last_updated": datetime.now(timezone.utc),
             "updated_by": "payout_adjustment",
         }
 

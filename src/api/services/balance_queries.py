@@ -1,7 +1,7 @@
 """Balance queries for user_rewards table."""
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
@@ -146,7 +146,7 @@ async def update_worker_balance_manually(
                 if balance_request.total_earned is not None
                 else float(current[3])
             ),
-            "last_updated": datetime.now(),
+            "last_updated": datetime.now(timezone.utc),
             "updated_by": "admin_manual_edit",
         }
 

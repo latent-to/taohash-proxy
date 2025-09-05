@@ -1,7 +1,7 @@
 """TIDES window queries and operations."""
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from src.api.services.config_queries import get_config
@@ -41,11 +41,11 @@ async def get_tides_window(db: StatsDB) -> Optional[dict[str, Any]]:
         "share_log_window": float(row[0]),
         "network_difficulty": float(row[1]),
         "multiplier": float(row[2]),
-        "window_start": row[3].isoformat() if row[3] else None,
-        "window_end": row[4].isoformat() if row[4] else None,
+        "window_start": row[3] if row[3] else None,
+        "window_end": row[4] if row[4] else None,
         "total_difficulty_in_window": float(row[5]),
         "total_workers": int(row[6]),
-        "updated_at": row[8].isoformat() if row[8] else None,
+        "updated_at": row[8] if row[8] else None,
     }
 
 
@@ -62,7 +62,7 @@ async def _get_window_end_timestamp(db: StatsDB) -> datetime:
         return result.result_rows[0][0]
 
     # Fallback
-    return datetime.now()
+    return datetime.now(timezone.utc)
 
 
 async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
@@ -119,7 +119,7 @@ async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
         "window_end": window_end_timestamp.isoformat(),
         "total_difficulty_in_window": total_difficulty,
         "total_workers": len(workers_list),
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     await _store_tides_window(db, tides_data)
@@ -327,7 +327,7 @@ async def _store_tides_window(db: StatsDB, tides_data: dict[str, Any]) -> None:
         "multiplier": tides_data["multiplier"],
         "window_start": datetime.fromisoformat(tides_data["window_start"])
         if tides_data["window_start"]
-        else datetime.now(),
+        else datetime.now(timezone.utc),
         "window_end": datetime.fromisoformat(tides_data["window_end"]),
         "total_difficulty": tides_data["total_difficulty_in_window"],
         "total_workers": tides_data["total_workers"],
@@ -413,7 +413,7 @@ async def calculate_custom_tides_window(
         "window_end": end_datetime.isoformat(),
         "total_difficulty_in_window": total_difficulty,
         "total_workers": len(workers_list),
-        "calculated_at": datetime.now().isoformat(),
+        "calculated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
