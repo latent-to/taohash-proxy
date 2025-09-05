@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 import aiohttp
@@ -15,6 +15,7 @@ from tenacity import (
 )
 
 from src.api.services.tides_queries import get_tides_window
+from src.utils.time_normalize import normalize_tides_window_snapshot
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -96,7 +97,7 @@ async def process_tides_reward_earnings(
                 "tides_reward_id": tx_hash,
                 "metadata": json.dumps(metadata),
                 "earned_at": confirmed_at,
-                "created_at": datetime.now(),
+                "created_at": datetime.now(timezone.utc),
             }
 
             await db.client.command(earnings_insert, parameters=earnings_params)
@@ -167,7 +168,7 @@ async def update_user_balance(
             "unpaid_amount": new_unpaid,
             "paid_amount": current_paid,
             "total_earned": new_total_earned,
-            "last_updated": datetime.now(),
+            "last_updated": datetime.now(timezone.utc),
             "updated_by": updated_by,
         }
 
@@ -304,9 +305,10 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
 
                     if tx_hash not in existing_tx_hashes:
                         tides_window = await get_tides_window(db)
-                        snapshot_json = (
-                            json.dumps(tides_window) if tides_window else "{}"
-                        )
+                        normalized_window = normalize_tides_window_snapshot(
+                            tides_window
+                        ) if tides_window else {}
+                        snapshot_json = json.dumps(normalized_window)
 
                         insert_query = """
                         INSERT INTO tides_rewards (
@@ -335,7 +337,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
 
                         await db.client.command(insert_query, parameters=params)
                         await process_tides_reward_earnings(
-                            db, tx_hash, btc_amount, tides_window, confirmed_at
+                            db, tx_hash, btc_amount, normalized_window, confirmed_at
                         )
 
                         logger.info(

@@ -1,10 +1,11 @@
 """TIDES rewards queries and operations."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from src.api.services.tides_queries import calculate_custom_tides_window
+from src.utils.time_normalize import normalize_tides_window_snapshot
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -171,8 +172,15 @@ async def create_tides_reward(
     if result.result_rows:
         raise ValueError(f"TIDES reward with tx_hash {tx_hash} already exists")
     
-    # Calculate TIDES window at the confirmed datetime
+    # Ensure confirmed_at is UTC-aware
+    if confirmed_at.tzinfo is None:
+        confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+    else:
+        confirmed_at = confirmed_at.astimezone(timezone.utc)
+
+
     tides_window = await calculate_custom_tides_window(db, confirmed_at)
+    tides_window = normalize_tides_window_snapshot(tides_window, default_updated_at=confirmed_at)
     tides_window_json = json.dumps(tides_window)
     
     insert_query = """
