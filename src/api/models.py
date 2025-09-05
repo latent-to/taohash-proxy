@@ -182,6 +182,36 @@ class TidesRewardsResponse(BaseModel):
     rewards: List[TidesRewardSummary] = Field(description="List of TIDES rewards")
 
 
+class TidesWorkerEntry(BaseModel):
+    """Worker entry for TIDES window."""
+
+    name: str = Field(description="Worker name")
+    shares: int = Field(description="Total shares in window")
+    share_value: float = Field(description="Total share difficulty value")
+    percentage: float = Field(description="Percentage of total window difficulty")
+
+
+class TidesWindowData(BaseModel):
+    """TIDES window data payload."""
+
+    workers: List[TidesWorkerEntry] = Field(description="Workers in window")
+    share_log_window: float = Field(description="Target share log window size")
+    network_difficulty: float = Field(description="Network difficulty used")
+    multiplier: float = Field(description="Multiplier used")
+    window_start: datetime = Field(description="Window start time (UTC)")
+    window_end: datetime = Field(description="Window end time (UTC)")
+    total_difficulty_in_window: float = Field(description="Total difficulty in window")
+    total_workers: int = Field(description="Number of workers in window")
+    updated_at: datetime = Field(description="When this window was last updated (UTC)")
+
+
+class TidesWindowResponse(BaseModel):
+    """Response model for current TIDES window."""
+
+    status: str = Field(description="Request status")
+    data: TidesWindowData
+
+
 class TidesRewardDetails(BaseModel):
     """Full TIDES reward details"""
 
