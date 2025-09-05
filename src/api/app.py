@@ -40,6 +40,7 @@ from src.api.models import (
     CustomTidesRewardRequest,
     CustomTidesRewardResponse,
     TidesWindowCalculateRequest,
+    TidesWindowResponse,
     EarningsResponse,
     CreateEarningRequest,
     UpdateEarningRequest,
@@ -748,9 +749,6 @@ async def get_tides_config(
                 detail="TIDES configuration not found. Please initialize with a PUT request.",
             )
 
-        if config_data["updated_at"]:
-            config_data["updated_at"] = config_data["updated_at"].isoformat()
-
         return {
             "status": "success",
             "config": config_data,
@@ -847,6 +845,7 @@ async def update_tides_config(
     tags=["TIDES"],
     summary="Get TIDES Window",
     response_description="Current TIDES sliding window data",
+    response_model=TidesWindowResponse,
 )
 async def get_tides_window_endpoint(
     request: Request,
@@ -1145,9 +1144,13 @@ async def calculate_tides_window_endpoint(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        window_data = await calculate_custom_tides_window(
-            db, calculate_request.end_datetime
-        )
+        end_dt = calculate_request.end_datetime
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        else:
+            end_dt = end_dt.astimezone(timezone.utc)
+
+        window_data = await calculate_custom_tides_window(db, end_dt)
 
         return {
             "status": "success",
