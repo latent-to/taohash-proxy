@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from src.storage.db import StatsDB
@@ -128,7 +128,7 @@ async def create_manual_earning(
     """
     try:
         earning_id = str(uuid.uuid4())
-        earned_timestamp = earned_at or datetime.now()
+        earned_timestamp = earned_at or datetime.now(timezone.utc)
         metadata_json = json.dumps(metadata or {})
 
         insert_query = """
@@ -150,7 +150,7 @@ async def create_manual_earning(
             "tides_reward_id": None,
             "metadata": metadata_json,
             "earned_at": earned_timestamp,
-            "created_at": datetime.now(),
+            "created_at": datetime.now(timezone.utc),
         }
 
         await db.client.command(insert_query, parameters=params)
@@ -391,7 +391,7 @@ async def update_user_balance(
             "unpaid_amount": new_unpaid,
             "paid_amount": current_paid,
             "total_earned": new_total_earned,
-            "last_updated": datetime.now(),
+            "last_updated": datetime.now(timezone.utc),
             "updated_by": updated_by,
         }
 
