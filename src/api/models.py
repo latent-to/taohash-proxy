@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
+from src.utils.time_normalize import to_iso_z
 
 
 class HealthResponse(BaseModel):
@@ -175,6 +176,10 @@ class TidesRewardSummary(BaseModel):
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     processed: bool = Field(description="Whether this reward has been processed")
 
+    @field_serializer("confirmed_at", when_used="json")
+    def _serialize_confirmed_at(self, v: datetime) -> str:
+        return to_iso_z(v)
+
 
 class TidesRewardsResponse(BaseModel):
     """TIDES rewards summary API response"""
@@ -204,6 +209,10 @@ class TidesWindowData(BaseModel):
     total_workers: int = Field(description="Number of workers in window")
     updated_at: datetime = Field(description="When this window was last updated (UTC)")
 
+    @field_serializer("window_start", "window_end", "updated_at", when_used="json")
+    def _serialize_window_datetimes(self, v: datetime) -> Optional[str]:
+        return to_iso_z(v) if v is not None else None
+
 
 class TidesWindowResponse(BaseModel):
     """Response model for current TIDES window."""
@@ -220,11 +229,15 @@ class TidesRewardDetails(BaseModel):
     btc_amount: float = Field(description="BTC reward amount")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     discovered_at: datetime = Field(description="When this reward was discovered")
-    tides_window: Dict[str, Any] = Field(
+    tides_window: TidesWindowData = Field(
         description="TIDES window data at time of discovery"
     )
     processed: bool = Field(description="Whether this reward has been processed")
     updated_at: datetime = Field(description="Last update timestamp")
+
+    @field_serializer("confirmed_at", "discovered_at", "updated_at", when_used="json")
+    def _serialize_reward_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
 
 
 class TidesRewardUpdateRequest(BaseModel):
@@ -261,10 +274,14 @@ class CustomTidesRewardResponse(BaseModel):
     btc_amount: float = Field(description="BTC reward amount")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     discovered_at: datetime = Field(description="When this reward was discovered")
-    tides_window: Dict[str, Any] = Field(
+    tides_window: TidesWindowData = Field(
         description="TIDES window data at time of discovery"
     )
     processed: bool = Field(description="Whether this reward has been processed")
+
+    @field_serializer("confirmed_at", "discovered_at", when_used="json")
+    def _serialize_custom_reward_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
 
 
 class EarningRecord(BaseModel):
@@ -279,6 +296,10 @@ class EarningRecord(BaseModel):
     metadata: Dict[str, Any] = Field(description="Additional context (percentages, window info, etc.)")
     earned_at: datetime = Field(description="When this was earned")
     created_at: datetime = Field(description="When record was created")
+
+    @field_serializer("earned_at", "created_at", when_used="json")
+    def _serialize_earning_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
 
 
 class EarningsResponse(BaseModel):
@@ -367,6 +388,10 @@ class PayoutRecord(BaseModel):
     paid_at: datetime = Field(description="When payout was made")
     created_at: datetime = Field(description="When record was created")
 
+    @field_serializer("paid_at", "created_at", when_used="json")
+    def _serialize_payout_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
 
 class PayoutsResponse(BaseModel):
     """Response model for payout queries"""
@@ -388,6 +413,10 @@ class BatchPayoutDetails(BaseModel):
     processed_by: str = Field(description="Admin who processed")
     created_at: datetime = Field(description="When batch was created")
     individual_payouts: List[PayoutRecord] = Field(description="All payouts in this batch")
+
+    @field_serializer("processed_at", "created_at", when_used="json")
+    def _serialize_batch_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
 
 
 class UpdatePayoutRequest(BaseModel):
@@ -415,6 +444,10 @@ class WorkerBalance(BaseModel):
     total_earned: float = Field(description="Total amount earned")
     last_updated: datetime = Field(description="When balance was last updated")
     updated_by: str = Field(description="What system/process last updated this")
+
+    @field_serializer("last_updated", when_used="json")
+    def _serialize_last_updated(self, v: datetime) -> str:
+        return to_iso_z(v)
 
 
 class BalanceResponse(BaseModel):
