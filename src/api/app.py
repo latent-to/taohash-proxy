@@ -749,6 +749,7 @@ async def get_tides_config(
                 detail="TIDES configuration not found. Please initialize with a PUT request.",
             )
 
+
         return {
             "status": "success",
             "config": config_data,
@@ -1177,7 +1178,7 @@ async def get_earnings(
     earning_type: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    token: str = Depends(verify_rewards_token),
+    token: str = Depends(verify_token),
 ) -> EarningsResponse:
     """
     Get earnings for a specific worker with optional filters.
@@ -1285,6 +1286,7 @@ async def update_earning_record(
         if not any(
             [
                 update_request.btc_amount is not None,
+                update_request.earning_type is not None,
                 update_request.metadata is not None,
                 update_request.reference is not None,
             ]
@@ -1297,6 +1299,7 @@ async def update_earning_record(
             db,
             earning_id,
             update_request.btc_amount,
+            update_request.earning_type,
             update_request.metadata,
             update_request.reference,
         )
@@ -1436,7 +1439,7 @@ async def get_payouts(
     offset: int = 0,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    token: str = Depends(verify_rewards_token),
+    token: str = Depends(verify_token),
 ) -> PayoutsResponse:
     """
     Get payouts for a specific worker with optional filters.
@@ -1526,7 +1529,7 @@ async def get_all_payouts_endpoint(
     date_to: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
-    token: str = Depends(verify_rewards_token),
+    token: str = Depends(verify_token),
 ) -> PayoutsResponse:
     """
     Get payouts with optional filters.
