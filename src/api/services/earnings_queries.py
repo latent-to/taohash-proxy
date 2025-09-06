@@ -183,6 +183,7 @@ async def update_earning(
     db: StatsDB,
     earning_id: str,
     btc_amount: Optional[float] = None,
+    earning_type: Optional[str] = None,
     metadata: Optional[dict] = None,
     reference: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
@@ -233,6 +234,7 @@ async def update_earning(
 
         # Update fields
         new_amount = btc_amount if btc_amount is not None else current_amount
+        new_earning_type = earning_type if earning_type is not None else current_earning_type
         new_metadata = metadata if metadata is not None else current_metadata_dict
         new_reference = reference if reference is not None else current_reference
 
@@ -245,6 +247,10 @@ async def update_earning(
         if btc_amount is not None:
             update_fields.append("btc_amount = %(btc_amount)s")
             params["btc_amount"] = new_amount
+
+        if earning_type is not None:
+            update_fields.append("earning_type = %(earning_type)s")
+            params["earning_type"] = new_earning_type
 
         if metadata is not None:
             update_fields.append("metadata = %(metadata)s")
@@ -274,7 +280,7 @@ async def update_earning(
             "earning_id": earning_id,
             "worker": worker,
             "btc_amount": new_amount,
-            "earning_type": current_earning_type,
+            "earning_type": new_earning_type,
             "reference": new_reference,
             "tides_reward_id": None,
             "metadata": new_metadata,
