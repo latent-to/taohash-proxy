@@ -324,6 +324,7 @@ class UpdateEarningRequest(BaseModel):
     """Request model for updating existing earnings"""
 
     btc_amount: Optional[float] = Field(None, description="New BTC amount", gt=0)
+    earning_type: Optional[str] = Field(None, description="New earning type")
     metadata: Optional[Dict[str, Any]] = Field(None, description="New metadata")
     reference: Optional[str] = Field(None, description="New reference")
 
