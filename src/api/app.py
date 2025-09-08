@@ -34,6 +34,7 @@ from src.api.models import (
     WorkersStatsResponse,
     WorkersTimerangeResponse,
     TidesConfig,
+    GeneralConfig,
     TidesRewardDetails,
     TidesRewardsResponse,
     TidesRewardUpdateRequest,
@@ -72,6 +73,10 @@ from src.api.services.reward_queries import (
 from src.api.services.config_queries import (
     get_config,
     update_config,
+)
+from src.api.services.general_config_queries import (
+    get_general_config,
+    update_general_config,
 )
 from src.api.services.tides_queries import (
     get_tides_window,
@@ -749,7 +754,6 @@ async def get_tides_config(
                 detail="TIDES configuration not found. Please initialize with a PUT request.",
             )
 
-
         return {
             "status": "success",
             "config": config_data,
@@ -835,6 +839,138 @@ async def update_tides_config(
         raise
     except Exception as e:
         logger.error(f"Failed to update TIDES config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while updating the configuration.",
+        )
+
+
+@app.get(
+    "/config/general",
+    tags=["Configuration"],
+    summary="Get General Configuration",
+    response_description="Current general configuration values",
+)
+async def get_general_config_endpoint(
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Retrieves the current general configuration.
+
+    Returns the current worker_percentage and last updated timestamp.
+
+    ### Sample Request (GET):
+    ```bash
+    curl -X GET "http://127.0.0.1:8888/config/general" -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
+    ```
+
+    ### Sample Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "config": {
+        "worker_percentage": 85.0,
+        "updated_at": "2025-01-15T10:30:00"
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        config_data = await get_general_config(db)
+
+        if not config_data:
+            raise HTTPException(
+                status_code=404,
+                detail="General configuration not found. Please initialize with a PUT request.",
+            )
+
+        return {
+            "status": "success",
+            "config": config_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get general config: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="An error occurred while retrieving the configuration.",
+        )
+
+
+@app.put(
+    "/config/general",
+    tags=["Configuration"],
+    summary="Update General Configuration (Partial Updates)",
+    response_description="Confirmation of the configuration update.",
+)
+async def update_general_config_endpoint(
+    config: GeneralConfig,
+    request: Request,
+    token: str = Depends(verify_rewards_token),
+) -> dict[str, Any]:
+    """
+    Updates the general configuration.
+
+    Can update any combination of: worker_percentage
+    Only provided fields will be updated.
+
+    ---
+
+    ### Sample Request (partial update):
+    ```bash
+    curl -X PUT "http://127.0.0.1:8000/config/general" \\
+    -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    -d '{
+      "worker_percentage": 85.0
+    }'
+    ```
+
+    ### Successful Response (200 OK):
+    ```json
+    {
+      "status": "success",
+      "message": "General configuration updated successfully.",
+      "updated_fields": {
+        "worker_percentage": 85.0
+      }
+    }
+    ```
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        if not any(
+            [
+                config.worker_percentage is not None,
+            ]
+        ):
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        updated_fields = await update_general_config(
+            db,
+            worker_percentage=config.worker_percentage,
+        )
+
+        return {
+            "status": "success",
+            "message": "General configuration updated successfully.",
+            "updated_fields": updated_fields,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update general config: {e}")
         raise HTTPException(
             status_code=500,
             detail="An error occurred while updating the configuration.",
