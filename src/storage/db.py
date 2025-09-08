@@ -319,6 +319,17 @@ class StatsDB:
             """INSERT INTO tides_config (id, multiplier, network_difficulty, updated_at)
             SELECT 1, 8, 129700000000000, now()
             WHERE NOT EXISTS (SELECT 1 FROM tides_config WHERE id = 1)""",
+            # General configuration
+            """CREATE TABLE IF NOT EXISTS general_config (
+                id UInt8 DEFAULT 1,
+                worker_percentage Float64,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # Insert default general config when creating the table
+            """INSERT INTO general_config (id, worker_percentage, updated_at)
+            SELECT 1, 0.015, now()
+            WHERE NOT EXISTS (SELECT 1 FROM general_config WHERE id = 1)""",
             # TIDES window table
             """CREATE TABLE IF NOT EXISTS tides_window (
                 id UInt8 DEFAULT 1,
