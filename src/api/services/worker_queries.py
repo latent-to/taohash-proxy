@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
+from src.api.services.general_config_queries import get_general_config
 
 logger = get_logger(__name__)
 
@@ -181,7 +182,15 @@ async def get_worker_timerange_stats(
                 "hash_rate_unit": "Gh/s",
             }
 
-        return {"btc": {"workers": workers_dict}}
+        # Alpha distribution %
+        config_data = await get_general_config(db)
+        worker_percentage = (
+            config_data.get("worker_percentage", 0.0) if config_data else 0.0
+        )
+
+        return {
+            "btc": {"workers": workers_dict, "worker_percentage": worker_percentage}
+        }
 
     except Exception as e:
         logger.error(f"Error fetching workers timerange data: {e}")
