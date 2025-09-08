@@ -57,6 +57,7 @@ from src.api.models import (
     WorkerBalance,
     UpdateBalanceRequest,
     BalanceUpdateResponse,
+    RawSharesResponse,
 )
 from src.api.services.pool_queries import get_pool_stats_for_window
 from src.api.services.worker_queries import (
@@ -661,6 +662,85 @@ async def get_all_rewards(
     except Exception as e:
         logger.error(f"Error fetching rewards: {e}")
         raise HTTPException(status_code=500, detail="Database error")
+
+
+@app.get("/api/shares/raw", response_model=RawSharesResponse, tags=["Historical Data"])
+@limiter.limit("60/minute")
+async def get_raw_shares(
+    request: Request,
+    start_time: int,
+    end_time: int,
+    token: str = Depends(verify_token),
+) -> dict[str, Any]:
+    """
+    Get raw shares data for a custom time range.
+
+    Args:
+        start_time: Start time as Unix timestamp
+        end_time: End time as Unix timestamp
+
+    Returns raw share records
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if start_time >= end_time:
+        raise HTTPException(
+            status_code=400, detail="start_time must be before end_time"
+        )
+    try:
+        start_dt = datetime.fromtimestamp(start_time)
+        end_dt = datetime.fromtimestamp(end_time)
+
+        query = """
+        SELECT
+            toUnixTimestamp(ts) as timestamp,
+            miner,
+            worker,
+            pool,
+            pool_difficulty,
+            actual_difficulty,
+            block_hash,
+            pool_requested_difficulty,
+            pool_label
+        FROM shares
+        WHERE ts >= %(start_time_dt)s AND ts < %(end_time_dt)s
+        ORDER BY ts
+        """
+
+        params = {
+            "start_time_dt": start_dt,
+            "end_time_dt": end_dt,
+        }
+
+        result = await db.client.query(query, parameters=params)
+
+        shares = []
+        for row in result.result_rows:
+            shares.append(
+                {
+                    "timestamp": int(row[0]),
+                    "miner": row[1],
+                    "worker": row[2],
+                    "pool": row[3],
+                    "pool_difficulty": float(row[4]),
+                    "actual_difficulty": float(row[5]),
+                    "block_hash": row[6],
+                    "pool_requested_difficulty": float(row[7]),
+                    "pool_label": row[8],
+                }
+            )
+
+        return {
+            "shares": shares,
+            "total_count": len(shares),
+            "start_time": start_time,
+            "end_time": end_time,
+        }
+
+    except Exception as e:
+        logger.error(f"Error fetching raw shares data: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/api/rewards/unpaid", tags=["Rewards"])

@@ -143,6 +143,29 @@ class WorkersShareValueResponse(BaseModel):
     btc: BtcWorkersShareValue
 
 
+class ShareRecord(BaseModel):
+    """Individual share record"""
+
+    timestamp: int = Field(description="Unix timestamp of share submission")
+    miner: str = Field(description="Miner IP address")
+    worker: str = Field(description="Worker name")
+    pool: str = Field(description="Pool address")
+    pool_difficulty: float = Field(description="Pool difficulty")
+    actual_difficulty: float = Field(description="Actual share difficulty")
+    block_hash: str = Field(description="Block hash")
+    pool_requested_difficulty: float = Field(description="Pool requested difficulty")
+    pool_label: str = Field(description="Pool label")
+
+
+class RawSharesResponse(BaseModel):
+    """Raw shares data API response"""
+
+    shares: List[ShareRecord] = Field(description="List of raw share records")
+    total_count: int = Field(description="Total number of shares in the time range")
+    start_time: int = Field(description="Start time (unix timestamp)")
+    end_time: int = Field(description="End time (unix timestamp)")
+
+
 class RewardRequest(BaseModel):
     """Request model for updating daily rewards"""
 
