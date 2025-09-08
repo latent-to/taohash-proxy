@@ -211,7 +211,8 @@ async def get_worker_daily_share_value(
         Worker statistics for the specified date from ClickHouse.
     """
     try:
-        if date < "2025-08-29":
+        cutoff = datetime.strptime("2025-08-29", "%Y-%m-%d").date()
+        if date < cutoff:
             query = """
             SELECT
                 worker,
