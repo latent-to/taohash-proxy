@@ -931,7 +931,7 @@ async def update_tides_config(
     summary="Get General Configuration",
     response_description="Current general configuration values",
 )
-async def get_general_config_endpoint(
+async def get_general_config(
     request: Request,
     token: str = Depends(verify_rewards_token),
 ) -> dict[str, Any]:
@@ -989,7 +989,7 @@ async def get_general_config_endpoint(
     summary="Update General Configuration (Partial Updates)",
     response_description="Confirmation of the configuration update.",
 )
-async def update_general_config_endpoint(
+async def update_general_config(
     config: GeneralConfig,
     request: Request,
     token: str = Depends(verify_rewards_token),
@@ -1064,7 +1064,7 @@ async def update_general_config_endpoint(
     response_description="Current TIDES sliding window data",
     response_model=TidesWindowResponse,
 )
-async def get_tides_window_endpoint(
+async def get_tides_window(
     request: Request,
     token: str = Depends(verify_token),
 ) -> dict[str, Any]:
@@ -1213,7 +1213,7 @@ async def get_tides_reward_details(
     response_description="Confirmation of the reward update",
 )
 @limiter.limit("60/minute")
-async def update_tides_reward_endpoint(
+async def update_tides_reward(
     request: Request,
     tx_hash: str,
     reward_data: TidesRewardUpdateRequest,
@@ -1283,7 +1283,7 @@ async def update_tides_reward_endpoint(
     response_description="The created TIDES reward with calculated window",
 )
 @limiter.limit("60/minute")
-async def create_tides_reward_endpoint(
+async def create_tides_reward(
     request: Request,
     reward_data: CustomTidesRewardRequest,
     token: str = Depends(verify_rewards_token),
@@ -1338,7 +1338,7 @@ async def create_tides_reward_endpoint(
     response_description="TIDES window calculated from specified datetime",
 )
 @limiter.limit("10/minute")
-async def calculate_tides_window_endpoint(
+async def calculate_tides_window(
     request: Request,
     calculate_request: TidesWindowCalculateRequest,
     token: str = Depends(verify_token),
@@ -1570,7 +1570,7 @@ async def delete_earning_record(
 
 @app.post("/api/payouts/batch", response_model=BatchPayoutResponse, tags=["Payouts"])
 @limiter.limit("10/minute")
-async def create_batch_payout_endpoint(
+async def create_batch_payout(
     request: Request,
     payout_request: BatchPayoutRequest,
     token: str = Depends(verify_rewards_token),
@@ -1737,7 +1737,7 @@ async def get_batch_details(
 
 @app.get("/api/payouts", response_model=PayoutsResponse, tags=["Payouts"])
 @limiter.limit("60/minute")
-async def get_all_payouts_endpoint(
+async def get_all_payouts(
     request: Request,
     worker: Optional[str] = None,
     batch_id: Optional[str] = None,
