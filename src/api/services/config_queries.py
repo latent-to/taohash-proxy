@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
+from src.api.services.tides_queries import calculate_and_store_tides_window
 
 logger = get_logger(__name__)
 
@@ -69,6 +70,12 @@ async def update_config(
     WHERE id = 1
     """
     await db.client.command(update_query, parameters=params)
+
+    try:
+        await calculate_and_store_tides_window(db)
+        logger.info("TIDES window recalculated due to config change")
+    except Exception as e:
+        logger.error(f"Failed to recalculate TIDES window after config update: {e}")
 
     updated_fields = {}
     if network_difficulty is not None:
