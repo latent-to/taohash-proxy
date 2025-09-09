@@ -495,10 +495,10 @@ class PayoutOperationResponse(BaseModel):
     message: str = Field(description="Operation result message")
 
 
-class WorkerBalance(BaseModel):
-    """Individual worker balance information"""
+class UserBalance(BaseModel):
+    """Individual user balance information"""
 
-    worker: str = Field(description="Worker name")
+    worker: str = Field(description="User name")
     unpaid_amount: float = Field(description="Current unpaid balance")
     paid_amount: float = Field(description="Total amount paid out")
     total_earned: float = Field(description="Total amount earned")
@@ -511,19 +511,19 @@ class WorkerBalance(BaseModel):
 
 
 class BalanceResponse(BaseModel):
-    """Response model for single worker balance"""
+    """Response model for single user balance"""
 
-    balance: WorkerBalance = Field(description="Worker balance information")
+    balance: UserBalance = Field(description="User balance information")
 
 
 class BalancesResponse(BaseModel):
-    """Response model for all worker balances"""
+    """Response model for all user balances"""
 
-    balances: List[WorkerBalance] = Field(description="List of all worker balances")
+    balances: List[UserBalance] = Field(description="List of all user balances")
 
 
 class UpdateBalanceRequest(BaseModel):
-    """Request model for updating worker balance fields"""
+    """Request model for updating user balance fields"""
 
     unpaid_amount: Optional[float] = Field(None, ge=0, description="New unpaid balance")
     paid_amount: Optional[float] = Field(None, ge=0, description="New paid balance")
@@ -535,7 +535,7 @@ class BalanceUpdateResponse(BaseModel):
     """Response for balance update operations"""
 
     success: bool = Field(description="Whether operation succeeded")
-    worker: str = Field(description="Worker name")
-    old_balance: WorkerBalance = Field(description="Previous balance")
-    new_balance: WorkerBalance = Field(description="Updated balance")
+    user: str = Field(description="Worker name")
+    old_balance: UserBalance = Field(description="Previous balance")
+    new_balance: UserBalance = Field(description="Updated balance")
     message: str = Field(description="Result message")
