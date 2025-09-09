@@ -80,7 +80,7 @@ from src.api.services.general_config_queries import (
     update_general_config,
 )
 from src.api.services.tides_queries import (
-    get_tides_window,
+    get_tides_window as get_tides_window_data,
     calculate_custom_tides_window,
 )
 from src.api.services.tides_rewards_queries import (
@@ -1100,7 +1100,7 @@ async def get_tides_window(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        tides_data = await get_tides_window(db)
+        tides_data = await get_tides_window_data(db)
 
         if not tides_data:
             raise HTTPException(
