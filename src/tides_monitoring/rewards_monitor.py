@@ -186,7 +186,7 @@ async def update_user_balance(
 async def load_existing_tx_hashes(db: StatsDB) -> set:
     """Load all existing tx_hashes from tides_rewards table for duplicate checking."""
     try:
-        # Note: Research and see what to do in-case of a tx_hash collision. 
+        # Note: Research and see what to do in-case of a tx_hash collision.
         existing_query = "SELECT tx_hash FROM tides_rewards"
         existing_result = await db.client.query(existing_query)
         tx_hashes = {row[0] for row in existing_result.result_rows}
@@ -249,6 +249,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
     btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
     start_date_str = os.environ.get("TIDES_REWARDS_START_DATE", "2025-08-20")
     interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
+    min_confirmations = int(os.environ.get("TIDES_MIN_CONFIRMATIONS", "3"))
 
     if not btc_address:
         logger.error(
@@ -288,9 +289,22 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     and tx.get("confirmed")  # Has confirmation date
                     and tx.get("block_height")
                 ):
+                    tx_hash = tx["tx_hash"]
+
+                    if tx_hash in existing_tx_hashes:
+                        continue
+
+                    confirmations = tx.get("confirmations", 0)
+                    if confirmations < min_confirmations:
+                        logger.info(
+                            f"Skipping {tx_hash}: only {confirmations} confirmations "
+                            f"(need {min_confirmations})"
+                        )
+                        continue
+
                     try:
-                        confirmed_date = datetime.strptime(
-                            tx["confirmed"][:10], "%Y-%m-%d"
+                        confirmed_date = datetime.fromisoformat(
+                            tx["confirmed"].replace("Z", "+00:00")
                         ).date()
 
                         if confirmed_date < start_date:
@@ -302,50 +316,49 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         )
                         continue
 
-                    tx_hash = tx["tx_hash"]
+                    tides_window = await get_tides_window(db)
+                    normalized_window = (
+                        normalize_tides_window_snapshot(tides_window)
+                        if tides_window
+                        else {}
+                    )
+                    snapshot_json = json.dumps(normalized_window)
 
-                    if tx_hash not in existing_tx_hashes:
-                        tides_window = await get_tides_window(db)
-                        normalized_window = normalize_tides_window_snapshot(
-                            tides_window
-                        ) if tides_window else {}
-                        snapshot_json = json.dumps(normalized_window)
+                    insert_query = """
+                    INSERT INTO tides_rewards (
+                        tx_hash, block_height, btc_amount, 
+                        confirmed_at, discovered_at, tides_window
+                    )
+                    VALUES (
+                        %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
+                        %(confirmed_at)s, %(discovered_at)s, %(snapshot)s
+                    )
+                    """
 
-                        insert_query = """
-                        INSERT INTO tides_rewards (
-                            tx_hash, block_height, btc_amount, 
-                            confirmed_at, discovered_at, tides_window
-                        )
-                        VALUES (
-                            %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
-                            %(confirmed_at)s, %(discovered_at)s, %(snapshot)s
-                        )
-                        """
+                    btc_amount = tx["value"] / 100000000
+                    confirmed_at = datetime.fromisoformat(
+                        tx["confirmed"].replace("Z", "+00:00")
+                    )
 
-                        btc_amount = tx["value"] / 100000000
-                        confirmed_at = datetime.fromisoformat(
-                            tx["confirmed"].replace("Z", "+00:00")
-                        )
+                    params = {
+                        "tx_hash": tx_hash,
+                        "block_height": tx["block_height"],
+                        "btc_amount": btc_amount,
+                        "confirmed_at": confirmed_at,
+                        "discovered_at": confirmed_at,
+                        "snapshot": snapshot_json,
+                    }
 
-                        params = {
-                            "tx_hash": tx_hash,
-                            "block_height": tx["block_height"],
-                            "btc_amount": btc_amount,
-                            "confirmed_at": confirmed_at,
-                            "discovered_at": confirmed_at,
-                            "snapshot": snapshot_json,
-                        }
+                    await db.client.command(insert_query, parameters=params)
+                    await process_tides_reward_earnings(
+                        db, tx_hash, btc_amount, normalized_window, confirmed_at
+                    )
 
-                        await db.client.command(insert_query, parameters=params)
-                        await process_tides_reward_earnings(
-                            db, tx_hash, btc_amount, normalized_window, confirmed_at
-                        )
-
-                        logger.info(
-                            f"Stored TIDES reward: {tx_hash} "
-                            f"(Block {tx['block_height']}, {btc_amount:.8f} BTC, {confirmed_date})"
-                        )
-                        new_rewards_count += 1
+                    logger.info(
+                        f"Stored TIDES reward: {tx_hash} "
+                        f"(Block {tx['block_height']}, {btc_amount:.8f} BTC, {confirmed_date})"
+                    )
+                    new_rewards_count += 1
 
             if new_rewards_count > 0:
                 logger.info(f"Discovered {new_rewards_count} new TIDES rewards")
