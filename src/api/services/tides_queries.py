@@ -1,7 +1,8 @@
 """TIDES window queries and operations."""
 
 import json
-from datetime import datetime, timedelta, timezone
+import os
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.api.services.config_queries import get_config
@@ -138,16 +139,18 @@ async def _find_included_days(
         end_date: End date to work backwards from. If None, uses today()
     """
 
+    tides_start_date = os.environ.get("TIDES_START_DATE", "2025-09-09")
+    
     if end_date is None:
         # Work backwards from latest shares - default
         query = """
         SELECT date, COALESCE(sumMerge(pool_difficulty_sum), 0) as daily_total
         FROM worker_daily_share_value
-        WHERE date >= today() - INTERVAL 120 DAY
+        WHERE date >= %(tides_start_date)s
         GROUP BY date 
         ORDER BY date DESC
         """
-        params = {}
+        params = {"tides_start_date": tides_start_date}
     else:
         # Work backwards from specified end_date (excluding it), for custom calculations
         query = """
@@ -157,7 +160,7 @@ async def _find_included_days(
         GROUP BY date 
         ORDER BY date DESC
         """
-        params = {"start_limit": end_date - timedelta(days=120), "end_date": end_date}
+        params = {"start_limit": tides_start_date, "end_date": end_date}
 
     result = await db.client.query(query, parameters=params)
 
