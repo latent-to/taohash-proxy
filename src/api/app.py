@@ -104,9 +104,9 @@ from src.api.services.payouts_queries import (
     delete_individual_payout,
 )
 from src.api.services.balance_queries import (
-    get_worker_balance,
-    get_all_worker_balances,
-    update_worker_balance_manually,
+    get_user_balance,
+    get_all_user_balances,
+    update_user_balance_manually,
 )
 
 logger = get_logger(__name__)
@@ -1895,7 +1895,7 @@ async def get_balance(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        balance_data = await get_worker_balance(db, worker)
+        balance_data = await get_user_balance(db, worker)
 
         if not balance_data:
             raise HTTPException(status_code=404, detail="Worker balance not found")
@@ -1928,7 +1928,7 @@ async def get_all_balances(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        balances_data = await get_all_worker_balances(db, limit, offset)
+        balances_data = await get_all_user_balances(db, limit, offset)
 
         balances = [WorkerBalance(**balance) for balance in balances_data]
 
@@ -1975,11 +1975,11 @@ async def update_worker_balance(
         )
 
     try:
-        current_balance = await get_worker_balance(db, worker)
+        current_balance = await get_user_balance(db, worker)
         if not current_balance:
             raise HTTPException(status_code=404, detail="Worker balance not found")
 
-        updated_balance = await update_worker_balance_manually(
+        updated_balance = await update_user_balance_manually(
             db, worker, balance_request, str(token)
         )
 
