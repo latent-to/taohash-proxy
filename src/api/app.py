@@ -76,8 +76,8 @@ from src.api.services.config_queries import (
     update_config,
 )
 from src.api.services.general_config_queries import (
-    get_general_config,
-    update_general_config,
+    get_general_config as get_general_config_data,
+    update_general_config as update_general_config_data,
 )
 from src.api.services.tides_queries import (
     get_tides_window as get_tides_window_data,
@@ -86,8 +86,8 @@ from src.api.services.tides_queries import (
 from src.api.services.tides_rewards_queries import (
     get_all_tides_rewards,
     get_tides_reward_by_tx_hash,
-    update_tides_reward,
-    create_tides_reward,
+    update_tides_reward as update_tides_reward_data,
+    create_tides_reward as create_tides_reward_data,
 )
 from src.api.services.earnings_queries import (
     get_worker_earnings,
@@ -96,10 +96,10 @@ from src.api.services.earnings_queries import (
     delete_earning,
 )
 from src.api.services.payouts_queries import (
-    create_batch_payout,
+    create_batch_payout as create_batch_payout_data,
     get_worker_payouts,
     get_batch_payout_details,
-    get_all_payouts,
+    get_all_payouts as get_all_payouts_data,
     update_individual_payout,
     delete_individual_payout,
 )
@@ -960,7 +960,7 @@ async def get_general_config(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        config_data = await get_general_config(db)
+        config_data = await get_general_config_data(db)
 
         if not config_data:
             raise HTTPException(
@@ -1034,7 +1034,7 @@ async def update_general_config(
         ):
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        updated_fields = await update_general_config(
+        updated_fields = await update_general_config_data(
             db,
             worker_percentage=config.worker_percentage,
         )
@@ -1249,7 +1249,7 @@ async def update_tides_reward(
         ):
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        updated_fields = await update_tides_reward(
+        updated_fields = await update_tides_reward_data(
             db,
             tx_hash=tx_hash,
             btc_amount=reward_data.btc_amount,
@@ -1314,7 +1314,7 @@ async def create_tides_reward(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        reward = await create_tides_reward(
+        reward = await create_tides_reward_data(
             db,
             tx_hash=reward_data.tx_hash,
             block_height=reward_data.block_height,
@@ -1605,7 +1605,7 @@ async def create_batch_payout(
             for item in payout_request.payouts
         ]
 
-        result = await create_batch_payout(
+        result = await create_batch_payout_data(
             db,
             payouts_data,
             payout_request.bitcoin_tx_hash,
@@ -1781,7 +1781,7 @@ async def get_all_payouts(
                     status_code=400, detail="Invalid date_to format. Use YYYY-MM-DD"
                 )
 
-        payouts = await get_all_payouts(
+        payouts = await get_all_payouts_data(
             db, worker, batch_id, parsed_date_from, parsed_date_to, limit, offset
         )
 
