@@ -9,7 +9,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-async def get_worker_balance(db: StatsDB, worker: str) -> Optional[Dict[str, Any]]:
+async def get_user_balance(db: StatsDB, user: str) -> Optional[Dict[str, Any]]:
     """
     Get current balance for a specific worker.
 
@@ -29,7 +29,7 @@ async def get_worker_balance(db: StatsDB, worker: str) -> Optional[Dict[str, Any
         LIMIT 1
         """
 
-        result = await db.client.query(balance_query, parameters={"worker": worker})
+        result = await db.client.query(balance_query, parameters={"worker": user})
 
         if not result.result_rows:
             return None
@@ -45,11 +45,11 @@ async def get_worker_balance(db: StatsDB, worker: str) -> Optional[Dict[str, Any
         }
 
     except Exception as e:
-        logger.error(f"Failed to get balance for worker {worker}: {e}")
+        logger.error(f"Failed to get balance for worker {user}: {e}")
         raise
 
 
-async def get_all_worker_balances(
+async def get_all_user_balances(
     db: StatsDB, limit: Optional[int] = None, offset: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
@@ -104,11 +104,11 @@ async def get_all_worker_balances(
         raise
 
 
-async def update_worker_balance_manually(
-    db: StatsDB, worker: str, balance_request, admin_user: str
+async def update_user_balance_manually(
+    db: StatsDB, user: str, balance_request, admin_user: str
 ) -> Dict[str, Any]:
     """
-    Update worker balance fields - only update fields that are provided.
+    Update user balance fields - only update fields that are provided.
     Uses INSERT with ReplacingMergeTree pattern.
     """
     try:
@@ -121,16 +121,16 @@ async def update_worker_balance_manually(
         """
 
         result = await db.client.query(
-            current_balance_query, parameters={"worker": worker}
+            current_balance_query, parameters={"worker": user}
         )
         if not result.result_rows:
-            raise ValueError(f"Worker {worker} not found")
+            raise ValueError(f"User {user} not found")
 
         current = result.result_rows[0]
 
         # Use provided values or keep current ones
         new_balance_data = {
-            "worker": worker,
+            "worker": user,
             "unpaid_amount": (
                 balance_request.unpaid_amount
                 if balance_request.unpaid_amount is not None
@@ -161,7 +161,7 @@ async def update_worker_balance_manually(
         await db.client.command(balance_insert, parameters=new_balance_data)
 
         logger.info(
-            f"Balance updated for {worker}: "
+            f"Balance updated for {user}: "
             f"unpaid: {float(current[1]):.8f} -> {new_balance_data['unpaid_amount']:.8f}, "
             f"paid: {float(current[2]):.8f} -> {new_balance_data['paid_amount']:.8f}, "
             f"total: {float(current[3]):.8f} -> {new_balance_data['total_earned']:.8f} | "
@@ -171,5 +171,5 @@ async def update_worker_balance_manually(
         return new_balance_data
 
     except Exception as e:
-        logger.error(f"Failed to update balance for {worker}: {e}")
+        logger.error(f"Failed to update balance for {user}: {e}")
         raise
