@@ -54,7 +54,7 @@ from src.api.models import (
     PayoutOperationResponse,
     BalanceResponse,
     BalancesResponse,
-    WorkerBalance,
+    UserBalance,
     UpdateBalanceRequest,
     BalanceUpdateResponse,
     RawSharesResponse,
@@ -1878,11 +1878,11 @@ async def delete_payout(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/balance/{worker}", response_model=BalanceResponse, tags=["Balances"])
+@app.get("/api/balance/{user}", response_model=BalanceResponse, tags=["Balances"])
 @limiter.limit("60/minute")
 async def get_balance(
     request: Request,
-    worker: str,
+    user: str,
     token: str = Depends(verify_token),
 ) -> BalanceResponse:
     """
@@ -1895,17 +1895,17 @@ async def get_balance(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        balance_data = await get_user_balance(db, worker)
+        balance_data = await get_user_balance(db, user)
 
         if not balance_data:
-            raise HTTPException(status_code=404, detail="Worker balance not found")
+            raise HTTPException(status_code=404, detail="User balance not found")
 
-        return BalanceResponse(balance=WorkerBalance(**balance_data))
+        return BalanceResponse(balance=UserBalance(**balance_data))
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting balance for worker {worker}: {e}")
+        logger.error(f"Error getting balance for worker {user}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -1920,7 +1920,7 @@ async def get_all_balances(
     token: str = Depends(verify_token),
 ) -> BalancesResponse:
     """
-    Get current balances for all workers.
+    Get current balances for all users.
 
     Returns all worker balances from the user_rewards table with optional pagination.
     """
@@ -1930,7 +1930,7 @@ async def get_all_balances(
     try:
         balances_data = await get_all_user_balances(db, limit, offset)
 
-        balances = [WorkerBalance(**balance) for balance in balances_data]
+        balances = [UserBalance(**balance) for balance in balances_data]
 
         return BalancesResponse(balances=balances)
 
@@ -1942,14 +1942,14 @@ async def get_all_balances(
 
 
 @app.put(
-    "/api/balance/{worker}",
+    "/api/balance/{user}",
     response_model=BalanceUpdateResponse,
     tags=["Admin", "Balances"],
 )
 @limiter.limit("30/minute")
-async def update_worker_balance(
+async def update_user_balance(
     request: Request,
-    worker: str,
+    user: str,
     balance_request: UpdateBalanceRequest,
     token: str = Depends(verify_rewards_token),
 ) -> BalanceUpdateResponse:
@@ -1975,20 +1975,20 @@ async def update_worker_balance(
         )
 
     try:
-        current_balance = await get_user_balance(db, worker)
+        current_balance = await get_user_balance(db, user)
         if not current_balance:
-            raise HTTPException(status_code=404, detail="Worker balance not found")
+            raise HTTPException(status_code=404, detail="User balance not found")
 
         updated_balance = await update_user_balance_manually(
-            db, worker, balance_request, str(token)
+            db, user, balance_request, str(token)
         )
 
         return BalanceUpdateResponse(
             success=True,
-            worker=worker,
-            old_balance=WorkerBalance(**current_balance),
-            new_balance=WorkerBalance(**updated_balance),
-            message=f"Updated balance for {worker}",
+            user=user,
+            old_balance=UserBalance(**current_balance),
+            new_balance=UserBalance(**updated_balance),
+            message=f"Updated balance for {user}",
         )
 
     except ValueError as e:
@@ -1996,5 +1996,5 @@ async def update_worker_balance(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating balance for {worker}: {e}")
+        logger.error(f"Error updating balance for {user}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
