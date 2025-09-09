@@ -186,6 +186,7 @@ async def update_user_balance(
 async def load_existing_tx_hashes(db: StatsDB) -> set:
     """Load all existing tx_hashes from tides_rewards table for duplicate checking."""
     try:
+        # Note: Research and see what to do in-case of a tx_hash collision. 
         existing_query = "SELECT tx_hash FROM tides_rewards"
         existing_result = await db.client.query(existing_query)
         tx_hashes = {row[0] for row in existing_result.result_rows}
