@@ -1,4 +1,5 @@
 aiohttp~=3.9
+bittensor-wallet~=4.0
 requests>=2.0.0,<3.0
 toml==0.10.2
 clickhouse-connect>=0.8.16
@@ -8,3 +9,4 @@ uvicorn==0.24.0
 slowapi==0.1.9
 python-multipart==0.0.6
 httpx==0.25.2
+tenacity>=8.0.0
