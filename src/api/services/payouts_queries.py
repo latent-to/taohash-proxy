@@ -182,7 +182,7 @@ async def create_individual_payout(
     batch_id: str,
     bitcoin_tx_hash: str,
     notes: str,
-) -> None:
+) -> str:
     """Create individual payout record and update worker balance."""
     try:
         payout_id = str(uuid.uuid4())
@@ -213,6 +213,8 @@ async def create_individual_payout(
         await update_user_balance_for_payout(db, worker, btc_amount)
 
         logger.debug(f"Created payout {payout_id} for {worker}: {btc_amount} BTC")
+
+        return payout_id
 
     except Exception as e:
         logger.error(f"Failed to create individual payout for {worker}: {e}")
@@ -688,6 +690,66 @@ async def delete_individual_payout(db: StatsDB, payout_id: str) -> bool:
 
     except Exception as e:
         logger.error(f"Failed to delete payout {payout_id}: {e}")
+        raise
+
+
+async def create_single_payout_with_validation(
+    db: StatsDB,
+    worker: str,
+    btc_amount: float,
+    bitcoin_tx_hash: str,
+    payment_method: str = "bitcoin",
+    notes: str = "",
+    admin_override: bool = False,
+    processed_by: str = "admin",
+) -> Dict[str, Any]:
+    """
+    Single payout with balance validation.
+    """
+    try:
+        balance_query = """
+        SELECT unpaid_amount
+        FROM user_rewards
+        WHERE worker = %(worker)s
+        ORDER BY last_updated DESC
+        LIMIT 1
+        """
+
+        result = await db.client.query(balance_query, parameters={"worker": worker})
+        current_balance = float(result.result_rows[0][0]) if result.result_rows else 0.0
+        net_balance = current_balance - btc_amount
+
+        if net_balance < 0 and not admin_override:
+            return {
+                "success": False,
+                "worker": worker,
+                "btc_amount": None,
+                "payout_id": None,
+                "bitcoin_tx_hash": None,
+                "admin_override_used": admin_override,
+                "error": "Insufficient balance for payout",
+                "current_balance": current_balance,
+                "net_balance": net_balance,
+                "suggestion": "Use admin_override=true to proceed or reduce payout amount",
+            }
+
+        payout_id = await create_individual_payout(
+            db, worker, btc_amount, None, bitcoin_tx_hash, notes
+        )
+
+        return {
+            "success": True,
+            "worker": worker,
+            "btc_amount": btc_amount,
+            "payout_id": payout_id,
+            "bitcoin_tx_hash": bitcoin_tx_hash,
+            "admin_override_used": admin_override,
+            "current_balance": current_balance,
+            "net_balance": net_balance if net_balance < 0 else None,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to create single payout for {worker}: {e}")
         raise
 
 
