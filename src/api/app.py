@@ -48,6 +48,8 @@ from src.api.models import (
     EarningOperationResponse,
     BatchPayoutRequest,
     BatchPayoutResponse,
+    SinglePayoutRequest,
+    SinglePayoutResponse,
     PayoutsResponse,
     BatchPayoutDetails,
     UpdatePayoutRequest,
@@ -97,6 +99,7 @@ from src.api.services.earnings_queries import (
 )
 from src.api.services.payouts_queries import (
     create_batch_payout as create_batch_payout_data,
+    create_single_payout_with_validation,
     get_worker_payouts,
     get_batch_payout_details,
     get_all_payouts as get_all_payouts_data,
@@ -1643,6 +1646,59 @@ async def create_batch_payout(
         raise
     except Exception as e:
         logger.error(f"Error creating batch payout: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/payouts/single", response_model=SinglePayoutResponse, tags=["Payouts"])
+@limiter.limit("60/minute")
+async def create_single_payout_endpoint(
+    request: Request,
+    payout_request: SinglePayoutRequest,
+    token: str = Depends(verify_rewards_token),
+) -> SinglePayoutResponse:
+    """
+    Create a single worker payout.
+
+    Example request:
+    {
+        "worker": "worker1",
+        "btc_amount": 0.001,
+        "bitcoin_tx_hash": "abc123...",
+        "payment_method": "bitcoin",
+        "notes": "Individual payout",
+        "admin_override": false
+    }
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        result = await create_single_payout_with_validation(
+            db,
+            payout_request.worker,
+            payout_request.btc_amount,
+            payout_request.bitcoin_tx_hash,
+            payout_request.payment_method,
+            payout_request.notes,
+            payout_request.admin_override,
+            "api_admin",
+        )
+        success = bool(result.get("success"))
+        return SinglePayoutResponse(
+            success=success,
+            worker=result.get("worker"),
+            btc_amount=result.get("btc_amount"),
+            payout_id=result.get("payout_id"),
+            bitcoin_tx_hash=result.get("bitcoin_tx_hash"),
+            admin_override_used=result.get("admin_override_used"),
+            current_balance=result.get("current_balance"),
+            net_balance=result.get("net_balance"),
+            error=result.get("error"),
+            suggestion=result.get("suggestion"),
+        )
+
+    except Exception as e:
+        logger.error(f"Error creating single payout for {payout_request.worker}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
