@@ -432,6 +432,36 @@ class BatchPayoutResponse(BaseModel):
     )
 
 
+class SinglePayoutRequest(BaseModel):
+    """Request model for creating a single worker payout"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to pay out", gt=0)
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash")
+    payment_method: str = Field(default="bitcoin", description="Payment method")
+    notes: str = Field(default="", description="Admin notes about this payout")
+    admin_override: bool = Field(
+        default=False, description="Allow negative balances if true"
+    )
+
+
+class SinglePayoutResponse(BaseModel):
+    """Response model for single payout operations"""
+
+    success: bool = Field(description="Whether payout succeeded")
+    worker: str = Field(description="Worker name")
+    btc_amount: Optional[float] = Field(description="BTC amount paid")
+    payout_id: Optional[str] = Field(description="Created payout ID")
+    bitcoin_tx_hash: Optional[str] = Field(description="Bitcoin transaction hash")
+    admin_override_used: Optional[bool] = Field(
+        description="Whether admin override was used"
+    )
+    error: Optional[str] = Field(description="Error message if failed")
+    current_balance: Optional[float] = Field(description="Worker's current balance")
+    net_balance: Optional[float] = Field(description="Balance after payout")
+    suggestion: Optional[str] = Field(description="Suggestion if payout failed")
+
+
 class PayoutRecord(BaseModel):
     """Individual payout record"""
 
