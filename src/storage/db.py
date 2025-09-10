@@ -307,6 +307,107 @@ class StatsDB:
             )
             ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY date""",
+            # Difficulty window configuration - single row config table
+            """CREATE TABLE IF NOT EXISTS tides_config (
+                id UInt8 DEFAULT 1,
+                multiplier Float64,
+                network_difficulty Float64,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # Insert default config when creating the config table
+            """INSERT INTO tides_config (id, multiplier, network_difficulty, updated_at)
+            SELECT 1, 8, 129700000000000, now()
+            WHERE NOT EXISTS (SELECT 1 FROM tides_config WHERE id = 1)""",
+            # General configuration
+            """CREATE TABLE IF NOT EXISTS general_config (
+                id UInt8 DEFAULT 1,
+                worker_percentage Float64,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # Insert default general config when creating the table
+            """INSERT INTO general_config (id, worker_percentage, updated_at)
+            SELECT 1, 0.015, now()
+            WHERE NOT EXISTS (SELECT 1 FROM general_config WHERE id = 1)""",
+            # TIDES window table
+            """CREATE TABLE IF NOT EXISTS tides_window (
+                id UInt8 DEFAULT 1,
+                share_log_window Float64,
+                network_difficulty Float64,
+                multiplier Float64,
+                window_start DateTime,
+                window_end DateTime,
+                total_difficulty_in_window Float64,
+                total_workers UInt32,
+                workers_json String,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY id""",
+            # TIDES rewards table
+            """CREATE TABLE IF NOT EXISTS tides_rewards (
+                tx_hash String,
+                block_height UInt64,
+                btc_amount Float64,
+                confirmed_at DateTime DEFAULT now(),
+                discovered_at DateTime DEFAULT now(),
+                tides_window String,
+                processed Boolean DEFAULT false,
+                updated_at DateTime DEFAULT now()
+            ) ENGINE = ReplacingMergeTree(updated_at)
+            ORDER BY (block_height, tx_hash)""",
+            # User rewards
+            # Current User Balances (Dynamically updated)
+            """CREATE TABLE IF NOT EXISTS user_rewards (
+                worker String,
+                unpaid_amount Float64,
+                paid_amount Float64,
+                total_earned Float64,
+                last_updated DateTime,
+                updated_by String
+            ) ENGINE = ReplacingMergeTree(last_updated)
+            ORDER BY worker""",
+            # Earnings History (BTC earnings for miner)
+            """CREATE TABLE IF NOT EXISTS user_earnings (
+                earning_id String,
+                worker String,
+                btc_amount Float64,
+                earning_type LowCardinality(String),
+                reference Nullable(String),
+                tides_reward_id Nullable(String),
+                metadata String,
+                earned_at DateTime,
+                created_at DateTime
+            ) ENGINE = MergeTree()
+            PARTITION BY toYYYYMM(earned_at)
+            ORDER BY (worker, earned_at, earning_id)""",
+            # User Payouts (BTC payouts for miner)
+            """CREATE TABLE IF NOT EXISTS user_payouts (
+                payout_id String,
+                worker String,
+                btc_amount Float64,
+                payout_batch_id Nullable(String),
+                bitcoin_tx_hash String,
+                notes String,
+                paid_at DateTime,
+                created_at DateTime
+            ) ENGINE = MergeTree()
+            PARTITION BY toYYYYMM(paid_at)
+            ORDER BY (worker, paid_at, payout_id)""",
+            # Batch payouts records
+            """CREATE TABLE IF NOT EXISTS payout_batches (
+                batch_id String,
+                total_amount Float64,
+                user_count Int32,
+                payout_data String,
+                payment_method LowCardinality(String) DEFAULT 'bitcoin',
+                external_reference String,
+                notes String,
+                processed_at DateTime,
+                processed_by String,
+                created_at DateTime DEFAULT now()
+            ) ENGINE = MergeTree()
+            ORDER BY (processed_at, batch_id)""",
         ]
 
     async def _create_tables(self):

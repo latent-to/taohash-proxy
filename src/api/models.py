@@ -1,5 +1,7 @@
-from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
+from datetime import datetime
+from pydantic import BaseModel, Field, field_serializer
+from src.utils.time_normalize import to_iso_z
 
 
 class HealthResponse(BaseModel):
@@ -98,6 +100,9 @@ class BtcWorkersTimerange(BaseModel):
     workers: Dict[str, WorkerTimerangeStats] = Field(
         description="Worker statistics for the time range, keyed by worker name"
     )
+    worker_percentage: float = Field(
+        description="Worker percentage from general config"
+    )
 
 
 class WorkersTimerangeResponse(BaseModel):
@@ -171,3 +176,396 @@ class RewardRequest(BaseModel):
     payment_proof_url: Optional[str] = Field(
         None, description="URL to payment proof documentation"
     )
+
+
+class TidesConfig(BaseModel):
+    """
+    Model for updating the TIDES share window configuration.
+    Supports partial updates - at least one field must be provided.
+    """
+
+    network_difficulty: Optional[float] = Field(
+        None, gt=0, description="The target network difficulty for the share window."
+    )
+    multiplier: Optional[float] = Field(
+        None,
+        gt=0,
+        description="The multiplier used to calculate the target share value.",
+    )
+
+
+class GeneralConfig(BaseModel):
+    """
+    Model for updating general configuration settings.
+    Supports partial updates - at least one field must be provided.
+    """
+
+    worker_percentage: Optional[float] = Field(
+        None, ge=0, le=1, description="Worker percentage setting (0-1 range)"
+    )
+
+
+class TidesRewardSummary(BaseModel):
+    """TIDES reward summary information"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    processed: bool = Field(description="Whether this reward has been processed")
+
+    @field_serializer("confirmed_at", when_used="json")
+    def _serialize_confirmed_at(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class TidesRewardsResponse(BaseModel):
+    """TIDES rewards summary API response"""
+
+    rewards: List[TidesRewardSummary] = Field(description="List of TIDES rewards")
+
+
+class TidesWorkerEntry(BaseModel):
+    """Worker entry for TIDES window."""
+
+    name: str = Field(description="Worker name")
+    shares: int = Field(description="Total shares in window")
+    share_value: float = Field(description="Total share difficulty value")
+    percentage: float = Field(description="Percentage of total window difficulty")
+
+
+class TidesWindowData(BaseModel):
+    """TIDES window data payload."""
+
+    workers: List[TidesWorkerEntry] = Field(description="Workers in window")
+    share_log_window: float = Field(description="Target share log window size")
+    network_difficulty: float = Field(description="Network difficulty used")
+    multiplier: float = Field(description="Multiplier used")
+    window_start: datetime = Field(description="Window start time (UTC)")
+    window_end: datetime = Field(description="Window end time (UTC)")
+    total_difficulty_in_window: float = Field(description="Total difficulty in window")
+    total_workers: int = Field(description="Number of workers in window")
+    updated_at: datetime = Field(description="When this window was last updated (UTC)")
+
+    @field_serializer("window_start", "window_end", "updated_at", when_used="json")
+    def _serialize_window_datetimes(self, v: datetime) -> Optional[str]:
+        return to_iso_z(v) if v is not None else None
+
+
+class TidesWindowResponse(BaseModel):
+    """Response model for current TIDES window."""
+
+    status: str = Field(description="Request status")
+    data: TidesWindowData
+
+
+class TidesRewardDetails(BaseModel):
+    """Full TIDES reward details"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: TidesWindowData = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
+    updated_at: datetime = Field(description="Last update timestamp")
+
+    @field_serializer("confirmed_at", "discovered_at", "updated_at", when_used="json")
+    def _serialize_reward_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class TidesRewardUpdateRequest(BaseModel):
+    """Request model for updating TIDES reward fields"""
+
+    btc_amount: Optional[float] = Field(None, description="BTC reward amount", gt=0)
+    processed: Optional[bool] = Field(
+        None, description="Whether this reward has been processed"
+    )
+
+
+class TidesWindowCalculateRequest(BaseModel):
+    """Request model for custom TIDES window calculation"""
+
+    end_datetime: datetime = Field(
+        description="Calculate TIDES window backwards from this datetime"
+    )
+
+
+class CustomTidesRewardRequest(BaseModel):
+    """Request model for manually creating TIDES rewards"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height", gt=0)
+    btc_amount: float = Field(description="BTC reward amount", gt=0)
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+
+
+class CustomTidesRewardResponse(BaseModel):
+    """Response model for created TIDES reward"""
+
+    tx_hash: str = Field(description="Bitcoin transaction hash")
+    block_height: int = Field(description="Bitcoin block height")
+    btc_amount: float = Field(description="BTC reward amount")
+    confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    discovered_at: datetime = Field(description="When this reward was discovered")
+    tides_window: TidesWindowData = Field(
+        description="TIDES window data at time of discovery"
+    )
+    processed: bool = Field(description="Whether this reward has been processed")
+
+    @field_serializer("confirmed_at", "discovered_at", when_used="json")
+    def _serialize_custom_reward_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class EarningRecord(BaseModel):
+    """Individual earning record"""
+
+    earning_id: str = Field(description="Unique earning identifier")
+    worker: str = Field(description="Worker who earned this")
+    btc_amount: float = Field(description="BTC amount earned")
+    earning_type: str = Field(description="Type of earning (tides, pplns, manual)")
+    reference: Optional[str] = Field(
+        description="Reference to source (tx_hash, batch_id, etc.)"
+    )
+    tides_reward_id: Optional[str] = Field(
+        description="Link to tides_rewards.tx_hash if applicable"
+    )
+    metadata: Dict[str, Any] = Field(
+        description="Additional context (percentages, window info, etc.)"
+    )
+    earned_at: datetime = Field(description="When this was earned")
+    created_at: datetime = Field(description="When record was created")
+
+    @field_serializer("earned_at", "created_at", when_used="json")
+    def _serialize_earning_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class EarningsResponse(BaseModel):
+    """Response model for worker earnings"""
+
+    earnings: List[EarningRecord] = Field(description="List of earning records")
+    total_count: Optional[int] = Field(description="Total count without pagination")
+
+
+class CreateEarningRequest(BaseModel):
+    """Request model for creating manual earnings"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to credit", gt=0)
+    earning_type: str = Field(default="manual", description="Type of earning")
+    reference: Optional[str] = Field(None, description="Optional reference")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+    earned_at: Optional[datetime] = Field(
+        None, description="When earned (defaults to now)"
+    )
+
+
+class UpdateEarningRequest(BaseModel):
+    """Request model for updating existing earnings"""
+
+    btc_amount: Optional[float] = Field(None, description="New BTC amount", gt=0)
+    earning_type: Optional[str] = Field(None, description="New earning type")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="New metadata")
+    reference: Optional[str] = Field(None, description="New reference")
+
+
+class EarningOperationResponse(BaseModel):
+    """Response model for earning operations (create/update/delete)"""
+
+    success: bool = Field(description="Whether operation succeeded")
+    earning_id: Optional[str] = Field(description="Earning ID (for create/update)")
+    message: str = Field(description="Operation result message")
+
+
+class PayoutItem(BaseModel):
+    """Individual worker payout in a batch"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to pay out", gt=0)
+
+
+class BatchPayoutRequest(BaseModel):
+    """Request model for creating batch payouts"""
+
+    payouts: List[PayoutItem] = Field(description="List of worker payouts")
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash for the batch")
+    payment_method: str = Field(default="bitcoin", description="Payment method")
+    notes: str = Field(default="", description="Admin notes about this payout")
+    admin_override: bool = Field(
+        default=False, description="Allow negative balances if true"
+    )
+    tides_tx_hash: Optional[str] = Field(
+        None, description="TIDES reward to mark as processed"
+    )
+
+
+class NegativeBalanceWarning(BaseModel):
+    """Warning for negative balance after payout"""
+
+    worker: str = Field(description="Worker who will have negative balance")
+    current_balance: float = Field(description="Current unpaid balance")
+    payout_requested: float = Field(description="Requested payout amount")
+    net_balance: float = Field(description="Resulting negative balance")
+
+
+class BatchPayoutResponse(BaseModel):
+    """Response model for batch payout operations"""
+
+    success: bool = Field(description="Whether batch payout succeeded")
+    batch_id: Optional[str] = Field(description="Created batch ID")
+    total_amount: Optional[float] = Field(description="Total BTC amount in batch")
+    processed_workers: Optional[int] = Field(description="Number of workers processed")
+    admin_override_used: Optional[bool] = Field(
+        description="Whether admin override was used"
+    )
+    error: Optional[str] = Field(description="Error message if failed")
+    negative_balance_warnings: Optional[List[NegativeBalanceWarning]] = Field(
+        description="Negative balance warnings"
+    )
+    suggestion: Optional[str] = Field(
+        description="Suggestion for fixing validation failures"
+    )
+
+
+class SinglePayoutRequest(BaseModel):
+    """Request model for creating a single worker payout"""
+
+    worker: str = Field(description="Worker name")
+    btc_amount: float = Field(description="BTC amount to pay out", gt=0)
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash")
+    payment_method: str = Field(default="bitcoin", description="Payment method")
+    notes: str = Field(default="", description="Admin notes about this payout")
+    admin_override: bool = Field(
+        default=False, description="Allow negative balances if true"
+    )
+
+
+class SinglePayoutResponse(BaseModel):
+    """Response model for single payout operations"""
+
+    success: bool = Field(description="Whether payout succeeded")
+    worker: str = Field(description="Worker name")
+    btc_amount: Optional[float] = Field(description="BTC amount paid")
+    payout_id: Optional[str] = Field(description="Created payout ID")
+    bitcoin_tx_hash: Optional[str] = Field(description="Bitcoin transaction hash")
+    admin_override_used: Optional[bool] = Field(
+        description="Whether admin override was used"
+    )
+    error: Optional[str] = Field(description="Error message if failed")
+    current_balance: Optional[float] = Field(description="Worker's current balance")
+    net_balance: Optional[float] = Field(description="Balance after payout")
+    suggestion: Optional[str] = Field(description="Suggestion if payout failed")
+
+
+class PayoutRecord(BaseModel):
+    """Individual payout record"""
+
+    payout_id: str = Field(description="Unique payout identifier")
+    worker: str = Field(description="Worker who received payout")
+    btc_amount: float = Field(description="BTC amount paid out")
+    payout_batch_id: Optional[str] = Field(
+        description="Link to batch if part of batch payout"
+    )
+    bitcoin_tx_hash: str = Field(description="Bitcoin transaction hash")
+    notes: str = Field(description="Payout notes")
+    paid_at: datetime = Field(description="When payout was made")
+    created_at: datetime = Field(description="When record was created")
+
+    @field_serializer("paid_at", "created_at", when_used="json")
+    def _serialize_payout_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class PayoutsResponse(BaseModel):
+    """Response model for payout queries"""
+
+    payouts: List[PayoutRecord] = Field(description="List of payout records")
+    total_count: Optional[int] = Field(description="Total count without pagination")
+
+
+class BatchPayoutDetails(BaseModel):
+    """Detailed batch payout information"""
+
+    batch_id: str = Field(description="Batch identifier")
+    total_amount: float = Field(description="Total BTC amount in batch")
+    user_count: int = Field(description="Number of users in batch")
+    payment_method: str = Field(description="Payment method used")
+    external_reference: str = Field(description="Bitcoin tx hash or bank reference")
+    notes: str = Field(description="Admin notes")
+    processed_at: datetime = Field(description="When batch was processed")
+    processed_by: str = Field(description="Admin who processed")
+    created_at: datetime = Field(description="When batch was created")
+    individual_payouts: List[PayoutRecord] = Field(
+        description="All payouts in this batch"
+    )
+
+    @field_serializer("processed_at", "created_at", when_used="json")
+    def _serialize_batch_datetimes(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class UpdatePayoutRequest(BaseModel):
+    """Request model for updating individual payouts"""
+
+    btc_amount: Optional[float] = Field(None, description="New BTC amount", gt=0)
+    bitcoin_tx_hash: Optional[str] = Field(None, description="New Bitcoin tx hash")
+    notes: Optional[str] = Field(None, description="New notes")
+
+
+class PayoutOperationResponse(BaseModel):
+    """Response model for payout operations (update/delete)"""
+
+    success: bool = Field(description="Whether operation succeeded")
+    payout_id: Optional[str] = Field(description="Payout ID")
+    message: str = Field(description="Operation result message")
+
+
+class UserBalance(BaseModel):
+    """Individual user balance information"""
+
+    worker: str = Field(description="User name")
+    unpaid_amount: float = Field(description="Current unpaid balance")
+    paid_amount: float = Field(description="Total amount paid out")
+    total_earned: float = Field(description="Total amount earned")
+    last_updated: datetime = Field(description="When balance was last updated")
+    updated_by: str = Field(description="What system/process last updated this")
+
+    @field_serializer("last_updated", when_used="json")
+    def _serialize_last_updated(self, v: datetime) -> str:
+        return to_iso_z(v)
+
+
+class BalanceResponse(BaseModel):
+    """Response model for single user balance"""
+
+    balance: UserBalance = Field(description="User balance information")
+
+
+class BalancesResponse(BaseModel):
+    """Response model for all user balances"""
+
+    balances: List[UserBalance] = Field(description="List of all user balances")
+
+
+class UpdateBalanceRequest(BaseModel):
+    """Request model for updating user balance fields"""
+
+    unpaid_amount: Optional[float] = Field(None, ge=0, description="New unpaid balance")
+    paid_amount: Optional[float] = Field(None, ge=0, description="New paid balance")
+    total_earned: Optional[float] = Field(None, ge=0, description="New total earned")
+    reason: str = Field(description="Reason for balance change")
+
+
+class BalanceUpdateResponse(BaseModel):
+    """Response for balance update operations"""
+
+    success: bool = Field(description="Whether operation succeeded")
+    user: str = Field(description="Worker name")
+    old_balance: UserBalance = Field(description="Previous balance")
+    new_balance: UserBalance = Field(description="Updated balance")
+    message: str = Field(description="Result message")
