@@ -133,6 +133,11 @@ class StatsDB:
                 "ALTER TABLE daily_rewards ADD COLUMN payment_proof_url String DEFAULT ''",
                 "Add payment_proof_url field for storing payment documentation links",
             ),
+            (
+                15,
+                "ALTER TABLE tides_rewards ADD COLUMN source_type LowCardinality(String) DEFAULT 'pool_payout'",
+                "Add source_type column to distinguish coinbase vs pool_payout rewards",
+            ),
         ]
 
         for version, migration_sql, description in migrations:
