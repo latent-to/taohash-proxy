@@ -413,6 +413,15 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         )
                         continue
 
+                    try:
+                        source_type = await classify_transaction(tx_hash, ocean_client, client)
+                        if not source_type:
+                            logger.debug(f"Skipping non-mining transaction {tx_hash}")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Failed to classify transaction {tx_hash}: {e}")
+                        continue
+
                     tides_window = await get_tides_window(db)
                     normalized_window = (
                         normalize_tides_window_snapshot(tides_window)
