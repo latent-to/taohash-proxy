@@ -220,4 +220,5 @@ async def create_tides_reward(
         "discovered_at": confirmed_at,
         "tides_window": tides_window,
         "processed": False,
+        "source_type": "pool_payout",
     }
