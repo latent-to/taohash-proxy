@@ -235,6 +235,117 @@ class BlockCypherClient:
             logger.error(f"Failed to fetch transactions for {self.btc_address}: {e}")
             raise
 
+    @retry(
+        stop=stop_after_attempt(10),
+        wait=wait_exponential(multiplier=2, min=1, max=10),
+        reraise=True,
+    )
+    async def get_tx_details(self, tx_hash: str) -> Dict:
+        """Fetch full transaction details for a tx hash."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.api_base}/txs/{tx_hash}",
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    else:
+                        logger.error(
+                            f"BlockCypher TX API HTTP error {response.status} for {tx_hash}"
+                        )
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                        )
+        except Exception as e:
+            logger.error(f"Failed to fetch tx details for {tx_hash}: {e}")
+            raise
+
+
+class OceanAPIClient:
+    """Client for interacting with Ocean.xyz API."""
+
+    def __init__(self, btc_address: str):
+        self.btc_address = btc_address
+        self.api_base = "https://api.ocean.xyz/v1"
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=1, max=5),
+        reraise=True,
+    )
+    async def get_payouts(self) -> Dict:
+        """Fetch payout data for the BTC address."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.api_base}/earnpay/{self.btc_address}",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.debug(f"Retrieved Ocean payouts for {self.btc_address}")
+                        return data
+                    else:
+                        logger.error(f"Ocean API HTTP error: {response.status}")
+                        raise aiohttp.ClientResponseError(
+                            request_info=response.request_info,
+                            history=response.history,
+                            status=response.status,
+                        )
+        except Exception as e:
+            logger.error(f"Failed to fetch Ocean payouts for {self.btc_address}: {e}")
+            raise
+
+
+async def classify_transaction(
+    tx_hash: str,
+    ocean_data: Optional[Dict[str, Any]],
+    ocean_client: OceanAPIClient,
+    blockcypher_client: BlockCypherClient,
+) -> Optional[str]:
+    """
+    Classify transaction as coinbase or pool_payout using Ocean API + BlockCypher fallback.
+
+    Returns:
+        'coinbase': Coinbase transaction (mining reward)
+        'pool_payout': Pool payout transaction
+        None: Regular transaction, should be skipped
+    """
+    # Step 1: Check Ocean
+    if ocean_data is not None:
+        try:
+            for payout in ocean_data["result"]["payouts"]:
+                if payout["on_chain_txid"] == tx_hash:
+                    return "coinbase" if payout["is_generation_txn"] else "pool_payout"
+        except (KeyError, TypeError) as e:
+            logger.warning(
+                f"Unexpected Ocean payout payload while classifying {tx_hash}: {e}"
+            )
+            ocean_data = None  # Fallback to direct API call
+
+    if ocean_data is None:
+        try:
+            fresh_ocean_data = await ocean_client.get_payouts()
+            for payout in fresh_ocean_data["result"]["payouts"]:
+                if payout["on_chain_txid"] == tx_hash:
+                    return "coinbase" if payout["is_generation_txn"] else "pool_payout"
+        except Exception as e:
+            logger.warning(f"Ocean API failed for {tx_hash}: {e}")
+
+    # Step 2: Check tx_deets for coinbase
+    try:
+        tx_details = await blockcypher_client.get_tx_details(tx_hash)
+        if tx_details.get("block_index") == 0:
+            return "coinbase"
+    except Exception as e:
+        logger.warning(f"BlockCypher tx details failed for {tx_hash}: {e}")
+
+    # Step 3: Skip unknown transactions
+    return None
+
 
 async def tides_rewards_monitor_task(db: StatsDB) -> None:
     """
@@ -266,6 +377,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
         return
 
     client = BlockCypherClient(btc_address)
+    ocean_client = OceanAPIClient(btc_address)
 
     logger.info(
         f"Starting TIDES rewards monitoring for {btc_address} "
@@ -283,9 +395,17 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
             transactions = await client.get_address_transactions()
             new_rewards_count = 0
 
+            try:
+                ocean_data = await ocean_client.get_payouts()
+            except Exception as e:
+                logger.warning(
+                    f"Ocean API snapshot fetch failed prior to classification: {e}"
+                )
+                ocean_data = None
+
             for tx in transactions:
                 if (
-                    tx.get("tx_input_n") == -1  # Coinbase transaction
+                    tx.get("tx_input_n") == -1  # Address received funds
                     and tx.get("confirmed")  # Has confirmation date
                     and tx.get("block_height")
                 ):
@@ -316,6 +436,17 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         )
                         continue
 
+                    try:
+                        source_type = await classify_transaction(
+                            tx_hash, ocean_data, ocean_client, client
+                        )
+                        if not source_type:
+                            logger.debug(f"Skipping non-mining transaction {tx_hash}")
+                            continue
+                    except Exception as e:
+                        logger.error(f"Failed to classify transaction {tx_hash}: {e}")
+                        continue
+
                     tides_window = await get_tides_window(db)
                     normalized_window = (
                         normalize_tides_window_snapshot(tides_window)
@@ -327,11 +458,11 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     insert_query = """
                     INSERT INTO tides_rewards (
                         tx_hash, block_height, btc_amount, 
-                        confirmed_at, discovered_at, tides_window
+                        confirmed_at, discovered_at, tides_window, source_type
                     )
                     VALUES (
                         %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
-                        %(confirmed_at)s, %(discovered_at)s, %(snapshot)s
+                        %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
                     )
                     """
 
@@ -347,10 +478,11 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         "confirmed_at": confirmed_at,
                         "discovered_at": confirmed_at,
                         "snapshot": snapshot_json,
+                        "source_type": source_type,
                     }
 
                     await db.client.command(insert_query, parameters=params)
-                    # TODO: Enable when processing these earnings. 
+                    # TODO: Enable when processing these earnings.
                     # await process_tides_reward_earnings(
                     #     db, tx_hash, btc_amount, normalized_window, confirmed_at
                     # )

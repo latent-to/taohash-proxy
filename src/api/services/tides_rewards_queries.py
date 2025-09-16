@@ -20,7 +20,8 @@ async def get_all_tides_rewards(db: StatsDB) -> List[dict[str, Any]]:
         tx_hash,
         btc_amount,
         confirmed_at,
-        processed
+        processed,
+        source_type
     FROM tides_rewards
     ORDER BY confirmed_at DESC
     """
@@ -34,6 +35,7 @@ async def get_all_tides_rewards(db: StatsDB) -> List[dict[str, Any]]:
             "btc_amount": float(row[1]),
             "confirmed_at": row[2],
             "processed": bool(row[3]),
+            "source_type": row[4],
         })
     
     return rewards
@@ -51,7 +53,8 @@ async def get_tides_reward_by_tx_hash(db: StatsDB, tx_hash: str) -> Optional[dic
         discovered_at,
         tides_window,
         processed,
-        updated_at
+        updated_at,
+        source_type
     FROM tides_rewards
     WHERE tx_hash = %(tx_hash)s
     LIMIT 1
@@ -82,6 +85,7 @@ async def get_tides_reward_by_tx_hash(db: StatsDB, tx_hash: str) -> Optional[dic
         "tides_window": tides_window_data,
         "processed": bool(row[6]),
         "updated_at": row[7],
+        "source_type": row[8],
     }
 
 
@@ -186,11 +190,11 @@ async def create_tides_reward(
     insert_query = """
     INSERT INTO tides_rewards (
         tx_hash, block_height, btc_amount, 
-        confirmed_at, discovered_at, tides_window
+        confirmed_at, discovered_at, tides_window, source_type
     )
     VALUES (
         %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
-        %(confirmed_at)s, %(discovered_at)s, %(tides_window)s
+        %(confirmed_at)s, %(discovered_at)s, %(tides_window)s, %(source_type)s
     )
     """
     
@@ -201,6 +205,7 @@ async def create_tides_reward(
         "confirmed_at": confirmed_at,
         "discovered_at": confirmed_at,
         "tides_window": tides_window_json,
+        "source_type": "pool_payout",
     }
     
     await db.client.command(insert_query, parameters=params)
@@ -215,4 +220,5 @@ async def create_tides_reward(
         "discovered_at": confirmed_at,
         "tides_window": tides_window,
         "processed": False,
+        "source_type": "pool_payout",
     }
