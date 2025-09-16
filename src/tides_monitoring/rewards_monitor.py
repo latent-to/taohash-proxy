@@ -301,7 +301,10 @@ class OceanAPIClient:
 
 
 async def classify_transaction(
-    tx_hash: str, ocean_client: OceanAPIClient, blockcypher_client: BlockCypherClient
+    tx_hash: str,
+    ocean_data: Optional[Dict[str, Any]],
+    ocean_client: OceanAPIClient,
+    blockcypher_client: BlockCypherClient,
 ) -> Optional[str]:
     """
     Classify transaction as coinbase or pool_payout using Ocean API + BlockCypher fallback.
@@ -312,13 +315,25 @@ async def classify_transaction(
         None: Regular transaction, should be skipped
     """
     # Step 1: Check Ocean
-    try:
-        ocean_data = await ocean_client.get_payouts()
-        for payout in ocean_data["result"]["payouts"]:
-            if payout["on_chain_txid"] == tx_hash:
-                return "coinbase" if payout["is_generation_txn"] else "pool_payout"
-    except Exception as e:
-        logger.warning(f"Ocean API failed for {tx_hash}: {e}")
+    if ocean_data is not None:
+        try:
+            for payout in ocean_data["result"]["payouts"]:
+                if payout["on_chain_txid"] == tx_hash:
+                    return "coinbase" if payout["is_generation_txn"] else "pool_payout"
+        except (KeyError, TypeError) as e:
+            logger.warning(
+                f"Unexpected Ocean payout payload while classifying {tx_hash}: {e}"
+            )
+            ocean_data = None  # Fallback to direct API call
+
+    if ocean_data is None:
+        try:
+            fresh_ocean_data = await ocean_client.get_payouts()
+            for payout in fresh_ocean_data["result"]["payouts"]:
+                if payout["on_chain_txid"] == tx_hash:
+                    return "coinbase" if payout["is_generation_txn"] else "pool_payout"
+        except Exception as e:
+            logger.warning(f"Ocean API failed for {tx_hash}: {e}")
 
     # Step 2: Check tx_deets for coinbase
     try:
@@ -380,6 +395,14 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
             transactions = await client.get_address_transactions()
             new_rewards_count = 0
 
+            try:
+                ocean_data = await ocean_client.get_payouts()
+            except Exception as e:
+                logger.warning(
+                    f"Ocean API snapshot fetch failed prior to classification: {e}"
+                )
+                ocean_data = None
+
             for tx in transactions:
                 if (
                     tx.get("tx_input_n") == -1  # Address received funds
@@ -414,7 +437,9 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         continue
 
                     try:
-                        source_type = await classify_transaction(tx_hash, ocean_client, client)
+                        source_type = await classify_transaction(
+                            tx_hash, ocean_data, ocean_client, client
+                        )
                         if not source_type:
                             logger.debug(f"Skipping non-mining transaction {tx_hash}")
                             continue
