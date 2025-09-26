@@ -358,7 +358,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
         db: Database connection
     """
     btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
-    start_date_str = os.environ.get("TIDES_START_DATE", "2025-09-09")
+    start_date_str = os.environ.get("TIDES_START_DATE", "2025-09-26")
     interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
     min_confirmations = int(os.environ.get("TIDES_MIN_CONFIRMATIONS", "3"))
 
