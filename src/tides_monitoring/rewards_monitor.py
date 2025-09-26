@@ -205,8 +205,8 @@ class BlockCypherClient:
         self.api_base = "https://api.blockcypher.com/v1/btc/main"
 
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=2, min=1, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_address_transactions(self) -> List[Dict]:
@@ -236,8 +236,8 @@ class BlockCypherClient:
             raise
 
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=2, min=1, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_tx_details(self, tx_hash: str) -> Dict:
@@ -272,8 +272,8 @@ class OceanAPIClient:
         self.api_base = "https://api.ocean.xyz/v1"
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=1, max=5),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_payouts(self) -> Dict:
