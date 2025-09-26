@@ -482,10 +482,9 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     }
 
                     await db.client.command(insert_query, parameters=params)
-                    # TODO: Enable when processing these earnings.
-                    # await process_tides_reward_earnings(
-                    #     db, tx_hash, btc_amount, normalized_window, confirmed_at
-                    # )
+                    await process_tides_reward_earnings(
+                        db, tx_hash, btc_amount, normalized_window, confirmed_at
+                    )
 
                     logger.info(
                         f"Stored TIDES reward: {tx_hash} "
