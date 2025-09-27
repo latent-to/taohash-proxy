@@ -232,7 +232,7 @@ class BlockCypherClient:
                             status=response.status,
                         )
         except Exception as e:
-            logger.error(f"Failed to fetch transactions for {self.btc_address}: {e}")
+            logger.error(f"Failed to fetch transactions for {self.btc_address}: {e}: {response.text}")
             raise
 
     @retry(
@@ -466,7 +466,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     )
                     """
 
-                    btc_amount = tx["value"] / 100000000
+                    btc_amount = (tx["value"] / 100000000) * 0.995
                     confirmed_at = datetime.fromisoformat(
                         tx["confirmed"].replace("Z", "+00:00")
                     )
