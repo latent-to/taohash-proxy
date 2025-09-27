@@ -139,7 +139,7 @@ async def _find_included_days(
         end_date: End date to work backwards from. If None, uses today()
     """
 
-    tides_start_date = os.environ.get("TIDES_START_DATE", "2025-09-26")
+    tides_start_date = os.environ.get("TIDES_START_DATE", "2025-09-27")
     
     if end_date is None:
         # Work backwards from latest shares - default
