@@ -140,8 +140,8 @@ class StatsDB:
             ),
             (
                 16,
-                "DELETE FROM tides_rewards WHERE confirmed_at < '2025-09-26 23:59:59'",
-                "Clear tides_rewards data before September 26th, 2025 for start date reset",
+                "DELETE FROM tides_rewards WHERE confirmed_at < '2025-09-27 23:59:59'",
+                "Clear tides_rewards data before September 27th, 2025 for start date reset",
             ),
         ]
 
