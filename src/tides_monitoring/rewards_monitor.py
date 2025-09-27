@@ -358,7 +358,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
         db: Database connection
     """
     btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
-    start_date_str = os.environ.get("TIDES_START_DATE", "2025-09-27")
+    start_date_str = os.environ.get("TIDES_REWARDS_START_DATE", "2025-09-28")
     interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
     min_confirmations = int(os.environ.get("TIDES_MIN_CONFIRMATIONS", "3"))
 
@@ -372,7 +372,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
         start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
     except ValueError:
         logger.error(
-            f"Invalid TIDES_START_DATE format: {start_date_str}. Use YYYY-MM-DD"
+            f"Invalid TIDES_REWARDS_START_DATE format: {start_date_str}. Use YYYY-MM-DD"
         )
         return
 
