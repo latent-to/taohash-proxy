@@ -138,6 +138,11 @@ class StatsDB:
                 "ALTER TABLE tides_rewards ADD COLUMN source_type LowCardinality(String) DEFAULT 'pool_payout'",
                 "Add source_type column to distinguish coinbase vs pool_payout rewards",
             ),
+            (
+                16,
+                "DELETE FROM tides_rewards WHERE confirmed_at < '2025-09-27 23:59:59'",
+                "Clear tides_rewards data before September 27th, 2025 for start date reset",
+            ),
         ]
 
         for version, migration_sql, description in migrations:

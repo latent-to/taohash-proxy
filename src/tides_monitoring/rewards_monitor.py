@@ -205,8 +205,8 @@ class BlockCypherClient:
         self.api_base = "https://api.blockcypher.com/v1/btc/main"
 
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=2, min=1, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_address_transactions(self) -> List[Dict]:
@@ -232,12 +232,12 @@ class BlockCypherClient:
                             status=response.status,
                         )
         except Exception as e:
-            logger.error(f"Failed to fetch transactions for {self.btc_address}: {e}")
+            logger.error(f"Failed to fetch transactions for {self.btc_address}: {e}: {response.text}")
             raise
 
     @retry(
-        stop=stop_after_attempt(10),
-        wait=wait_exponential(multiplier=2, min=1, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_tx_details(self, tx_hash: str) -> Dict:
@@ -272,8 +272,8 @@ class OceanAPIClient:
         self.api_base = "https://api.ocean.xyz/v1"
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=2, min=1, max=5),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
         reraise=True,
     )
     async def get_payouts(self) -> Dict:
@@ -358,7 +358,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
         db: Database connection
     """
     btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
-    start_date_str = os.environ.get("TIDES_START_DATE", "2025-09-09")
+    start_date_str = os.environ.get("TIDES_START_DATE", "2025-09-27")
     interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
     min_confirmations = int(os.environ.get("TIDES_MIN_CONFIRMATIONS", "3"))
 
@@ -466,7 +466,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     )
                     """
 
-                    btc_amount = tx["value"] / 100000000
+                    btc_amount = (tx["value"] / 100000000) * 0.995
                     confirmed_at = datetime.fromisoformat(
                         tx["confirmed"].replace("Z", "+00:00")
                     )
@@ -482,10 +482,9 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                     }
 
                     await db.client.command(insert_query, parameters=params)
-                    # TODO: Enable when processing these earnings.
-                    # await process_tides_reward_earnings(
-                    #     db, tx_hash, btc_amount, normalized_window, confirmed_at
-                    # )
+                    await process_tides_reward_earnings(
+                        db, tx_hash, btc_amount, normalized_window, confirmed_at
+                    )
 
                     logger.info(
                         f"Stored TIDES reward: {tx_hash} "
