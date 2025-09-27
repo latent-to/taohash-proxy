@@ -143,6 +143,22 @@ class StatsDB:
                 "DELETE FROM tides_rewards WHERE confirmed_at < '2025-09-27 23:59:59'",
                 "Clear tides_rewards data before September 27th, 2025 for start date reset",
             ),
+            (
+                17,
+                "DELETE FROM tides_rewards WHERE confirmed_at < '2025-09-28 00:00:00'",
+                "Clear tides_rewards data before September 28th, 2025 for start date reset",
+            ),
+            (
+                18,
+                "DELETE FROM user_earnings WHERE earned_at < '2025-09-28 00:00:00'",
+                "Clear tides earnings before September 28th, 2025",
+            ),
+            (
+                19,
+                "DELETE FROM user_rewards WHERE last_updated < '2025-09-28 00:00:00'",
+                "Clear tides balance updates before September 28th, 2025",
+            ),
+
         ]
 
         for version, migration_sql, description in migrations:
