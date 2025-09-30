@@ -59,3 +59,45 @@ class OceanEarningsRow:
     total_btc: float
     fee_btc: float
 
+
+class _OceanEarningsHTMLParser(HTMLParser):
+    """HTML parser to extract table row cell contents."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._in_row = False
+        self._in_cell = False
+        self._current_row: list[str] = []
+        self._buffer: list[str] = []
+        self.rows: list[list[str]] = []
+
+    def handle_starttag(
+        self, tag: str, attrs: Sequence[tuple[str, Optional[str]]]
+    ) -> None:
+        if tag == "tr":
+            attrs_dict = dict(attrs)
+            if attrs_dict.get("class") == "table-row":
+                self._in_row = True
+                self._current_row = []
+        elif self._in_row and tag == "td":
+            self._in_cell = True
+            self._buffer = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "td" and self._in_row and self._in_cell:
+            text = "".join(self._buffer).strip()
+            if text:
+                self._current_row.append(text)
+            else:
+                self._current_row.append("")
+            self._in_cell = False
+            self._buffer = []
+        elif tag == "tr" and self._in_row:
+            if self._current_row:
+                self.rows.append(self._current_row)
+            self._in_row = False
+            self._current_row = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_row and self._in_cell:
+            self._buffer.append(data)
