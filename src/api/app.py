@@ -20,7 +20,9 @@ from slowapi.util import get_remote_address
 from src.rewards_extraction.monitor import rewards_monitor_task
 from src.difficulty_monitoring.monitor import difficulty_monitor_task
 from src.tides_monitoring.monitor import tides_monitor_task
-from src.tides_monitoring.rewards_monitor import tides_rewards_monitor_task
+from src.tides_monitoring.ocean_rewards_monitor import (
+    tides_rewards_ocean_monitor_task,
+)
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -164,7 +166,7 @@ async def lifespan(app: FastAPI):
 
     if ENABLE_TIDES_REWARDS_MONITORING:
         logger.info("TIDES rewards monitoring is enabled")
-        tides_rewards_task = asyncio.create_task(tides_rewards_monitor_task(db))
+        tides_rewards_task = asyncio.create_task(tides_rewards_ocean_monitor_task(db))
     else:
         logger.info("TIDES rewards monitoring is disabled")
 

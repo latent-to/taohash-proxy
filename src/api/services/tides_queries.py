@@ -401,6 +401,9 @@ async def calculate_custom_tides_window(
             if result.result_rows and result.result_rows[0][0]:
                 window_start_timestamp = result.result_rows[0][0]
 
+        if not window_start_timestamp and earliest_end_day_timestamp:
+            window_start_timestamp = earliest_end_day_timestamp
+
     # Format workers response
     workers_list = _format_workers_response(complete_data)
     total_difficulty = sum(w["share_value"] for w in complete_data.values())
