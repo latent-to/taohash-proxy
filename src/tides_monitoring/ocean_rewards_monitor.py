@@ -184,3 +184,46 @@ class OceanTemplateClient:
             total_btc=total_btc,
             fee_btc=fee_btc,
         )
+
+    async def fetch_new_entries(
+        self,
+        skip_hashes: set[str],
+        *,
+        max_pages: int = 2,
+    ) -> list[OceanEarningsRow]:
+        """Fetch new Ocean entries, skipping known hashes.
+
+        Args:
+            skip_hashes: Hashes already processed or explicitly skipped.
+            max_pages: Safety cap on pagination depth.
+        """
+        new_entries: list[OceanEarningsRow] = []
+        seen_this_run: set[str] = set()
+        consecutive_known_pages = 0
+
+        for page in range(max_pages):
+            try:
+                rows = await self.fetch_page(page)
+            except Exception as exc:
+                logger.error("Failed to fetch Ocean page %s: %s", page, exc)
+                break
+
+            if not rows:
+                break
+
+            page_new = 0
+            for row in rows:
+                if row.block_hash in skip_hashes or row.block_hash in seen_this_run:
+                    continue
+                new_entries.append(row)
+                seen_this_run.add(row.block_hash)
+                page_new += 1
+
+            if page_new == 0:
+                consecutive_known_pages += 1
+                if consecutive_known_pages >= 2:
+                    break
+            else:
+                consecutive_known_pages = 0
+
+        return new_entries
