@@ -227,3 +227,35 @@ class OceanTemplateClient:
                 consecutive_known_pages = 0
 
         return new_entries
+
+
+class MempoolClient:
+    """Client for querying block metadata from mempool.space."""
+
+    def __init__(self, base_url: str | None = None) -> None:
+        self.base_url = base_url or "https://mempool.space/api"
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=1, max=5),
+        reraise=True,
+    )
+    async def get_block(self, block_hash: str) -> dict:
+        url = f"{self.base_url}/block/{block_hash}"
+        timeout = aiohttp.ClientTimeout(total=15)
+        headers = {
+            "User-Agent": "taohash-ocean-monitor/1.0",
+            "Accept": "application/json",
+        }
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(
+                        "Mempool block fetch failed (status %s): %s",
+                        response.status,
+                        text[:200],
+                    )
+                    response.raise_for_status()
+                return await response.json()
