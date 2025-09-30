@@ -101,3 +101,60 @@ class _OceanEarningsHTMLParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._in_row and self._in_cell:
             self._buffer.append(data)
+
+
+class OceanTemplateClient:
+    """Client to fetch and parse Ocean earnings template pages."""
+
+    def __init__(self, btc_address: str) -> None:
+        self.btc_address = btc_address
+        self.base_url = "https://ocean.xyz"
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=5, min=1, max=5),
+        reraise=True,
+    )
+    async def fetch_page(self, page: int) -> list[OceanEarningsRow]:
+        params = {
+            "user": self.btc_address,
+            "epage": "1",
+            "page": str(page),
+            "sortParam": "",
+        }
+        url = f"{self.base_url}/template/workers/earnings/rows?{urlencode(params)}"
+
+        timeout = aiohttp.ClientTimeout(total=20)
+        headers = {
+            "User-Agent": "taohash-ocean-monitor/1.0",
+            "Accept": "text/html",
+        }
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    logger.error(
+                        "Ocean template fetch failed (status %s, page %s): %s",
+                        response.status,
+                        page,
+                        text[:200],
+                    )
+                    response.raise_for_status()
+                html = await response.text()
+
+        parser = _OceanEarningsHTMLParser()
+        parser.feed(html)
+
+        rows: list[OceanEarningsRow] = []
+        for raw_row in parser.rows:
+            try:
+                row = self._convert_row(raw_row)
+            except ValueError as exc:
+                logger.warning(
+                    "Skipping Ocean row due to parse error: %s | %s", exc, raw_row
+                )
+                continue
+            rows.append(row)
+
+        return rows
