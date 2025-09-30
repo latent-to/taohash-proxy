@@ -259,3 +259,63 @@ class MempoolClient:
                     )
                     response.raise_for_status()
                 return await response.json()
+
+
+async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
+    """Background task to ingest TIDES rewards using Ocean earnings data."""
+
+    btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
+    interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
+
+    if not btc_address:
+        logger.error(
+            "TIDES_BTC_ADDRESS not configured, disabling Ocean rewards monitoring"
+        )
+        return
+
+    ocean_client = OceanTemplateClient(btc_address)
+    mempool_client = MempoolClient()
+
+    logger.info(
+        "Starting Ocean-based TIDES rewards monitoring for %s (every %ss)",
+        btc_address,
+        interval,
+    )
+
+    while True:
+        try:
+            if not db or not db.client:
+                logger.warning(
+                    "Database unavailable for Ocean TIDES rewards processing"
+                )
+                await asyncio.sleep(300)
+                continue
+
+            existing_hashes = await load_existing_tx_hashes(db)
+            skip_hashes = set(SKIPPED_BLOCK_HASHES)
+            skip_hashes.update(existing_hashes)
+
+            new_entries = await ocean_client.fetch_new_entries(skip_hashes)
+
+            if not new_entries:
+                logger.debug("No new Ocean rewards detected")
+            else:
+                for entry in reversed(new_entries):
+                    block_hash = entry.block_hash
+
+                    try:
+                        block_meta = await mempool_client.get_block(block_hash)
+                        timestamp = block_meta.get("timestamp")
+                        block_height = block_meta.get("height")
+                        if timestamp is None or block_height is None:
+                            raise ValueError(
+                                "missing timestamp or height in block metadata"
+                            )
+                        confirmed_at = datetime.fromtimestamp(
+                            int(timestamp), tz=timezone.utc
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to fetch block metadata for %s: %s", block_hash, exc
+                        )
+                        continue
