@@ -158,3 +158,29 @@ class OceanTemplateClient:
             rows.append(row)
 
         return rows
+
+    def _convert_row(self, raw_row: Sequence[str]) -> OceanEarningsRow:
+        if len(raw_row) < 4:
+            raise ValueError("expected at least 4 columns")
+
+        block_hash = raw_row[0].strip()
+        if not block_hash:
+            raise ValueError("missing block hash")
+
+        percentage_str = raw_row[1].replace("%", "").strip()
+        total_btc_str = raw_row[2].replace("BTC", "").strip()
+        fee_btc_str = raw_row[3].replace("BTC", "").strip()
+
+        try:
+            pool_percentage = float(percentage_str)
+            total_btc = float(total_btc_str)
+            fee_btc = float(fee_btc_str)
+        except Exception as exc:
+            raise ValueError(f"invalid decimal values: {exc}") from exc
+
+        return OceanEarningsRow(
+            block_hash=block_hash,
+            pool_percentage=pool_percentage,
+            total_btc=total_btc,
+            fee_btc=fee_btc,
+        )
