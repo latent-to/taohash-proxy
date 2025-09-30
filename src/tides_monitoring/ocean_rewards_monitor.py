@@ -1,6 +1,25 @@
 """Ocean-based TIDES rewards monitoring task."""
 
+import asyncio
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from html.parser import HTMLParser
+from typing import Optional, Sequence
+from urllib.parse import urlencode
+
+import aiohttp
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from src.api.services.tides_queries import calculate_custom_tides_window
+from src.storage.db import StatsDB
+from src.tides_monitoring.rewards_monitor import (
+    load_existing_tx_hashes,
+    process_tides_reward_earnings,
+)
 from src.utils.logger import get_logger
+from src.utils.time_normalize import normalize_tides_window_snapshot, to_iso_z
 
 logger = get_logger(__name__)
 
@@ -29,4 +48,14 @@ SKIPPED_BLOCK_HASHES: list[str] = [
     "000000000000000000011cceb5c999e0e9397223f03cfb22c7c69957828b1ec6",
     "0000000000000000000041d60a92a6ed88a5f4f780ef10a467a2b56d3042f027",
 ]
+
+
+@dataclass
+class OceanEarningsRow:
+    """Row representing a single Ocean earnings entry."""
+
+    block_hash: str
+    pool_percentage: float
+    total_btc: float
+    fee_btc: float
 
