@@ -319,3 +319,91 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                             "Failed to fetch block metadata for %s: %s", block_hash, exc
                         )
                         continue
+
+                    try:
+                        window_data = await calculate_custom_tides_window(
+                            db, confirmed_at
+                        )
+                        normalized_window = normalize_tides_window_snapshot(
+                            window_data, default_updated_at=confirmed_at
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to calculate TIDES window for %s: %s",
+                            block_hash,
+                            exc,
+                        )
+                        continue
+
+                    if entry.total_btc <= 0:
+                        logger.warning(
+                            "Ocean reward %s has non-positive BTC amount %s",
+                            block_hash,
+                            entry.total_btc,
+                        )
+                        continue
+
+                    btc_amount = float(entry.total_btc)
+                    fee_amount = float(entry.fee_btc)
+
+                    insert_query = """
+                    INSERT INTO tides_rewards (
+                        tx_hash, block_height, btc_amount,
+                        confirmed_at, discovered_at, tides_window, source_type
+                    )
+                    VALUES (
+                        %(tx_hash)s, %(block_height)s, %(btc_amount)s,
+                        %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
+                    )
+                    """
+
+                    params = {
+                        "tx_hash": block_hash,
+                        "block_height": int(block_height),
+                        "btc_amount": btc_amount,
+                        "confirmed_at": confirmed_at,
+                        "discovered_at": datetime.now(timezone.utc),
+                        "snapshot": json.dumps(normalized_window),
+                        "source_type": "pool_payout",
+                    }
+
+                    try:
+                        await db.client.command(insert_query, parameters=params)
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to insert TIDES reward %s: %s", block_hash, exc
+                        )
+                        continue
+
+                    try:
+                        await process_tides_reward_earnings(
+                            db,
+                            tx_hash=block_hash,
+                            total_btc_amount=btc_amount,
+                            tides_window=normalized_window,
+                            confirmed_at=confirmed_at,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "Failed to process earnings for reward %s: %s",
+                            block_hash,
+                            exc,
+                        )
+                        continue
+
+                    logger.info(
+                        "Stored Ocean reward %s (height %s, %.8f BTC, fee %.8f BTC, pool %.2f%%, window %s → %s, confirmed_at %s)",
+                        block_hash,
+                        block_height,
+                        btc_amount,
+                        fee_amount,
+                        float(entry.pool_percentage),
+                        normalized_window.get("window_start"),
+                        normalized_window.get("window_end"),
+                        to_iso_z(confirmed_at),
+                    )
+
+        except Exception as exc:
+            logger.error("Error in Ocean TIDES rewards monitoring loop: %s", exc)
+
+        await asyncio.sleep(interval)
