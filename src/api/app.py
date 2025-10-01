@@ -1593,7 +1593,7 @@ async def create_batch_payout(
         "payment_method": "bitcoin",
         "notes": "Weekly payout",
         "admin_override": false,
-        "tides_tx_hash": "optional_reward_to_mark_processed"
+        "tides_tx_hashes": ["hash1", "hash2"],
     }
     """
     if not db or not db.client:
@@ -1617,7 +1617,7 @@ async def create_batch_payout(
             payout_request.payment_method,
             payout_request.notes,
             payout_request.admin_override,
-            payout_request.tides_tx_hash,
+            payout_request.tides_tx_hashes,
             "api_admin",
         )
 
@@ -1627,6 +1627,7 @@ async def create_batch_payout(
                 batch_id=result["batch_id"],
                 total_amount=result["total_amount"],
                 processed_workers=result["processed_workers"],
+                tides_rewards_processed=result.get("tides_rewards_processed"),
                 admin_override_used=result.get("admin_override_used"),
                 error=None,
                 negative_balance_warnings=result.get("negative_balance_warnings"),
@@ -1638,6 +1639,7 @@ async def create_batch_payout(
                 batch_id=None,
                 total_amount=None,
                 processed_workers=None,
+                tides_rewards_processed=None,
                 admin_override_used=False,
                 error=result["error"],
                 negative_balance_warnings=result.get("negative_balance_warnings"),
