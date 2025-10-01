@@ -402,8 +402,8 @@ class BatchPayoutRequest(BaseModel):
     admin_override: bool = Field(
         default=False, description="Allow negative balances if true"
     )
-    tides_tx_hash: Optional[str] = Field(
-        None, description="TIDES reward to mark as processed"
+    tides_tx_hashes: Optional[List[str]] = Field(
+        None, description="TIDES rewards to mark as processed"
     )
 
 
@@ -423,6 +423,9 @@ class BatchPayoutResponse(BaseModel):
     batch_id: Optional[str] = Field(description="Created batch ID")
     total_amount: Optional[float] = Field(description="Total BTC amount in batch")
     processed_workers: Optional[int] = Field(description="Number of workers processed")
+    tides_rewards_processed: Optional[int] = Field(
+        description="Number of TIDES rewards marked as processed"
+    )
     admin_override_used: Optional[bool] = Field(
         description="Whether admin override was used"
     )
