@@ -379,6 +379,7 @@ class StatsDB:
                 discovered_at DateTime DEFAULT now(),
                 tides_window String,
                 processed Boolean DEFAULT false,
+                source_type LowCardinality(String) DEFAULT 'pool_payout',
                 updated_at DateTime DEFAULT now()
             ) ENGINE = ReplacingMergeTree(updated_at)
             ORDER BY (block_height, tx_hash)""",

@@ -11,6 +11,34 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+async def validate_tides_tx_hashes(
+    db: StatsDB, tx_hashes: List[str]
+) -> tuple[bool, List[str]]:
+    """
+    Validate that all TIDES transaction hashes exist in the database.
+
+    Args:
+        db: Database connection
+        tx_hashes: List of TIDES transaction hashes to validate
+
+    Returns:
+        Tuple of (all_exist, missing_hashes)
+    """
+    if not tx_hashes:
+        return True, []
+
+    query = """
+    SELECT tx_hash FROM tides_rewards
+    WHERE tx_hash IN %(tx_hashes)s
+    """
+
+    result = await db.client.query(query, {"tx_hashes": tx_hashes})
+    found_hashes = {row[0] for row in result.result_rows}
+    missing_hashes = [h for h in tx_hashes if h not in found_hashes]
+
+    return len(missing_hashes) == 0, missing_hashes
+
+
 async def validate_worker_balances(
     db: StatsDB,
     payouts: List[Dict[str, Any]],
@@ -71,7 +99,7 @@ async def create_batch_payout(
     payment_method: str = "bitcoin",
     notes: str = "",
     admin_override: bool = False,
-    tides_tx_hash: Optional[str] = None,
+    tides_tx_hashes: Optional[List[str]] = None,
     processed_by: str = "admin",
 ) -> Dict[str, Any]:
     """
@@ -84,13 +112,28 @@ async def create_batch_payout(
         payment_method: Payment method
         notes: Admin notes
         admin_override: Allow negative balances
-        tides_tx_hash: Optional TIDES reward to mark processed
+        tides_tx_hashes: Optional list of TIDES rewards to mark processed
         processed_by: Admin who processed this
 
     Returns:
         Batch payout result with validation details
     """
     try:
+        if tides_tx_hashes:
+            all_exist, missing = await validate_tides_tx_hashes(db, tides_tx_hashes)
+            if not all_exist:
+                return {
+                    "success": False,
+                    "batch_id": None,
+                    "total_amount": None,
+                    "processed_workers": None,
+                    "tides_rewards_processed": None,
+                    "admin_override_used": False,
+                    "error": f"TIDES transaction hashes not found: {', '.join(missing)}",
+                    "negative_balance_warnings": None,
+                    "suggestion": "Verify TIDES transaction hashes and try again",
+                }
+
         negative_balance_warnings = await validate_worker_balances(db, payouts)
 
         # If validation fails and no admin override, return error
@@ -100,6 +143,7 @@ async def create_batch_payout(
                 "batch_id": None,
                 "total_amount": None,
                 "processed_workers": None,
+                "tides_rewards_processed": None,
                 "admin_override_used": False,
                 "error": "Insufficient balances for payout",
                 "negative_balance_warnings": negative_balance_warnings,
@@ -151,9 +195,10 @@ async def create_batch_payout(
                 notes,
             )
 
-        # Mark TIDES reward as processed if provided
-        if tides_tx_hash:
-            await mark_tides_reward_processed(db, tides_tx_hash)
+        # Mark TIDES rewards as processed if provided
+        if tides_tx_hashes:
+            for tx_hash in tides_tx_hashes:
+                await mark_tides_reward_processed(db, tx_hash)
 
         logger.info(
             f"Created batch payout {batch_id}: {total_amount} BTC to {len(payouts)} workers"
@@ -164,6 +209,7 @@ async def create_batch_payout(
             "batch_id": batch_id,
             "total_amount": total_amount,
             "processed_workers": len(payouts),
+            "tides_rewards_processed": len(tides_tx_hashes) if tides_tx_hashes else 0,
             "admin_override_used": admin_override,
             "negative_balance_warnings": negative_balance_warnings
             if admin_override

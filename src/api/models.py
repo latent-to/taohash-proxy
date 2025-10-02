@@ -212,7 +212,9 @@ class TidesRewardSummary(BaseModel):
     btc_amount: float = Field(description="BTC reward amount")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     processed: bool = Field(description="Whether this reward has been processed")
-    source_type: str = Field(description="Source of reward: 'coinbase' or 'pool_payout'")
+    source_type: str = Field(
+        description="Source of reward: 'coinbase' or 'pool_payout'"
+    )
 
     @field_serializer("confirmed_at", when_used="json")
     def _serialize_confirmed_at(self, v: datetime) -> str:
@@ -272,7 +274,9 @@ class TidesRewardDetails(BaseModel):
     )
     processed: bool = Field(description="Whether this reward has been processed")
     updated_at: datetime = Field(description="Last update timestamp")
-    source_type: str = Field(description="Source of reward: 'coinbase' or 'pool_payout'")
+    source_type: str = Field(
+        description="Source of reward: 'coinbase' or 'pool_payout'"
+    )
 
     @field_serializer("confirmed_at", "discovered_at", "updated_at", when_used="json")
     def _serialize_reward_datetimes(self, v: datetime) -> str:
@@ -317,7 +321,9 @@ class CustomTidesRewardResponse(BaseModel):
         description="TIDES window data at time of discovery"
     )
     processed: bool = Field(description="Whether this reward has been processed")
-    source_type: str = Field(description="Source of reward: 'coinbase' or 'pool_payout'")
+    source_type: str = Field(
+        description="Source of reward: 'coinbase' or 'pool_payout'"
+    )
 
     @field_serializer("confirmed_at", "discovered_at", when_used="json")
     def _serialize_custom_reward_datetimes(self, v: datetime) -> str:
@@ -402,8 +408,8 @@ class BatchPayoutRequest(BaseModel):
     admin_override: bool = Field(
         default=False, description="Allow negative balances if true"
     )
-    tides_tx_hash: Optional[str] = Field(
-        None, description="TIDES reward to mark as processed"
+    tides_tx_hashes: Optional[List[str]] = Field(
+        None, description="TIDES rewards to mark as processed"
     )
 
 
@@ -423,6 +429,9 @@ class BatchPayoutResponse(BaseModel):
     batch_id: Optional[str] = Field(description="Created batch ID")
     total_amount: Optional[float] = Field(description="Total BTC amount in batch")
     processed_workers: Optional[int] = Field(description="Number of workers processed")
+    tides_rewards_processed: Optional[int] = Field(
+        description="Number of TIDES rewards marked as processed"
+    )
     admin_override_used: Optional[bool] = Field(
         description="Whether admin override was used"
     )
