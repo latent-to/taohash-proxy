@@ -244,7 +244,7 @@ class MempoolClient:
         reraise=True,
     )
     async def get_block(self, block_hash: str) -> dict:
-        url = f"{self.base_url}/block/{block_hash}"
+        url = f"{self.base_url}/v1/block/{block_hash}"
         timeout = aiohttp.ClientTimeout(total=15)
         headers = {
             "User-Agent": "taohash-ocean-monitor/1.0",
