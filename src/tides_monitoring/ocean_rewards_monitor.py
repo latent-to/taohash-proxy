@@ -49,7 +49,7 @@ SKIPPED_BLOCK_HASHES: list[str] = [
     "0000000000000000000041d60a92a6ed88a5f4f780ef10a467a2b56d3042f027",
     "0000000000000000000017f038fbce3464a98751afb466745cfe49865db70210",
     "0000000000000000000084f5d0314e43457a8c1f9c76fdc45993916cbb80121a",
-    "000000000000000000001c1938513891be9e8dace41ec9c1679f02631cf6ab5f"
+    "000000000000000000001c1938513891be9e8dace41ec9c1679f02631cf6ab5f",
 ]
 
 
@@ -317,6 +317,14 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         confirmed_at = datetime.fromtimestamp(
                             int(timestamp), tz=timezone.utc
                         )
+
+                        coinbase_sig_ascii = block_meta.get("extras", {}).get(
+                            "coinbaseSignatureAscii", ""
+                        )
+                        if "taohash" in coinbase_sig_ascii.lower():
+                            source_type = "coinbase"
+                        else:
+                            source_type = "pool_payout"
                     except Exception as exc:
                         logger.error(
                             "Failed to fetch block metadata for %s: %s", block_hash, exc
@@ -367,7 +375,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         "confirmed_at": confirmed_at,
                         "discovered_at": datetime.now(timezone.utc),
                         "snapshot": json.dumps(normalized_window),
-                        "source_type": "pool_payout",
+                        "source_type": source_type,
                     }
 
                     try:
@@ -395,15 +403,10 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         continue
 
                     logger.info(
-                        "Stored Ocean reward %s (height %s, %.8f BTC, fee %.8f BTC, pool %.2f%%, window %s → %s, confirmed_at %s)",
-                        block_hash,
-                        block_height,
-                        btc_amount,
-                        fee_amount,
-                        float(entry.pool_percentage),
-                        normalized_window.get("window_start"),
-                        normalized_window.get("window_end"),
-                        to_iso_z(confirmed_at),
+                        f"Stored Ocean reward {block_hash} (height {block_height}, {btc_amount:.8f} BTC, "
+                        f"fee {fee_amount:.8f} BTC, pool {float(entry.pool_percentage):.2f}%, source: {source_type}, "
+                        f"window {normalized_window.get('window_start')} → {normalized_window.get('window_end')}, "
+                        f"confirmed_at {to_iso_z(confirmed_at)})"
                     )
 
         except Exception as exc:
