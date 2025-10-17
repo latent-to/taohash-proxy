@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 
@@ -71,3 +71,24 @@ def normalize_tides_window_snapshot(
         norm["calculated_at"] = iso
 
     return norm
+
+
+def start_of_day(ts: datetime) -> datetime:
+    return ts.replace(hour=0, minute=0, second=0)
+
+
+def end_of_day(ts: datetime) -> datetime:
+    return ts.replace(hour=23, minute=59, second=59)
+
+
+def dates_between_exclusive(d1: date, d2: date) -> list[date]:
+    """
+    All whole dates strictly between d1 and d2 (exclusive).
+    If d1 >= d2 - 1 day → returns [].
+    """
+    days: list[date] = []
+    cur = d1 + timedelta(days=1)
+    while cur < d2:
+        days.append(cur)
+        cur += timedelta(days=1)
+    return days
