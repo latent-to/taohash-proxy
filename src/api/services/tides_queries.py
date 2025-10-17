@@ -559,3 +559,96 @@ async def _fetch_partial_end_day(db: StatsDB, end_ts: datetime) -> dict[str, dic
     """Fetch shares from start of day(end_ts) to end_ts"""
     return await _fetch_range_data(db, start_of_day(end_ts), end_ts)
 
+
+async def calculate_tides_window_from_ocean(
+    db: StatsDB, end_datetime: Optional[datetime] = None, persist: bool = True
+) -> dict[str, Any]:
+    """
+    Calculate TIDES window anchored to Ocean's start timestamp.
+
+    Sums difficulty across [ocean_start, end_datetime] using:
+      - Partial start day (raw shares)
+      - Full middle days (materialized view)
+      - Partial end day (raw shares)
+
+    Args:
+        db: Database connection
+        end_datetime: End of window (defaults to latest share timestamp)
+        persist: Whether to store results in database
+
+    Returns:
+        Dictionary with TIDES window data including workers, timestamps, and totals
+    """
+
+    if end_datetime is None:
+        end_datetime = await _get_window_end_timestamp(db)
+    end_datetime = ensure_utc(end_datetime)
+
+    ocean_start = await _resolve_window_start(db, end_datetime)
+    ocean_start = ensure_utc(ocean_start)
+
+    start_date = ocean_start.date()
+    end_date = end_datetime.date()
+
+    logger.info(
+        f"Calculating TIDES window from {ocean_start.isoformat()} to {end_datetime.isoformat()}"
+    )
+
+    # Fetch data for partial start day, middle days, and partial end day
+    start_partial = await _fetch_partial_start_day(db, ocean_start)
+    middle_days = dates_between_exclusive(start_date, end_date)
+    full_days = await _fetch_full_days_data(db, middle_days) if middle_days else {}
+    end_partial = await _fetch_partial_end_day(db, end_datetime)
+
+    complete_data = _merge_worker_totals(start_partial, full_days)
+    complete_data = _merge_worker_totals(complete_data, end_partial)
+
+    workers_list = _format_workers_response(complete_data)
+    total_difficulty = sum(w["share_value"] for w in complete_data.values())
+
+    config = await get_config(db)
+    if not config:
+        raise Exception("No TIDES configuration found")
+
+    tides_data = {
+        "workers": workers_list,
+        "share_log_window": config["network_difficulty"] * config["multiplier"],
+        "network_difficulty": config["network_difficulty"],
+        "multiplier": config["multiplier"],
+        "window_start": ocean_start.isoformat(),
+        "window_end": end_datetime.isoformat(),
+        "total_difficulty_in_window": total_difficulty,
+        "total_workers": len(workers_list),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if persist:
+        await _store_tides_window(db, tides_data)
+
+    return tides_data
+
+
+async def _resolve_window_start(db: StatsDB, end_datetime: datetime) -> datetime:
+    """
+    Resolve window start time with fallback chain:
+    1. Ocean API
+    2. Cached window_start
+    3. 4 days before end_datetime
+    """
+    ocean_start = await fetch_ocean_share_window()
+    if ocean_start:
+        return ocean_start
+
+    current = await get_tides_window(db)
+    if current:
+        cached_start = current.get("window_start")
+        if cached_start:
+            parsed = parse_any_ts(cached_start)
+            if parsed:
+                logger.info("Using cached window_start as Ocean API unavailable")
+                return parsed
+            logger.warning(f"Failed to parse cached window_start: {cached_start}")
+
+    fallback = start_of_day(end_datetime) - timedelta(days=4)
+    logger.warning(f"Using fallback window_start (4 days back): {fallback.isoformat()}")
+    return fallback
