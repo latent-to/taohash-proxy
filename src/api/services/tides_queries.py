@@ -523,3 +523,39 @@ async def fetch_ocean_share_window() -> Optional[datetime]:
         logger.error(f"Error fetching Ocean share window: {e}")
         return None
 
+
+async def _fetch_range_data(
+    db: StatsDB, start_ts: datetime, end_ts: datetime
+) -> dict[str, dict]:
+    """
+    Aggregate worker shares and difficulty over an arbitrary time range [start_ts, end_ts].
+    Uses raw `shares` table.
+    """
+    if start_ts > end_ts:
+        return {}
+
+    query = """
+    SELECT
+      worker,
+      count() AS total_shares,
+      sum(pool_difficulty) AS total_share_value
+    FROM shares
+    WHERE ts >= %(start_ts)s AND ts <= %(end_ts)s
+    GROUP BY worker
+    """
+    result = await db.client.query(query, {"start_ts": start_ts, "end_ts": end_ts})
+    return {
+        row[0]: {"shares": int(row[1]), "share_value": float(row[2])}
+        for row in result.result_rows
+    }
+
+
+async def _fetch_partial_start_day(db: StatsDB, start_ts: datetime) -> dict[str, dict]:
+    """Fetch shares from start_ts to end of day(start_ts)"""
+    return await _fetch_range_data(db, start_ts, end_of_day(start_ts))
+
+
+async def _fetch_partial_end_day(db: StatsDB, end_ts: datetime) -> dict[str, dict]:
+    """Fetch shares from start of day(end_ts) to end_ts"""
+    return await _fetch_range_data(db, start_of_day(end_ts), end_ts)
+
