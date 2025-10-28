@@ -158,6 +158,11 @@ class StatsDB:
                 "DELETE FROM user_rewards WHERE last_updated < '2025-09-28 00:00:00'",
                 "Clear tides balance updates before September 28th, 2025",
             ),
+            (
+                20,
+                "ALTER TABLE tides_rewards ADD COLUMN IF NOT EXISTS fee_deducted Float64 DEFAULT 0",
+                "Add fee_deducted column for tracking deducted pool fees",
+            ),
 
         ]
 
@@ -375,6 +380,7 @@ class StatsDB:
                 tx_hash String,
                 block_height UInt64,
                 btc_amount Float64,
+                fee_deducted Float64 DEFAULT 0,
                 confirmed_at DateTime DEFAULT now(),
                 discovered_at DateTime DEFAULT now(),
                 tides_window String,
