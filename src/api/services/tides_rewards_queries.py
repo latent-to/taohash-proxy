@@ -19,6 +19,7 @@ async def get_all_tides_rewards(db: StatsDB) -> List[dict[str, Any]]:
     SELECT 
         tx_hash,
         btc_amount,
+        fee_deducted,
         confirmed_at,
         processed,
         source_type
@@ -33,9 +34,10 @@ async def get_all_tides_rewards(db: StatsDB) -> List[dict[str, Any]]:
         rewards.append({
             "tx_hash": row[0],
             "btc_amount": float(row[1]),
-            "confirmed_at": row[2],
-            "processed": bool(row[3]),
-            "source_type": row[4],
+            "fee_deducted": float(row[2]),
+            "confirmed_at": row[3],
+            "processed": bool(row[4]),
+            "source_type": row[5],
         })
     
     return rewards
@@ -49,6 +51,7 @@ async def get_tides_reward_by_tx_hash(db: StatsDB, tx_hash: str) -> Optional[dic
         tx_hash,
         block_height,
         btc_amount,
+        fee_deducted,
         confirmed_at,
         discovered_at,
         tides_window,
@@ -69,9 +72,9 @@ async def get_tides_reward_by_tx_hash(db: StatsDB, tx_hash: str) -> Optional[dic
     
     # Parse TIDES window JSON
     tides_window_data = {}
-    if row[5]:  # tides_window
+    if row[6]:  # tides_window
         try:
-            tides_window_data = json.loads(row[5])
+            tides_window_data = json.loads(row[6])
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning(f"Failed to parse TIDES window for {tx_hash}: {e}")
             tides_window_data = {}
@@ -80,12 +83,13 @@ async def get_tides_reward_by_tx_hash(db: StatsDB, tx_hash: str) -> Optional[dic
         "tx_hash": row[0],
         "block_height": int(row[1]),
         "btc_amount": float(row[2]),
-        "confirmed_at": row[3],
-        "discovered_at": row[4],
+        "fee_deducted": float(row[3]),
+        "confirmed_at": row[4],
+        "discovered_at": row[5],
         "tides_window": tides_window_data,
-        "processed": bool(row[6]),
-        "updated_at": row[7],
-        "source_type": row[8],
+        "processed": bool(row[7]),
+        "updated_at": row[8],
+        "source_type": row[9],
     }
 
 
@@ -94,6 +98,7 @@ async def update_tides_reward(
     tx_hash: str,
     btc_amount: Optional[float] = None,
     processed: Optional[bool] = None,
+    fee_deducted: Optional[float] = None,
 ) -> dict[str, Any]:
     """
     Update TIDES reward fields using ALTER TABLE UPDATE.
@@ -103,6 +108,7 @@ async def update_tides_reward(
         tx_hash: Transaction hash to update
         btc_amount: New BTC amount (optional)
         processed: New processed status (optional)
+        fee_deducted: New fee deducted value (optional)
     
     Returns:
         Dictionary with updated field names and values
@@ -127,6 +133,10 @@ async def update_tides_reward(
         update_fields.append("processed = %(processed)s")
         params["processed"] = processed
     
+    if fee_deducted is not None:
+        update_fields.append("fee_deducted = %(fee_deducted)s")
+        params["fee_deducted"] = fee_deducted
+    
     if not update_fields:
         raise ValueError("At least one field must be provided for update")
     
@@ -145,6 +155,8 @@ async def update_tides_reward(
         updated_fields["btc_amount"] = btc_amount
     if processed is not None:
         updated_fields["processed"] = processed
+    if fee_deducted is not None:
+        updated_fields["fee_deducted"] = fee_deducted
     
     return updated_fields
 
@@ -155,6 +167,7 @@ async def create_tides_reward(
     block_height: int,
     btc_amount: float,
     confirmed_at: datetime,
+    fee_deducted: float = 0.0,
 ) -> dict[str, Any]:
     """
     Create a new TIDES reward with calculated window at the confirmed datetime.
@@ -165,6 +178,7 @@ async def create_tides_reward(
         block_height: Bitcoin block height
         btc_amount: BTC reward amount
         confirmed_at: When the transaction was confirmed
+        fee_deducted: Fee deducted from the reward
     
     Returns:
         Dictionary with the created reward data
@@ -189,19 +203,20 @@ async def create_tides_reward(
     
     insert_query = """
     INSERT INTO tides_rewards (
-        tx_hash, block_height, btc_amount, 
+        tx_hash, block_height, btc_amount, fee_deducted,
         confirmed_at, discovered_at, tides_window, source_type
     )
     VALUES (
-        %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
+        %(tx_hash)s, %(block_height)s, %(btc_amount)s, %(fee_deducted)s,
         %(confirmed_at)s, %(discovered_at)s, %(tides_window)s, %(source_type)s
     )
     """
-    
+
     params = {
         "tx_hash": tx_hash,
         "block_height": block_height,
         "btc_amount": btc_amount,
+        "fee_deducted": fee_deducted,
         "confirmed_at": confirmed_at,
         "discovered_at": confirmed_at,
         "tides_window": tides_window_json,
@@ -216,6 +231,7 @@ async def create_tides_reward(
         "tx_hash": tx_hash,
         "block_height": block_height,
         "btc_amount": btc_amount,
+        "fee_deducted": fee_deducted,
         "confirmed_at": confirmed_at,
         "discovered_at": confirmed_at,
         "tides_window": tides_window,
