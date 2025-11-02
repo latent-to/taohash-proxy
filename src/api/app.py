@@ -1610,6 +1610,7 @@ async def create_batch_payout(
             for item in payout_request.payouts
         ]
 
+        logger.info(f"Payouts request: {payout_request}")
         result = await create_batch_payout_data(
             db,
             payouts_data,

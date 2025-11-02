@@ -120,6 +120,7 @@ async def create_batch_payout(
     """
     try:
         if tides_tx_hashes:
+            logger.info(f"Validating TIDES transaction hashes: {tides_tx_hashes}")
             all_exist, missing = await validate_tides_tx_hashes(db, tides_tx_hashes)
             if not all_exist:
                 return {
@@ -197,6 +198,7 @@ async def create_batch_payout(
 
         # Mark TIDES rewards as processed if provided
         if tides_tx_hashes:
+            logger.info(f"Marking TIDES rewards as processed: {tides_tx_hashes}")
             for tx_hash in tides_tx_hashes:
                 await mark_tides_reward_processed(db, tx_hash)
 
