@@ -101,6 +101,7 @@ async def create_batch_payout(
     admin_override: bool = False,
     tides_tx_hashes: Optional[List[str]] = None,
     processed_by: str = "admin",
+    paid_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Create batch payout with validation and balance updates.
@@ -114,6 +115,7 @@ async def create_batch_payout(
         admin_override: Allow negative balances
         tides_tx_hashes: Optional list of TIDES rewards to mark processed
         processed_by: Admin who processed this
+        paid_at: When payout was made (defaults to now)
 
     Returns:
         Batch payout result with validation details
@@ -194,6 +196,7 @@ async def create_batch_payout(
                 batch_id,
                 bitcoin_tx_hash,
                 notes,
+                paid_at,
             )
 
         # Mark TIDES rewards as processed if provided
