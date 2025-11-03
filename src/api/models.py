@@ -455,6 +455,9 @@ class SinglePayoutRequest(BaseModel):
     admin_override: bool = Field(
         default=False, description="Allow negative balances if true"
     )
+    paid_at: Optional[datetime] = Field(
+        None, description="When payout was made (defaults to now)"
+    )
 
 
 class SinglePayoutResponse(BaseModel):
