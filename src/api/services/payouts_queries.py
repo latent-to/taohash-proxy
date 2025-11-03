@@ -101,6 +101,7 @@ async def create_batch_payout(
     admin_override: bool = False,
     tides_tx_hashes: Optional[List[str]] = None,
     processed_by: str = "admin",
+    paid_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Create batch payout with validation and balance updates.
@@ -114,6 +115,7 @@ async def create_batch_payout(
         admin_override: Allow negative balances
         tides_tx_hashes: Optional list of TIDES rewards to mark processed
         processed_by: Admin who processed this
+        paid_at: When payout was made (defaults to now)
 
     Returns:
         Batch payout result with validation details
@@ -194,6 +196,7 @@ async def create_batch_payout(
                 batch_id,
                 bitcoin_tx_hash,
                 notes,
+                paid_at,
             )
 
         # Mark TIDES rewards as processed if provided
@@ -230,11 +233,21 @@ async def create_individual_payout(
     batch_id: str,
     bitcoin_tx_hash: str,
     notes: str,
+    paid_at: Optional[datetime] = None,
 ) -> str:
     """Create individual payout record and update worker balance."""
     try:
         payout_id = str(uuid.uuid4())
-        paid_at = datetime.now(timezone.utc)
+
+        if paid_at is not None:
+            if paid_at.tzinfo is None:
+                paid_at_timestamp = paid_at.replace(tzinfo=timezone.utc)
+            else:
+                paid_at_timestamp = paid_at.astimezone(timezone.utc)
+        else:
+            paid_at_timestamp = datetime.now(timezone.utc)
+
+        created_at = datetime.now(timezone.utc)
 
         payout_insert = """
         INSERT INTO user_payouts (
@@ -253,8 +266,8 @@ async def create_individual_payout(
             "payout_batch_id": batch_id,
             "bitcoin_tx_hash": bitcoin_tx_hash,
             "notes": notes,
-            "paid_at": paid_at,
-            "created_at": paid_at,
+            "paid_at": paid_at_timestamp,
+            "created_at": created_at,
         }
 
         await db.client.command(payout_insert, parameters=payout_params)
@@ -631,7 +644,7 @@ async def update_individual_payout(
         payout_batch_id = current_row[2]
         current_tx_hash = current_row[3]
         current_notes = current_row[4]
-        paid_at = current_row[5]
+        current_paid_at = current_row[5]
         created_at = current_row[6]
 
         # Prepare update
@@ -682,7 +695,7 @@ async def update_individual_payout(
             "payout_batch_id": payout_batch_id,
             "bitcoin_tx_hash": new_tx_hash,
             "notes": new_notes,
-            "paid_at": paid_at,
+            "paid_at": current_paid_at,
             "created_at": created_at,
         }
 
@@ -750,6 +763,7 @@ async def create_single_payout_with_validation(
     notes: str = "",
     admin_override: bool = False,
     processed_by: str = "admin",
+    paid_at: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     """
     Single payout with balance validation.
@@ -782,7 +796,7 @@ async def create_single_payout_with_validation(
             }
 
         payout_id = await create_individual_payout(
-            db, worker, btc_amount, None, bitcoin_tx_hash, notes
+            db, worker, btc_amount, None, bitcoin_tx_hash, notes, paid_at
         )
 
         return {

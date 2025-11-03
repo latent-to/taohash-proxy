@@ -1620,6 +1620,7 @@ async def create_batch_payout(
             payout_request.admin_override,
             payout_request.tides_tx_hashes,
             "api_admin",
+            payout_request.paid_at,
         )
 
         if result["success"]:
@@ -1687,6 +1688,7 @@ async def create_single_payout_endpoint(
             payout_request.notes,
             payout_request.admin_override,
             "api_admin",
+            payout_request.paid_at,
         )
         success = bool(result.get("success"))
         return SinglePayoutResponse(
