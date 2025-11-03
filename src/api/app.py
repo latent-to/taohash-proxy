@@ -1620,6 +1620,7 @@ async def create_batch_payout(
             payout_request.admin_override,
             payout_request.tides_tx_hashes,
             "api_admin",
+            payout_request.paid_at,
         )
 
         if result["success"]:

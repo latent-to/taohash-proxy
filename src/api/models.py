@@ -411,6 +411,9 @@ class BatchPayoutRequest(BaseModel):
     tides_tx_hashes: Optional[List[str]] = Field(
         None, description="TIDES rewards to mark as processed"
     )
+    paid_at: Optional[datetime] = Field(
+        None, description="When payout was made (defaults to now)"
+    )
 
 
 class NegativeBalanceWarning(BaseModel):
