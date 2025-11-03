@@ -1687,6 +1687,7 @@ async def create_single_payout_endpoint(
             payout_request.notes,
             payout_request.admin_override,
             "api_admin",
+            payout_request.paid_at,
         )
         success = bool(result.get("success"))
         return SinglePayoutResponse(
