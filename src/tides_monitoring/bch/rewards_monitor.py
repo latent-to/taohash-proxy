@@ -72,3 +72,51 @@ class CryptoApiAddressClient:
 def _is_coinbase_transaction(item: dict[str, Any]) -> bool:
     inputs = item.get("inputs") or []
     return any(entry.get("coinbase") for entry in inputs)
+
+
+def _extract_reward_amount(item: dict[str, Any], address: str) -> float:
+    total = 0.0
+    for output in item.get("outputs", []):
+        for candidate in output.get("addresses", []):
+            candidate_norm = candidate.lstrip("bitcoincash:")
+            if candidate_norm == address:
+                try:
+                    total += float(output["value"]["amount"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                break
+    return total
+
+
+async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
+    """Background task to ingest BCH TIDES rewards via CryptoAPIs."""
+
+    raw_address = os.environ.get("TIDES_BCH_ADDRESS", "").strip()
+    address = raw_address.lower().lstrip("bitcoincash:")
+    if not address:
+        logger.error(
+            "TIDES_BCH_ADDRESS not configured, disabling BCH TIDES rewards monitoring"
+        )
+        return
+
+    api_key = os.environ.get("CRYPTOAPIS_API_KEY", "").strip()
+    if not api_key:
+        logger.error(
+            "CRYPTOAPIS_API_KEY not configured, disabling BCH TIDES rewards monitoring"
+        )
+        return
+
+    start_date_str = os.environ.get("TIDES_REWARDS_START_DATE", "2025-09-28")
+    interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
+    tx_limit = CRYPTOAPIS_TX_LIMIT
+
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error(
+            "Invalid TIDES_REWARDS_START_DATE for BCH monitor (%s). Use YYYY-MM-DD.",
+            start_date_str,
+        )
+        return
+
+    client = CryptoApiAddressClient(address, api_key)
