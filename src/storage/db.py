@@ -163,6 +163,13 @@ class StatsDB:
                 "ALTER TABLE tides_rewards ADD COLUMN IF NOT EXISTS fee_deducted Float64 DEFAULT 0",
                 "Add fee_deducted column for tracking deducted pool fees",
             ),
+            (
+                21,
+                "ALTER TABLE tides_rewards "
+                "UPDATE fee_deducted = round(btc_amount * 0.005, 12) "
+                "WHERE fee_deducted = 0 AND btc_amount IS NOT NULL",
+                "Backfill fee_deducted as 0.5% of btc_amount",
+            ),
 
         ]
 
