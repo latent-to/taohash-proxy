@@ -136,7 +136,9 @@ class MinerSession:
             while True:
                 line = await self.miner_reader.readline()
                 if not line:
-                    logger.info(f"[{self.miner_id}] Miner disconnected")
+                    logger.info(
+                        f"[{self.miner_id}] {self.worker_name} - Miner disconnected"
+                    )
                     break
 
                 try:
@@ -415,7 +417,11 @@ class MinerSession:
         # Close miner connection
         try:
             self.miner_writer.close()
-            await self.miner_writer.wait_closed()
+            try:
+                await self.miner_writer.wait_closed()
+            except ConnectionError:
+                logger.info(f"[{self.miner_id}] Miner already closed connection")
+                pass
         except Exception:
             pass
 
@@ -423,7 +429,11 @@ class MinerSession:
         if self.pool_writer:
             try:
                 self.pool_writer.close()
-                await self.pool_writer.wait_closed()
+                try:
+                    await self.pool_writer.wait_closed()
+                except ConnectionError:
+                    logger.info(f"[{self.miner_id}] Pool already closed connection")
+                    pass
             except Exception:
                 pass
 
