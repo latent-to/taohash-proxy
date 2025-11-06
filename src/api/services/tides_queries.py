@@ -75,6 +75,10 @@ async def _get_window_end_timestamp(db: StatsDB) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _use_ocean_anchor() -> bool:
+    return os.environ.get("COIN", "btc").strip().lower() == "btc"
+
+
 async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
     """
     Calculate TIDES window using daily blocks approach and store results.
@@ -82,9 +86,14 @@ async def calculate_and_store_tides_window(db: StatsDB) -> dict[str, Any]:
     Returns:
         Dictionary with TIDES window data
     """
-    # Patch for Ocean-anchored implementation
-    return await calculate_tides_window_from_ocean(db, None, True)
+    if _use_ocean_anchor():
+        return await calculate_tides_window_from_ocean(db, None, True)
+    return await _calculate_and_store_tides_window_from_shares(db)
 
+
+async def _calculate_and_store_tides_window_from_shares(
+    db: StatsDB,
+) -> dict[str, Any]:
     config = await get_config(db)
     if not config:
         raise Exception("No TIDES configuration found")
@@ -367,9 +376,14 @@ async def calculate_custom_tides_window(
     Returns:
         Dictionary with TIDES window data
     """
-    # Patch for Ocean-anchored implementation
-    return await calculate_tides_window_from_ocean(db, end_datetime, True)
+    if _use_ocean_anchor():
+        return await calculate_tides_window_from_ocean(db, end_datetime, True)
+    return await _calculate_custom_tides_window_from_shares(db, end_datetime)
 
+
+async def _calculate_custom_tides_window_from_shares(
+    db: StatsDB, end_datetime: datetime
+) -> dict[str, Any]:
     config = await get_config(db)
     if not config:
         raise Exception("No TIDES configuration found")

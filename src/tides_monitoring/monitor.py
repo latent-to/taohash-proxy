@@ -37,3 +37,8 @@ async def tides_monitor_task(db: StatsDB) -> None:
             logger.error(f"Error in TIDES monitoring: {e}")
 
         await asyncio.sleep(interval_seconds)
+
+
+async def tides_monitor_task_bch(db: StatsDB) -> None:
+    """Reuse standard TIDES window monitor for BCH."""
+    await tides_monitor_task(db)

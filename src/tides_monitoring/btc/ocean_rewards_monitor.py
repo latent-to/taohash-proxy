@@ -14,7 +14,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.api.services.tides_queries import calculate_custom_tides_window
 from src.storage.db import StatsDB
-from src.tides_monitoring.rewards_monitor import (
+from src.tides_monitoring.btc.rewards_monitor import (
     load_existing_tx_hashes,
     process_tides_reward_earnings,
 )
@@ -354,16 +354,18 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         )
                         continue
 
-                    btc_amount = float(entry.total_btc)
+                    total_btc = float(entry.total_btc)
+                    btc_amount = total_btc * 0.995
+                    fee_deducted = total_btc - btc_amount
                     fee_amount = float(entry.fee_btc)
 
                     insert_query = """
                     INSERT INTO tides_rewards (
-                        tx_hash, block_height, btc_amount,
+                        tx_hash, block_height, btc_amount, fee_deducted,
                         confirmed_at, discovered_at, tides_window, source_type
                     )
                     VALUES (
-                        %(tx_hash)s, %(block_height)s, %(btc_amount)s,
+                        %(tx_hash)s, %(block_height)s, %(btc_amount)s, %(fee_deducted)s,
                         %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
                     )
                     """
@@ -372,6 +374,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         "tx_hash": block_hash,
                         "block_height": int(block_height),
                         "btc_amount": btc_amount,
+                        "fee_deducted": fee_deducted,
                         "confirmed_at": confirmed_at,
                         "discovered_at": datetime.now(timezone.utc),
                         "snapshot": json.dumps(normalized_window),
