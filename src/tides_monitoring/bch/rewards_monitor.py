@@ -120,3 +120,115 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
         return
 
     client = CryptoApiAddressClient(address, api_key)
+
+    logger.info(
+        "Starting BCH TIDES rewards monitoring for %s (from %s, every %ss)",
+        address,
+        start_date,
+        interval,
+    )
+
+    while True:
+        try:
+            if not db or not db.client:
+                logger.warning(
+                    "Database not available for BCH TIDES rewards processing"
+                )
+                await asyncio.sleep(300)
+                continue
+
+            existing_hashes = await load_existing_tx_hashes(db)
+            try:
+                transactions = await client.get_transactions(limit=tx_limit)
+            except Exception as exc:
+                logger.error("Failed to fetch BCH transactions: %s", exc)
+                await asyncio.sleep(interval)
+                continue
+
+            new_rewards = 0
+
+            for item in transactions:
+                if not _is_coinbase_transaction(item):
+                    continue
+
+                tx_hash = item.get("hash")
+                if not tx_hash or tx_hash in existing_hashes:
+                    continue
+
+                block_info = item.get("minedInBlock") or {}
+                block_height = block_info.get("height")
+                if block_height is None:
+                    logger.debug("Skipping BCH tx %s without block height", tx_hash)
+                    continue
+
+                timestamp = item.get("timestamp")
+                if timestamp is None:
+                    logger.debug("Skipping BCH tx %s without timestamp", tx_hash)
+                    continue
+
+                confirmed_at = datetime.fromtimestamp(int(timestamp), tz=timezone.utc)
+                if confirmed_at.date() < start_date:
+                    continue
+
+                reward_amount = _extract_reward_amount(item, address)
+                if reward_amount <= 0:
+                    logger.debug(
+                        "Skipping BCH tx %s with non-positive reward %.8f",
+                        tx_hash,
+                        reward_amount,
+                    )
+                    continue
+
+                tides_window = await get_tides_window(db)
+                normalized_window = (
+                    normalize_tides_window_snapshot(tides_window)
+                    if tides_window
+                    else {}
+                )
+
+                insert_query = """
+                INSERT INTO tides_rewards (
+                    tx_hash, block_height, btc_amount, fee_deducted,
+                    confirmed_at, discovered_at, tides_window, source_type
+                )
+                VALUES (
+                    %(tx_hash)s, %(block_height)s, %(btc_amount)s, %(fee_deducted)s,
+                    %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
+                )
+                """
+
+                params = {
+                    "tx_hash": tx_hash,
+                    "block_height": block_height,
+                    "btc_amount": reward_amount,
+                    "fee_deducted": 0.0,
+                    "confirmed_at": confirmed_at,
+                    "discovered_at": datetime.now(timezone.utc),
+                    "snapshot": json.dumps(normalized_window),
+                    "source_type": "coinbase",
+                }
+
+                await db.client.command(insert_query, parameters=params)
+                await process_tides_reward_earnings(
+                    db,
+                    tx_hash,
+                    reward_amount,
+                    normalized_window,
+                    confirmed_at,
+                )
+
+                logger.info(
+                    "Stored BCH TIDES reward %s (block %s, %.8f BCH)",
+                    tx_hash,
+                    block_height,
+                    reward_amount,
+                )
+                new_rewards += 1
+
+            if new_rewards == 0:
+                logger.debug("No new BCH TIDES rewards found")
+
+        except Exception as exc:
+            logger.error("Error in BCH TIDES rewards monitoring: %s", exc)
+
+        await asyncio.sleep(interval)
