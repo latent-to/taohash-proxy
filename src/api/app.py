@@ -17,13 +17,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from src.rewards_extraction.monitor import rewards_monitor_task
-from src.difficulty_monitoring.monitor import difficulty_monitor_task
-from src.tides_monitoring.monitor import tides_monitor_task
-from src.tides_monitoring.ocean_rewards_monitor import (
-    tides_rewards_ocean_monitor_task,
+from src.api.tasks.startup import (
+    StartupFlags,
+    build_background_coroutines,
+    schedule_background_tasks,
 )
 from src.storage.db import StatsDB
+from src.utils.env import env_bool
 from src.utils.logger import get_logger
 
 from src.api.auth import verify_token, verify_rewards_token
@@ -116,14 +116,25 @@ from src.api.services.balance_queries import (
 
 logger = get_logger(__name__)
 
+SUPPORTED_COINS = {"btc", "bch"}
+ACTIVE_COIN = os.environ.get("COIN", "btc").strip().lower()
+if not ACTIVE_COIN:
+    ACTIVE_COIN = "btc"
+if ACTIVE_COIN not in SUPPORTED_COINS:
+    logger.warning(
+        "Unsupported COIN '%s'. Defaulting to 'btc'. Please configure a supported coin.",
+        ACTIVE_COIN,
+    )
+    ACTIVE_COIN = "btc"
+
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
 
 # Controllers configuration
-ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
-ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
-ENABLE_TIDES_MONITORING = os.environ.get("ENABLE_TIDES_MONITORING", "")
-ENABLE_TIDES_REWARDS_MONITORING = os.environ.get("ENABLE_TIDES_REWARDS_MONITORING", "")
+ENABLE_REWARD_POLLING = env_bool("ENABLE_REWARD_POLLING")
+ENABLE_DIFFICULTY_MONITORING = env_bool("ENABLE_DIFFICULTY_MONITORING")
+ENABLE_TIDES_MONITORING = env_bool("ENABLE_TIDES_MONITORING")
+ENABLE_TIDES_REWARDS_MONITORING = env_bool("ENABLE_TIDES_REWARDS_MONITORING")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -141,44 +152,28 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without database connection")
 
-    reward_task = None
-    difficulty_task = None
-    tides_task = None
-    tides_rewards_task = None
+    logger.info("API starting with coin configuration: %s", ACTIVE_COIN.upper())
 
-    if ENABLE_REWARD_POLLING:
-        logger.info("Daily rewards loop is enabled")
-        reward_task = asyncio.create_task(rewards_monitor_task(db))
-    else:
-        logger.info("Daily rewards loop is disabled")
-
-    if ENABLE_DIFFICULTY_MONITORING:
-        logger.info("Difficulty monitoring is enabled")
-        difficulty_task = asyncio.create_task(difficulty_monitor_task(db))
-    else:
-        logger.info("Difficulty monitoring is disabled")
-
-    if ENABLE_TIDES_MONITORING:
-        logger.info("TIDES monitoring is enabled")
-        tides_task = asyncio.create_task(tides_monitor_task(db))
-    else:
-        logger.info("TIDES monitoring is disabled")
-
-    if ENABLE_TIDES_REWARDS_MONITORING:
-        logger.info("TIDES rewards monitoring is enabled")
-        tides_rewards_task = asyncio.create_task(tides_rewards_ocean_monitor_task(db))
-    else:
-        logger.info("TIDES rewards monitoring is disabled")
+    factories = build_background_coroutines(
+        ACTIVE_COIN,
+        db,
+        StartupFlags(
+            rewards=ENABLE_REWARD_POLLING,
+            difficulty=ENABLE_DIFFICULTY_MONITORING,
+            tides=ENABLE_TIDES_MONITORING,
+            tides_rewards=ENABLE_TIDES_REWARDS_MONITORING,
+        ),
+    )
+    background_tasks = schedule_background_tasks(factories)
 
     yield
 
-    for task in [reward_task, difficulty_task, tides_task, tides_rewards_task]:
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    for task in background_tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if db:
         await db.close()
