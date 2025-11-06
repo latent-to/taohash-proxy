@@ -457,16 +457,18 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
 
                     insert_query = """
                     INSERT INTO tides_rewards (
-                        tx_hash, block_height, btc_amount, 
+                        tx_hash, block_height, btc_amount, fee_deducted,
                         confirmed_at, discovered_at, tides_window, source_type
                     )
                     VALUES (
-                        %(tx_hash)s, %(block_height)s, %(btc_amount)s, 
+                        %(tx_hash)s, %(block_height)s, %(btc_amount)s, %(fee_deducted)s,
                         %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
                     )
                     """
 
-                    btc_amount = (tx["value"] / 100000000) * 0.995
+                    total_btc = tx["value"] / 100000000
+                    btc_amount = total_btc * 0.995
+                    fee_deducted = total_btc - btc_amount
                     confirmed_at = datetime.fromisoformat(
                         tx["confirmed"].replace("Z", "+00:00")
                     )
@@ -475,6 +477,7 @@ async def tides_rewards_monitor_task(db: StatsDB) -> None:
                         "tx_hash": tx_hash,
                         "block_height": tx["block_height"],
                         "btc_amount": btc_amount,
+                        "fee_deducted": fee_deducted,
                         "confirmed_at": confirmed_at,
                         "discovered_at": confirmed_at,
                         "snapshot": snapshot_json,

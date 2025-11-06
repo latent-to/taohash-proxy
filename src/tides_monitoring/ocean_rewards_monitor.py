@@ -354,16 +354,17 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         )
                         continue
 
-                    btc_amount = float(entry.total_btc)
-                    fee_amount = float(entry.fee_btc)
+                    btc_amount = float(entry.total_btc) * 0.995
+                    fee_deducted = float(entry.total_btc) - btc_amount
+                    fee_amount_ocean = float(entry.fee_btc)
 
                     insert_query = """
                     INSERT INTO tides_rewards (
-                        tx_hash, block_height, btc_amount,
+                        tx_hash, block_height, btc_amount, fee_deducted,
                         confirmed_at, discovered_at, tides_window, source_type
                     )
                     VALUES (
-                        %(tx_hash)s, %(block_height)s, %(btc_amount)s,
+                        %(tx_hash)s, %(block_height)s, %(btc_amount)s, %(fee_deducted)s,
                         %(confirmed_at)s, %(discovered_at)s, %(snapshot)s, %(source_type)s
                     )
                     """
@@ -372,6 +373,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         "tx_hash": block_hash,
                         "block_height": int(block_height),
                         "btc_amount": btc_amount,
+                        "fee_deducted": fee_deducted,
                         "confirmed_at": confirmed_at,
                         "discovered_at": datetime.now(timezone.utc),
                         "snapshot": json.dumps(normalized_window),
@@ -403,8 +405,8 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         continue
 
                     logger.info(
-                        f"Stored Ocean reward {block_hash} (height {block_height}, {btc_amount:.8f} BTC, "
-                        f"fee {fee_amount:.8f} BTC, pool {float(entry.pool_percentage):.2f}%, source: {source_type}, "
+                        f"Stored Ocean reward {block_hash} (height {block_height}, {btc_amount:.8f} BTC, {fee_deducted:.8f} BTC) "
+                        f"fee {fee_amount_ocean:.8f} BTC, pool {float(entry.pool_percentage):.2f}%, source: {source_type}, "
                         f"window {normalized_window.get('window_start')} → {normalized_window.get('window_end')}, "
                         f"confirmed_at {to_iso_z(confirmed_at)})"
                     )
