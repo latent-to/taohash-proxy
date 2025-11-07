@@ -419,7 +419,7 @@ class MinerSession:
             self.miner_writer.close()
             try:
                 await self.miner_writer.wait_closed()
-            except ConnectionError:
+            except ConnectionResetError:
                 logger.info(f"[{self.miner_id}] Miner already closed connection")
                 pass
         except Exception:
@@ -431,7 +431,7 @@ class MinerSession:
                 self.pool_writer.close()
                 try:
                     await self.pool_writer.wait_closed()
-                except ConnectionError:
+                except ConnectionResetError:
                     logger.info(f"[{self.miner_id}] Pool already closed connection")
                     pass
             except Exception:
