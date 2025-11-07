@@ -287,7 +287,7 @@ async def get_pool_stats(
 
         response = {
             "pool": "all",
-            "btc": {
+            ACTIVE_COIN: {
                 "all_time_reward": "0.00000000",  # TODO
                 "hash_rate_unit": "Gh/s",
                 "hash_rate_5m": stats_5m.get("hashrate", 0) / 1e9  # Convert to GH/s
@@ -366,7 +366,7 @@ async def get_workers_stats(
                 "share_value_24h": w.get("share_value_24h", 0),
             }
 
-        return {"btc": {"workers": workers_dict}}
+        return {ACTIVE_COIN: {"workers": workers_dict}}
 
     except Exception as e:
         logger.error(f"Error fetching worker stats: {e}")
@@ -463,7 +463,7 @@ async def get_workers_share_value(
             payment_proof_url = reward_data["payment_proof_url"]
 
         return {
-            "btc": {
+            ACTIVE_COIN: {
                 "workers": workers_dict,
                 "btc_amount": btc_amount,
                 "paid": paid,
