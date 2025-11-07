@@ -263,7 +263,12 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
+@app.get(
+    "/api/pool/stats",
+    response_model=PoolStatsResponse,
+    response_model_exclude_none=True,
+    tags=["Historical Data"],
+)
 @limiter.limit("60/minute")
 async def get_pool_stats(
     request: Request, token: str = Depends(verify_token)
@@ -323,7 +328,10 @@ async def get_pool_stats(
 
 
 @app.get(
-    "/api/workers/stats", response_model=WorkersStatsResponse, tags=["Historical Data"]
+    "/api/workers/stats",
+    response_model=WorkersStatsResponse,
+    response_model_exclude_none=True,
+    tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
 async def get_workers_stats(
@@ -376,6 +384,7 @@ async def get_workers_stats(
 @app.get(
     "/api/workers/timerange",
     response_model=WorkersTimerangeResponse,
+    response_model_exclude_none=True,
     tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
@@ -419,6 +428,7 @@ async def get_workers_timerange(
 @app.get(
     "/api/workers/share-value/{date}",
     response_model=WorkersShareValueResponse,
+    response_model_exclude_none=True,
     tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
