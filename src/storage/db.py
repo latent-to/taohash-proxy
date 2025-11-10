@@ -109,7 +109,7 @@ class StatsDB:
             ),
             (
                 12,
-                "ALTER TABLE daily_rewards ADD COLUMN paid Boolean DEFAULT false",
+                "ALTER TABLE daily_rewards ADD COLUMN IF NOT EXISTS paid Boolean DEFAULT false",
                 "Add paid column to daily_rewards table",
             ),
             (
@@ -130,12 +130,12 @@ class StatsDB:
             ),
             (
                 14,
-                "ALTER TABLE daily_rewards ADD COLUMN payment_proof_url String DEFAULT ''",
+                "ALTER TABLE daily_rewards ADD COLUMN IF NOT EXISTS payment_proof_url String DEFAULT ''",
                 "Add payment_proof_url field for storing payment documentation links",
             ),
             (
                 15,
-                "ALTER TABLE tides_rewards ADD COLUMN source_type LowCardinality(String) DEFAULT 'pool_payout'",
+                "ALTER TABLE tides_rewards ADD COLUMN IF NOT EXISTS source_type LowCardinality(String) DEFAULT 'pool_payout'",
                 "Add source_type column to distinguish coinbase vs pool_payout rewards",
             ),
             (
@@ -158,7 +158,6 @@ class StatsDB:
                 "DELETE FROM user_rewards WHERE last_updated < '2025-09-28 00:00:00'",
                 "Clear tides balance updates before September 28th, 2025",
             ),
-
         ]
 
         for version, migration_sql, description in migrations:
