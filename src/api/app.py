@@ -418,7 +418,7 @@ async def get_workers_timerange(
         raise HTTPException(status_code=400, detail="Time range cannot exceed 30 days")
 
     try:
-        return await get_worker_timerange_stats(db, start_time, end_time)
+        return await get_worker_timerange_stats(db, start_time, end_time, ACTIVE_COIN)
 
     except Exception as e:
         logger.error(f"Error fetching workers timerange data: {e}")
