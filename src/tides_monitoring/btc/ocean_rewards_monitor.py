@@ -269,6 +269,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
 
     btc_address = os.environ.get("TIDES_BTC_ADDRESS", "")
     interval = int(os.environ.get("TIDES_REWARDS_CHECK_INTERVAL", "600"))
+    start_date_str = os.environ.get("TIDES_REWARDS_START_DATE", "2025-09-28")
 
     if not btc_address:
         logger.error(
@@ -276,13 +277,20 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
         )
         return
 
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        logger.error(
+            f"Invalid TIDES_REWARDS_START_DATE format for Ocean monitor: {start_date_str}. Use YYYY-MM-DD"
+        )
+        return
+
     ocean_client = OceanTemplateClient(btc_address)
     mempool_client = MempoolClient()
 
     logger.info(
-        "Starting Ocean-based TIDES rewards monitoring for %s (every %ss)",
-        btc_address,
-        interval,
+        f"Starting Ocean-based TIDES rewards monitoring for {btc_address} "
+        f"(from {start_date.isoformat()}, every {interval // 60} minutes)"
     )
 
     while True:
@@ -318,6 +326,13 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                             int(timestamp), tz=timezone.utc
                         )
 
+                        if confirmed_at.date() < start_date:
+                            logger.debug(
+                                f"Skipping Ocean reward {block_hash} confirmed at {to_iso_z(confirmed_at)} ",
+                                f"before {start_date.isoformat()}",
+                            )
+                            continue
+
                         coinbase_sig_ascii = block_meta.get("extras", {}).get(
                             "coinbaseSignatureAscii", ""
                         )
@@ -327,7 +342,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                             source_type = "pool_payout"
                     except Exception as exc:
                         logger.error(
-                            "Failed to fetch block metadata for %s: %s", block_hash, exc
+                            f"Failed to fetch block metadata for {block_hash}: {exc}"
                         )
                         continue
 
@@ -340,9 +355,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         )
                     except Exception as exc:
                         logger.error(
-                            "Failed to calculate TIDES window for %s: %s",
-                            block_hash,
-                            exc,
+                            f"Failed to calculate TIDES window for {block_hash}: {exc}"
                         )
                         continue
 
