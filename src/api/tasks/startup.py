@@ -8,12 +8,10 @@ from src.difficulty_monitoring.monitor import (
     difficulty_monitor_task,
     difficulty_monitor_task_bch,
 )
-from src.rewards_extraction.monitor import rewards_monitor_task
 from src.tides_monitoring.monitor import tides_monitor_task, tides_monitor_task_bch
 from src.tides_monitoring.btc.ocean_rewards_monitor import (
     tides_rewards_ocean_monitor_task,
 )
-from src.tides_monitoring.btc.rewards_monitor import tides_rewards_monitor_task
 from src.tides_monitoring.bch.rewards_monitor import tides_rewards_monitor_task_bch
 from src.utils.logger import get_logger
 
@@ -35,7 +33,6 @@ def build_background_coroutines(coin: str, db, flags: StartupFlags) -> List[Awai
 
     task_map = {
         "btc": [
-            ("rewards", "Daily rewards loop BTC", rewards_monitor_task),
             ("difficulty", "Difficulty monitoring BTC", difficulty_monitor_task),
             ("tides", "TIDES window monitoring BTC", tides_monitor_task),
             (
