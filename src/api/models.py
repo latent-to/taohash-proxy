@@ -214,6 +214,7 @@ class TidesRewardSummary(BaseModel):
 
     tx_hash: str = Field(description="Bitcoin transaction hash")
     btc_amount: float = Field(description="BTC reward amount")
+    fee_deducted: float = Field(description="Pool fee deducted from reward in BTC")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     processed: bool = Field(description="Whether this reward has been processed")
     source_type: str = Field(
@@ -271,6 +272,7 @@ class TidesRewardDetails(BaseModel):
     tx_hash: str = Field(description="Bitcoin transaction hash")
     block_height: int = Field(description="Bitcoin block height")
     btc_amount: float = Field(description="BTC reward amount")
+    fee_deducted: float = Field(description="Pool fee deducted from reward in BTC")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     discovered_at: datetime = Field(description="When this reward was discovered")
     tides_window: TidesWindowData = Field(
@@ -294,6 +296,9 @@ class TidesRewardUpdateRequest(BaseModel):
     processed: Optional[bool] = Field(
         None, description="Whether this reward has been processed"
     )
+    fee_deducted: Optional[float] = Field(
+        None, ge=0, description="Pool fee deducted from reward in BTC"
+    )
 
 
 class TidesWindowCalculateRequest(BaseModel):
@@ -311,6 +316,9 @@ class CustomTidesRewardRequest(BaseModel):
     block_height: int = Field(description="Bitcoin block height", gt=0)
     btc_amount: float = Field(description="BTC reward amount", gt=0)
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
+    fee_deducted: float = Field(
+        default=0.0, ge=0, description="Pool fee deducted from reward in BTC"
+    )
 
 
 class CustomTidesRewardResponse(BaseModel):
@@ -319,6 +327,7 @@ class CustomTidesRewardResponse(BaseModel):
     tx_hash: str = Field(description="Bitcoin transaction hash")
     block_height: int = Field(description="Bitcoin block height")
     btc_amount: float = Field(description="BTC reward amount")
+    fee_deducted: float = Field(description="Pool fee deducted from reward in BTC")
     confirmed_at: datetime = Field(description="When the transaction was confirmed")
     discovered_at: datetime = Field(description="When this reward was discovered")
     tides_window: TidesWindowData = Field(
@@ -415,6 +424,9 @@ class BatchPayoutRequest(BaseModel):
     tides_tx_hashes: Optional[List[str]] = Field(
         None, description="TIDES rewards to mark as processed"
     )
+    paid_at: Optional[datetime] = Field(
+        None, description="When payout was made (defaults to now)"
+    )
 
 
 class NegativeBalanceWarning(BaseModel):
@@ -458,6 +470,9 @@ class SinglePayoutRequest(BaseModel):
     notes: str = Field(default="", description="Admin notes about this payout")
     admin_override: bool = Field(
         default=False, description="Allow negative balances if true"
+    )
+    paid_at: Optional[datetime] = Field(
+        None, description="When payout was made (defaults to now)"
     )
 
 

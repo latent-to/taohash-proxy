@@ -1230,9 +1230,9 @@ async def update_tides_reward(
     token: str = Depends(verify_rewards_token),
 ) -> dict[str, Any]:
     """
-    Update TIDES reward fields (btc_amount and/or processed status).
+    Update TIDES reward fields (btc_amount, processed status, and/or fee_deducted).
 
-    Can update any combination of: btc_amount, processed
+    Can update any combination of: btc_amount, processed, fee_deducted
     Only provided fields will be updated. Other fields remain unchanged.
 
     Args:
@@ -1244,7 +1244,7 @@ async def update_tides_reward(
     curl -X PUT "http://127.0.0.1:8888/api/tides/rewards/abc123..." \
          -H "Authorization: Bearer YOUR_REWARDS_TOKEN" \
          -H "Content-Type: application/json" \
-         -d '{"btc_amount": 6.25, "processed": true}'
+         -d '{"btc_amount": 6.25, "processed": true, "fee_deducted": 0.03125}'
     ```
     """
     if not db or not db.client:
@@ -1255,6 +1255,7 @@ async def update_tides_reward(
             [
                 reward_data.btc_amount is not None,
                 reward_data.processed is not None,
+                reward_data.fee_deducted is not None,
             ]
         ):
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -1264,6 +1265,7 @@ async def update_tides_reward(
             tx_hash=tx_hash,
             btc_amount=reward_data.btc_amount,
             processed=reward_data.processed,
+            fee_deducted=reward_data.fee_deducted,
         )
 
         if updated_fields is None:
@@ -1316,7 +1318,8 @@ async def create_tides_reward(
            "tx_hash": "abc123...",
            "block_height": 850000,
            "btc_amount": 3.125,
-           "confirmed_at": "2024-08-15T14:30:00Z"
+           "confirmed_at": "2024-08-15T14:30:00Z",
+           "fee_deducted": 0.015625
          }'
     ```
     """
@@ -1330,6 +1333,7 @@ async def create_tides_reward(
             block_height=reward_data.block_height,
             btc_amount=reward_data.btc_amount,
             confirmed_at=reward_data.confirmed_at,
+            fee_deducted=reward_data.fee_deducted,
         )
 
         return reward
@@ -1615,6 +1619,7 @@ async def create_batch_payout(
             for item in payout_request.payouts
         ]
 
+        logger.info(f"Payouts request: {payout_request}")
         result = await create_batch_payout_data(
             db,
             payouts_data,
@@ -1624,6 +1629,7 @@ async def create_batch_payout(
             payout_request.admin_override,
             payout_request.tides_tx_hashes,
             "api_admin",
+            payout_request.paid_at,
         )
 
         if result["success"]:
@@ -1691,6 +1697,7 @@ async def create_single_payout_endpoint(
             payout_request.notes,
             payout_request.admin_override,
             "api_admin",
+            payout_request.paid_at,
         )
         success = bool(result.get("success"))
         return SinglePayoutResponse(
