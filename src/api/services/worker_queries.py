@@ -123,7 +123,7 @@ async def get_worker_stats(
 
 
 async def get_worker_timerange_stats(
-    db: StatsDB, start_time: int, end_time: int
+    db: StatsDB, start_time: int, end_time: int, coin: str
 ) -> dict[str, Any]:
     """
     Get worker statistics for a custom time range.
@@ -132,7 +132,7 @@ async def get_worker_timerange_stats(
         db: Database connection
         start_time: Start time as Unix timestamp
         end_time: End time as Unix timestamp
-
+        coin: Coin name
     Returns:
         Worker statistics calculated for the specified time period.
     """
@@ -189,7 +189,7 @@ async def get_worker_timerange_stats(
         )
 
         return {
-            "btc": {"workers": workers_dict, "worker_percentage": worker_percentage}
+            coin: {"workers": workers_dict, "worker_percentage": worker_percentage}
         }
 
     except Exception as e:
