@@ -86,7 +86,7 @@ class MinerSession:
         self.jobs = JobQueue(max_size=25)
         self.db = None
 
-        logger.info(f"[{self.miner_id}] Transparent proxy session initialized")
+        logger.info(f"[{self.miner_id}] Proxy session initialized")
 
     async def run(self):
         """
@@ -111,6 +111,15 @@ class MinerSession:
                 [miner_to_pool, pool_to_miner], return_when=asyncio.FIRST_COMPLETED
             )
 
+            for task in done:
+                try:
+                    if task.exception():
+                        logger.error(
+                            f"[{self.miner_id}] Task failed: {task.exception()}"
+                        )
+                except asyncio.CancelledError:
+                    pass
+
             for task in pending:
                 task.cancel()
                 try:
@@ -134,7 +143,12 @@ class MinerSession:
         """
         try:
             while True:
-                line = await self.miner_reader.readline()
+                try:
+                    line = await self.miner_reader.readline()
+                except ConnectionResetError:
+                    logger.info(f"[{self.miner_id}] Miner connection reset")
+                    break
+
                 if not line:
                     logger.info(
                         f"[{self.miner_id}] {self.worker_name} - Miner disconnected"
