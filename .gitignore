@@ -212,3 +212,4 @@ replicate.yaml
 
 # Config files
 config.toml
+validator_access.toml
