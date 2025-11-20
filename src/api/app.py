@@ -205,6 +205,30 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Log each HTTP request once with validator context if available."""
+    client_host = request.client.host if request.client else "unknown"
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        alias = getattr(request.state, "validator_alias", None)
+        path = request.url.path
+        if request.url.query:
+            path += f"?{request.url.query}"
+        logger.info(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code}")
+        return response
+        
+    except Exception as e:
+        alias = getattr(request.state, "validator_alias", None)
+        path = request.url.path
+        if request.url.query:
+            path += f"?{request.url.query}"
+        logger.error(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code} {e}")
+        raise
+
+
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Health check endpoint (no auth required)."""
