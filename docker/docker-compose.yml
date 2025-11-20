@@ -20,6 +20,7 @@ services:
       replicas: 10
     volumes:
       - ../config:/app/config:ro
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - PROXY_PORT=${PROXY_PORT:-3331}
@@ -29,6 +30,7 @@ services:
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
+      - LOG_FILE=/app/logs/proxy.log
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -41,16 +43,19 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: taohash-api
-    entrypoint: ["python", "-m", "uvicorn"]
-    command: ["src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    entrypoint: [ "python", "-m", "uvicorn" ]
+    command: [ "src.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log" ]
     ports:
       - "${API_PORT:-8888}:8000"
+    volumes:
+      - ./logs:/app/logs
     env_file:
       - .env
     environment:
       PYTHONUNBUFFERED: "1"
       CLICKHOUSE_HOST: clickhouse
       COIN: ${COIN:-btc}
+      LOG_FILE: /app/logs/api.log
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -75,7 +80,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_S3_BUCKET_ENDPOINT=${AWS_S3_ENDPOINT:-https://${AWS_S3_BUCKET}.s3.amazonaws.com}/clickhouse/
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -89,7 +94,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: taohash-aggregator
-    command: ["python", "-m", "src.aggregator"]
+    command: [ "python", "-m", "src.aggregator" ]
     ports:
       - "5000:5555"
     networks:
