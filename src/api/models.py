@@ -41,7 +41,8 @@ class PoolStatsResponse(BaseModel):
     """Pool statistics API response"""
 
     pool: str = Field(description="Pool filter: 'all', 'normal', or 'high_diff'")
-    btc: BtcPoolStats
+    btc: Optional[BtcPoolStats] = None
+    bch: Optional[BtcPoolStats] = None
     pools_included: Optional[List[str]] = Field(
         default=None, description="List of pools included in 'all' stats"
     )
@@ -78,7 +79,8 @@ class BtcWorkers(BaseModel):
 class WorkersStatsResponse(BaseModel):
     """Workers statistics API response"""
 
-    btc: BtcWorkers
+    btc: Optional[BtcWorkers] = None
+    bch: Optional[BtcWorkers] = None
 
 
 class WorkerTimerangeStats(BaseModel):
@@ -108,7 +110,8 @@ class BtcWorkersTimerange(BaseModel):
 class WorkersTimerangeResponse(BaseModel):
     """Workers timerange API response"""
 
-    btc: BtcWorkersTimerange
+    btc: Optional[BtcWorkersTimerange] = None
+    bch: Optional[BtcWorkersTimerange] = None
 
 
 class WorkerDailyStats(BaseModel):
@@ -140,7 +143,8 @@ class BtcWorkersShareValue(BaseModel):
 class WorkersShareValueResponse(BaseModel):
     """Workers share value API response"""
 
-    btc: BtcWorkersShareValue
+    btc: Optional[BtcWorkersShareValue] = None
+    bch: Optional[BtcWorkersShareValue] = None
 
 
 class ShareRecord(BaseModel):

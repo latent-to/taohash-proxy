@@ -20,6 +20,7 @@ services:
       replicas: 10
     volumes:
       - ../config:/app/config:ro
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1
       - PROXY_PORT=${PROXY_PORT:-3331}
@@ -29,6 +30,7 @@ services:
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
+      - LOG_FILE=/app/logs/proxy.log
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -41,38 +43,19 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: taohash-api
-    entrypoint: ["python", "-m", "uvicorn"]
-    command: ["src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    entrypoint: [ "python", "-m", "uvicorn" ]
+    command: [ "src.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log" ]
     ports:
       - "${API_PORT:-8888}:8000"
+    volumes:
+      - ./logs:/app/logs
+    env_file:
+      - .env
     environment:
-      - PYTHONUNBUFFERED=1
-      - API_TOKENS=${API_TOKENS}
-      - REWARDS_POST_TOKEN=${REWARDS_POST_TOKEN}
-      - CLICKHOUSE_HOST=clickhouse
-      - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
-      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
-      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
-      - ENABLE_REWARD_POLLING=${ENABLE_REWARD_POLLING:-false}
-      - REWARD_PROVIDER=${REWARD_PROVIDER:-braiins}
-      - BRAIINS_API_TOKEN=${BRAIINS_API_TOKEN}
-      - BRAIINS_API_URL=${BRAIINS_API_URL:-https://pool.braiins.com/accounts/rewards/json/btc}
-      - ANTPOOL_API_KEY=${ANTPOOL_API_KEY}
-      - ANTPOOL_API_SECRET=${ANTPOOL_API_SECRET}
-      - ANTPOOL_USER_ID=${ANTPOOL_USER_ID}
-      - REWARD_CHECK_INTERVAL=${REWARD_CHECK_INTERVAL:-3600}
-      - POOL_FEE=${POOL_FEE:-0.02}
-      - MINIMUM_PAYOUT_THRESHOLD=${MINIMUM_PAYOUT_THRESHOLD:-0.00005}
-      - MINIMUM_PAYOUT_THRESHOLD_UNIT=${MINIMUM_PAYOUT_THRESHOLD_UNIT:-BTC}
-      - ENABLE_DIFFICULTY_MONITORING=${ENABLE_DIFFICULTY_MONITORING:-true}
-      - DIFFICULTY_CHECK_INTERVAL=${DIFFICULTY_CHECK_INTERVAL:-30}
-      - ENABLE_TIDES_MONITORING=${ENABLE_TIDES_MONITORING:-true}
-      - TIDES_CHECK_INTERVAL=${TIDES_CHECK_INTERVAL:-5}
-      - ENABLE_TIDES_REWARDS_MONITORING=${ENABLE_TIDES_REWARDS_MONITORING:-true}
-      - TIDES_REWARDS_CHECK_INTERVAL=${TIDES_REWARDS_CHECK_INTERVAL:-30}
-      - TIDES_START_DATE=${TIDES_START_DATE:-2025-09-27}
-      - TIDES_REWARDS_START_DATE=${TIDES_REWARDS_START_DATE:-2025-09-28}
-      - TIDES_BTC_ADDRESS=${TIDES_BTC_ADDRESS}
+      PYTHONUNBUFFERED: "1"
+      CLICKHOUSE_HOST: clickhouse
+      COIN: ${COIN:-btc}
+      LOG_FILE: /app/logs/api.log
     restart: unless-stopped
     depends_on:
       clickhouse:
@@ -97,7 +80,7 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_S3_BUCKET_ENDPOINT=${AWS_S3_ENDPOINT:-https://${AWS_S3_BUCKET}.s3.amazonaws.com}/clickhouse/
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -111,7 +94,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     container_name: taohash-aggregator
-    command: ["python", "-m", "src.aggregator"]
+    command: [ "python", "-m", "src.aggregator" ]
     ports:
       - "5000:5555"
     networks:

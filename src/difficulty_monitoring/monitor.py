@@ -4,7 +4,10 @@ import asyncio
 import os
 
 from src.api.services.config_queries import get_config, update_config
-from src.difficulty_monitoring.braiins_provider import BraiinsDifficultyProvider
+from src.difficulty_monitoring.btc.braiins_provider import BraiinsDifficultyProvider
+from src.difficulty_monitoring.bch.cryptoapi_provider import (
+    CryptoApiDifficultyProvider,
+)
 from src.storage.db import StatsDB
 from src.utils.logger import get_logger
 
@@ -38,9 +41,7 @@ async def difficulty_monitor_task(db: StatsDB) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-async def _check_and_update_difficulty(
-    db: StatsDB, provider: BraiinsDifficultyProvider
-) -> None:
+async def _check_and_update_difficulty(db: StatsDB, provider) -> None:
     """Check difficulty and update config if needed."""
 
     latest_difficulty = await provider.get_network_difficulty()
@@ -66,3 +67,27 @@ async def _check_and_update_difficulty(
         )
     except Exception as e:
         logger.error(f"Failed to update network difficulty: {e}")
+
+
+async def difficulty_monitor_task_bch(db: StatsDB) -> None:
+    """
+    BCH difficulty monitoring using CryptoAPIs provider.
+    """
+    try:
+        provider = CryptoApiDifficultyProvider()
+    except ValueError as exc:
+        logger.error("Cannot start BCH difficulty monitor: %s", exc)
+        return
+
+    interval_seconds = DIFFICULTY_CHECK_INTERVAL_MINUTES * 60
+    logger.info(
+        "Starting BCH difficulty monitoring (every %s minutes)",
+        DIFFICULTY_CHECK_INTERVAL_MINUTES,
+    )
+
+    while True:
+        try:
+            await _check_and_update_difficulty(db, provider)
+        except Exception as exc:
+            logger.error("Error in BCH difficulty monitoring: %s", exc)
+        await asyncio.sleep(interval_seconds)
