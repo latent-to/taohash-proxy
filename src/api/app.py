@@ -17,13 +17,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from src.rewards_extraction.monitor import rewards_monitor_task
-from src.difficulty_monitoring.monitor import difficulty_monitor_task
-from src.tides_monitoring.monitor import tides_monitor_task
-from src.tides_monitoring.ocean_rewards_monitor import (
-    tides_rewards_ocean_monitor_task,
+from src.api.tasks.startup import (
+    StartupFlags,
+    build_background_coroutines,
+    schedule_background_tasks,
 )
 from src.storage.db import StatsDB
+from src.utils.env import env_bool
 from src.utils.logger import get_logger
 
 from src.api.auth import verify_token, verify_rewards_token
@@ -116,14 +116,25 @@ from src.api.services.balance_queries import (
 
 logger = get_logger(__name__)
 
+SUPPORTED_COINS = {"btc", "bch"}
+ACTIVE_COIN = os.environ.get("COIN", "btc").strip().lower()
+if not ACTIVE_COIN:
+    ACTIVE_COIN = "btc"
+if ACTIVE_COIN not in SUPPORTED_COINS:
+    logger.warning(
+        "Unsupported COIN '%s'. Defaulting to 'btc'. Please configure a supported coin.",
+        ACTIVE_COIN,
+    )
+    ACTIVE_COIN = "btc"
+
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address)
 
 # Controllers configuration
-ENABLE_REWARD_POLLING = os.environ.get("ENABLE_REWARD_POLLING", "")
-ENABLE_DIFFICULTY_MONITORING = os.environ.get("ENABLE_DIFFICULTY_MONITORING", "")
-ENABLE_TIDES_MONITORING = os.environ.get("ENABLE_TIDES_MONITORING", "")
-ENABLE_TIDES_REWARDS_MONITORING = os.environ.get("ENABLE_TIDES_REWARDS_MONITORING", "")
+ENABLE_REWARD_POLLING = env_bool("ENABLE_REWARD_POLLING")
+ENABLE_DIFFICULTY_MONITORING = env_bool("ENABLE_DIFFICULTY_MONITORING")
+ENABLE_TIDES_MONITORING = env_bool("ENABLE_TIDES_MONITORING")
+ENABLE_TIDES_REWARDS_MONITORING = env_bool("ENABLE_TIDES_REWARDS_MONITORING")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
@@ -141,44 +152,28 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without database connection")
 
-    reward_task = None
-    difficulty_task = None
-    tides_task = None
-    tides_rewards_task = None
+    logger.info("API starting with coin configuration: %s", ACTIVE_COIN.upper())
 
-    if ENABLE_REWARD_POLLING:
-        logger.info("Daily rewards loop is enabled")
-        reward_task = asyncio.create_task(rewards_monitor_task(db))
-    else:
-        logger.info("Daily rewards loop is disabled")
-
-    if ENABLE_DIFFICULTY_MONITORING:
-        logger.info("Difficulty monitoring is enabled")
-        difficulty_task = asyncio.create_task(difficulty_monitor_task(db))
-    else:
-        logger.info("Difficulty monitoring is disabled")
-
-    if ENABLE_TIDES_MONITORING:
-        logger.info("TIDES monitoring is enabled")
-        tides_task = asyncio.create_task(tides_monitor_task(db))
-    else:
-        logger.info("TIDES monitoring is disabled")
-
-    if ENABLE_TIDES_REWARDS_MONITORING:
-        logger.info("TIDES rewards monitoring is enabled")
-        tides_rewards_task = asyncio.create_task(tides_rewards_ocean_monitor_task(db))
-    else:
-        logger.info("TIDES rewards monitoring is disabled")
+    factories = build_background_coroutines(
+        ACTIVE_COIN,
+        db,
+        StartupFlags(
+            rewards=ENABLE_REWARD_POLLING,
+            difficulty=ENABLE_DIFFICULTY_MONITORING,
+            tides=ENABLE_TIDES_MONITORING,
+            tides_rewards=ENABLE_TIDES_REWARDS_MONITORING,
+        ),
+    )
+    background_tasks = schedule_background_tasks(factories)
 
     yield
 
-    for task in [reward_task, difficulty_task, tides_task, tides_rewards_task]:
-        if task:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    for task in background_tasks:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     if db:
         await db.close()
@@ -208,6 +203,30 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Log each HTTP request once with validator context if available."""
+    client_host = request.client.host if request.client else "unknown"
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        alias = getattr(request.state, "validator_alias", None)
+        path = request.url.path
+        if request.url.query:
+            path += f"?{request.url.query}"
+        logger.info(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code}")
+        return response
+        
+    except Exception as e:
+        alias = getattr(request.state, "validator_alias", None)
+        path = request.url.path
+        if request.url.query:
+            path += f"?{request.url.query}"
+        logger.error(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code} {e}")
+        raise
 
 
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -268,7 +287,12 @@ async def get_stats_summary(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get("/api/pool/stats", response_model=PoolStatsResponse, tags=["Historical Data"])
+@app.get(
+    "/api/pool/stats",
+    response_model=PoolStatsResponse,
+    response_model_exclude_none=True,
+    tags=["Historical Data"],
+)
 @limiter.limit("60/minute")
 async def get_pool_stats(
     request: Request, token: str = Depends(verify_token)
@@ -292,7 +316,7 @@ async def get_pool_stats(
 
         response = {
             "pool": "all",
-            "btc": {
+            ACTIVE_COIN: {
                 "all_time_reward": "0.00000000",  # TODO
                 "hash_rate_unit": "Gh/s",
                 "hash_rate_5m": stats_5m.get("hashrate", 0) / 1e9  # Convert to GH/s
@@ -328,7 +352,10 @@ async def get_pool_stats(
 
 
 @app.get(
-    "/api/workers/stats", response_model=WorkersStatsResponse, tags=["Historical Data"]
+    "/api/workers/stats",
+    response_model=WorkersStatsResponse,
+    response_model_exclude_none=True,
+    tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
 async def get_workers_stats(
@@ -371,7 +398,7 @@ async def get_workers_stats(
                 "share_value_24h": w.get("share_value_24h", 0),
             }
 
-        return {"btc": {"workers": workers_dict}}
+        return {ACTIVE_COIN: {"workers": workers_dict}}
 
     except Exception as e:
         logger.error(f"Error fetching worker stats: {e}")
@@ -381,6 +408,7 @@ async def get_workers_stats(
 @app.get(
     "/api/workers/timerange",
     response_model=WorkersTimerangeResponse,
+    response_model_exclude_none=True,
     tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
@@ -414,7 +442,7 @@ async def get_workers_timerange(
         raise HTTPException(status_code=400, detail="Time range cannot exceed 30 days")
 
     try:
-        return await get_worker_timerange_stats(db, start_time, end_time)
+        return await get_worker_timerange_stats(db, start_time, end_time, ACTIVE_COIN)
 
     except Exception as e:
         logger.error(f"Error fetching workers timerange data: {e}")
@@ -424,6 +452,7 @@ async def get_workers_timerange(
 @app.get(
     "/api/workers/share-value/{date}",
     response_model=WorkersShareValueResponse,
+    response_model_exclude_none=True,
     tags=["Historical Data"],
 )
 @limiter.limit("60/minute")
@@ -468,7 +497,7 @@ async def get_workers_share_value(
             payment_proof_url = reward_data["payment_proof_url"]
 
         return {
-            "btc": {
+            ACTIVE_COIN: {
                 "workers": workers_dict,
                 "btc_amount": btc_amount,
                 "paid": paid,
