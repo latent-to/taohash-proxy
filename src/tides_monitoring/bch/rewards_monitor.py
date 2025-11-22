@@ -186,6 +186,9 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                     else {}
                 )
 
+                bch_amount = float(reward_amount) * 0.99 # 1% fee
+                fee_deducted = float(reward_amount) - bch_amount
+
                 insert_query = """
                 INSERT INTO tides_rewards (
                     tx_hash, block_height, btc_amount, fee_deducted,
@@ -200,8 +203,8 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                 params = {
                     "tx_hash": tx_hash,
                     "block_height": block_height,
-                    "btc_amount": reward_amount,
-                    "fee_deducted": 0.0,
+                    "btc_amount": bch_amount,
+                    "fee_deducted": fee_deducted,
                     "confirmed_at": confirmed_at,
                     "discovered_at": datetime.now(timezone.utc),
                     "snapshot": json.dumps(normalized_window),
