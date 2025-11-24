@@ -215,7 +215,7 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                 await process_tides_reward_earnings(
                     db,
                     tx_hash,
-                    reward_amount,
+                    bch_amount,
                     normalized_window,
                     confirmed_at,
                 )
@@ -224,7 +224,7 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                     "Stored BCH TIDES reward %s (block %s, %.8f BCH)",
                     tx_hash,
                     block_height,
-                    reward_amount,
+                    bch_amount,
                 )
                 new_rewards += 1
 
