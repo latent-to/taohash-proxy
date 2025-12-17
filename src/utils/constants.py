@@ -14,5 +14,9 @@ PROXY_PORT_HIGH = 3332
 INTERNAL_DASHBOARD_PORT = 5000
 DEFAULT_DASHBOARD_PORT = 5000
 
+# Used by the miner control API for per-miner pool management
+MINER_CONTROL_API_PORT = 5002
+MINER_CONTROL_API_HOST = "0.0.0.0"
+
 # Default path to the config file
 CONFIG_PATH = "config/config.toml"
