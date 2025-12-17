@@ -16,7 +16,10 @@ from .utils.constants import (
     RELOAD_API_HOST,
     INTERNAL_DASHBOARD_PORT,
     CONFIG_PATH,
+    MINER_CONTROL_API_PORT,
+    MINER_CONTROL_API_HOST,
 )
+from .core.models import Order
 
 logger = get_logger(__name__)
 
@@ -25,6 +28,12 @@ active_sessions: set[MinerSession] = set()
 active_sessions_lock = asyncio.Lock()
 stats_manager = StatsManager()
 stats_db: Optional[StatsDB] = None
+
+miner_registry: dict[str, MinerSession] = {}
+miner_registry_lock = asyncio.Lock()
+
+orders: dict[str, Order] = {}  # order_id -> Order
+miner_assignments: dict[str, str] = {}  # "worker:ip" -> order_id
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
