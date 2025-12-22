@@ -20,6 +20,7 @@ from src.tides_monitoring.btc.rewards_monitor import (
 )
 from src.utils.logger import get_logger
 from src.utils.time_normalize import normalize_tides_window_snapshot, to_iso_z
+from src.utils.notifications import broadcast_new_reward
 
 logger = get_logger(__name__)
 
@@ -361,9 +362,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
 
                     if entry.total_btc <= 0:
                         logger.warning(
-                            "Ocean reward %s has non-positive BTC amount %s",
-                            block_hash,
-                            entry.total_btc,
+                            f"Ocean reward {block_hash} has non-positive BTC amount {entry.total_btc}"
                         )
                         continue
 
@@ -397,7 +396,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         await db.client.command(insert_query, parameters=params)
                     except Exception as exc:
                         logger.error(
-                            "Failed to insert TIDES reward %s: %s", block_hash, exc
+                            f"Failed to insert TIDES reward {block_hash}: {exc}"
                         )
                         continue
 
@@ -411,11 +410,23 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         )
                     except Exception as exc:
                         logger.error(
-                            "Failed to process earnings for reward %s: %s",
-                            block_hash,
-                            exc,
+                            f"Failed to process earnings for reward {block_hash}: {exc}"
                         )
                         continue
+
+                    try:
+                        asyncio.create_task(
+                            broadcast_new_reward(
+                                network="BTC",
+                                block_height=int(block_height),
+                                reward_amount=btc_amount,
+                                tx_hash=block_hash,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            f"Failed to broadcast new reward notification: {exc}"
+                        )
 
                     logger.info(
                         f"Stored Ocean reward {block_hash} (height {block_height}, {btc_amount:.8f} BTC, {fee_deducted:.8f} BTC) "

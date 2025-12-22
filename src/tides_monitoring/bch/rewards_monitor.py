@@ -16,6 +16,7 @@ from src.tides_monitoring.btc.rewards_monitor import (
 )
 from src.utils.logger import get_logger
 from src.utils.time_normalize import normalize_tides_window_snapshot
+from src.utils.notifications import broadcast_new_reward
 
 logger = get_logger(__name__)
 
@@ -186,7 +187,7 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                     else {}
                 )
 
-                bch_amount = float(reward_amount) * 0.99 # 1% fee
+                bch_amount = float(reward_amount) * 0.99  # 1% fee
                 fee_deducted = float(reward_amount) - bch_amount
 
                 insert_query = """
@@ -219,6 +220,18 @@ async def tides_rewards_monitor_task_bch(db: StatsDB) -> None:
                     normalized_window,
                     confirmed_at,
                 )
+
+                try:
+                    asyncio.create_task(
+                        broadcast_new_reward(
+                            network="BCH",
+                            block_height=int(block_height),
+                            reward_amount=bch_amount,
+                            tx_hash=tx_hash,
+                        )
+                    )
+                except Exception as exc:
+                    logger.error(f"Failed to broadcast new reward notification: {exc}")
 
                 logger.info(
                     "Stored BCH TIDES reward %s (block %s, %.8f BCH)",
