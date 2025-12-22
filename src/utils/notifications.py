@@ -76,3 +76,27 @@ async def broadcast_new_reward(
                         logger.error(f"Discord send failed: {resp.status}")
             except Exception as e:
                 logger.error(f"Discord error: {e}")
+
+        # Telegram
+        if tg_token and tg_chat:
+            text = f"💰 *New {network.upper()} TIDES Reward!*\n\n"
+            text += f"🧱 Block: `{block_height}`\n"
+            text += f"💎 Reward: `{reward_amount:.8f} {network.upper()}`\n"
+            text += f"\n[View Transaction]({explorer_url})"
+            text += f"\n[Rewards breakdown]({taohash_explorer_url})"
+
+            url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+            try:
+                async with session.post(
+                    url,
+                    json={
+                        "chat_id": tg_chat,
+                        "text": text,
+                        "parse_mode": "Markdown",
+                        "disable_web_page_preview": True,
+                    },
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Telegram send failed: {resp.status}")
+            except Exception as e:
+                logger.error(f"Telegram error: {e}")
