@@ -20,6 +20,7 @@ from src.tides_monitoring.btc.rewards_monitor import (
 )
 from src.utils.logger import get_logger
 from src.utils.time_normalize import normalize_tides_window_snapshot, to_iso_z
+from src.utils.notifications import broadcast_new_reward
 
 logger = get_logger(__name__)
 
@@ -416,6 +417,20 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                             exc,
                         )
                         continue
+
+                    try:
+                        asyncio.create_task(
+                            broadcast_new_reward(
+                                network="BTC",
+                                block_height=int(block_height),
+                                reward_amount=btc_amount,
+                                tx_hash=block_hash,
+                            )
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            f"Failed to broadcast new reward notification: {exc}"
+                        )
 
                     logger.info(
                         f"Stored Ocean reward {block_hash} (height {block_height}, {btc_amount:.8f} BTC, {fee_deducted:.8f} BTC) "
