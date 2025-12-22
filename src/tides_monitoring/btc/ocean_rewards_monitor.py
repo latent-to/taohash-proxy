@@ -362,9 +362,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
 
                     if entry.total_btc <= 0:
                         logger.warning(
-                            "Ocean reward %s has non-positive BTC amount %s",
-                            block_hash,
-                            entry.total_btc,
+                            f"Ocean reward {block_hash} has non-positive BTC amount {entry.total_btc}"
                         )
                         continue
 
@@ -398,7 +396,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         await db.client.command(insert_query, parameters=params)
                     except Exception as exc:
                         logger.error(
-                            "Failed to insert TIDES reward %s: %s", block_hash, exc
+                            f"Failed to insert TIDES reward {block_hash}: {exc}"
                         )
                         continue
 
@@ -412,9 +410,7 @@ async def tides_rewards_ocean_monitor_task(db: StatsDB) -> None:
                         )
                     except Exception as exc:
                         logger.error(
-                            "Failed to process earnings for reward %s: %s",
-                            block_hash,
-                            exc,
+                            f"Failed to process earnings for reward {block_hash}: {exc}"
                         )
                         continue
 
