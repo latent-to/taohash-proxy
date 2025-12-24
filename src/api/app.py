@@ -411,7 +411,7 @@ async def get_workers_stats(
     response_model_exclude_none=True,
     tags=["Historical Data"],
 )
-@limiter.limit("60/minute")
+@limiter.limit("10/minute")
 async def get_workers_timerange(
     request: Request,
     start_time: int,
@@ -699,7 +699,7 @@ async def get_all_rewards(
 
 
 @app.get("/api/shares/raw", response_model=RawSharesResponse, tags=["Historical Data"])
-@limiter.limit("60/minute")
+@limiter.limit("10/minute")
 async def get_raw_shares(
     request: Request,
     start_time: int,
