@@ -7,16 +7,12 @@ python -m src
 
 import asyncio
 import sys
-from .main import main, shutdown
+from .main import main
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        # Clean shutdown on Ctrl+C
-        try:
-            asyncio.run(shutdown())
-        except Exception:
-            pass
+        pass
     except Exception:
         sys.exit(1)
