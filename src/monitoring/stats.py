@@ -9,6 +9,7 @@ and calculates estimated hashrates based on recent share history.
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 import json
 
@@ -32,18 +33,19 @@ class MinerStats:
     Attributes:
         ip (str): Miner's IP address
         worker_name (str): Worker name from mining.authorize
-        connected_at (float): Connection timestamp
+        connected_at (datetime): Connection timestamp (UTC)
         accepted (int): Count of accepted shares
         rejected (int): Count of rejected shares
         difficulty (float): Current share difficulty
         recent_shares (deque): Queue of (timestamp, difficulty) tuples for hashrate calculation
         highest_difficulty (float): Highest share difficulty submitted
         last_share_difficulty (float): Difficulty of the last submitted share
+        miner_agent (str): Miner agent identifier containing software/hardware/version info
     """
 
     ip: str
     worker_name: Optional[str] = None
-    connected_at: float = field(default_factory=time.time)
+    connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     accepted: int = 0
     rejected: int = 0
     difficulty: float = 1.0
@@ -52,6 +54,7 @@ class MinerStats:
     highest_difficulty: float = 0.0
     last_share_difficulty: float = 0.0
     pool_name: str = "unknown"
+    miner_agent: str = ""
 
     rejected_stale: int = 0
     rejected_duplicate: int = 0
@@ -152,6 +155,24 @@ class MinerStats:
         """
         logger.debug(f"Updated difficulty for {self.ip} to {difficulty}")
         self.difficulty = difficulty
+
+    def set_miner_agent(self, subscribe_params: list) -> None:
+        """
+        Set miner agent information from mining.subscribe params.
+
+        Extracts and stores the primary agent identifier from the subscribe
+        params list, typically containing software/hardware/version info.
+
+        Args:
+            subscribe_params (list): Raw subscribe params from mining.subscribe,
+                                    e.g., ["bitaxe/BM1370/v2.6.5"]
+        """
+        if subscribe_params and len(subscribe_params) > 0 and subscribe_params[0]:
+            self.miner_agent = str(subscribe_params[0])
+            logger.debug(f"Set miner agent for {self.ip}: {self.miner_agent}")
+        else:
+            self.miner_agent = ""
+            logger.debug(f"No miner agent info provided for {self.ip}")
 
     def get_hashrate(self) -> float:
         """
