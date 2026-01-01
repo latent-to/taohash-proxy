@@ -13,16 +13,22 @@ Key features:
 
 import os
 import toml
-from typing import Union
+from typing import Optional, Union, TYPE_CHECKING
 from aiohttp import web
 
 from ..utils.logger import get_logger
 from .stats import StatsManager
 
+if TYPE_CHECKING:
+    from ..storage.db import StatsDB
+
 logger = get_logger(__name__)
 
 
-def create_dashboard_app(stats_manager: StatsManager, stats_db=None) -> web.Application:
+def create_dashboard_app(
+    stats_manager: StatsManager,
+    stats_db: Optional["StatsDB"] = None,
+) -> web.Application:
     """
     Create the web application for monitoring mining proxy operations.
 
