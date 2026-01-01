@@ -1,0 +1,553 @@
+"""
+TEMPORARY - To be reviewed again with the new DB
+
+Marketplace API endpoints for hashrate order management.
+
+Provides REST API endpoints for managing marketplace orders:
+- Create, list, get, and cancel orders
+- Assign and remove miners from orders
+- List connected miners across all proxy instances
+"""
+
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+from src.storage.db import StatsDB
+from src.utils.logger import get_logger
+from src.utils.redis_client import RedisPublisher, RedisClient
+from src.utils.time_normalize import ensure_utc
+
+logger = get_logger(__name__)
+
+router = APIRouter(prefix="/api/marketplace", tags=["Marketplace"])
+
+limiter = Limiter(key_func=get_remote_address)
+
+db: Optional[StatsDB] = None
+redis_publisher: Optional[RedisPublisher] = None
+redis_client: Optional[RedisClient] = None
+
+
+def set_dependencies(
+    stats_db: StatsDB,
+    publisher: RedisPublisher,
+    client: RedisClient,
+) -> None:
+    """Set module dependencies from app startup."""
+    global db, redis_publisher, redis_client
+    db = stats_db
+    redis_publisher = publisher
+    redis_client = client
+
+
+# TEMPORARY - To be reviewed again with the new DB
+# ==================== Request/Response Models ====================
+
+
+class CreateOrderRequest(BaseModel):
+    order_id: str = Field(..., description="Unique order identifier")
+    host: str = Field(..., description="Pool host address")
+    port: int = Field(..., description="Pool port")
+    user: str = Field(..., description="Pool username")
+    password: str = Field(..., alias="pass", description="Pool password")
+    duration_seconds: Optional[int] = Field(
+        None, description="Order duration in seconds (None for permanent)"
+    )
+    miners: Optional[list[str]] = Field(
+        None, description="Optional list of miner IDs to assign immediately"
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class AssignMinersRequest(BaseModel):
+    miners: list[str] = Field(..., description="List of miner IDs (worker:ip format)")
+
+
+class OrderResponse(BaseModel):
+    order_id: str
+    host: str
+    port: int
+    user: str
+    expires_at: Optional[datetime]
+    created_at: datetime
+    status: str
+    assigned_miners: list[str] = []
+    miner_count: int = 0
+    remaining_seconds: Optional[float] = None
+
+
+class MinerResponse(BaseModel):
+    worker_ip: str
+    order_id: Optional[str] = None
+
+
+# ==================== Order Endpoints ====================
+
+
+@router.post("/orders")
+@limiter.limit("30/minute")
+async def create_order(
+    request: Request,
+    order_request: CreateOrderRequest,
+) -> dict[str, Any]:
+    """
+    Create a new marketplace order.
+
+    Optionally assign miners immediately by providing the 'miners' field.
+
+    Returns:
+        Order status and assigned miners
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not redis_publisher:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    existing = await db.get_order(order_request.order_id)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Order {order_request.order_id} already exists",
+        )
+
+    expires_at = None
+    if order_request.duration_seconds is not None:
+        expires_at = (
+            datetime.now(timezone.utc).timestamp() + order_request.duration_seconds
+        )
+        expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+
+    success = await db.create_order(
+        order_id=order_request.order_id,
+        host=order_request.host,
+        port=order_request.port,
+        user=order_request.user,
+        password=order_request.password,
+        expires_at=expires_at,
+    )
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to create order")
+
+    logger.info(
+        f"Created order {order_request.order_id}: {order_request.host}:{order_request.port}"
+    )
+
+    assigned = []
+    not_found = []
+
+    if order_request.miners:
+        connected_miners = (
+            await redis_client.get_connected_miners() if redis_client else []
+        )
+        connected_set = set(connected_miners)
+
+        for worker_ip in order_request.miners:
+            await db.create_assignment(worker_ip, order_request.order_id)
+
+            if worker_ip in connected_set:
+                pool_config = {
+                    "host": order_request.host,
+                    "port": order_request.port,
+                    "user": order_request.user,
+                    "pass": order_request.password,
+                    "label": order_request.order_id,
+                }
+                await redis_publisher.publish_switch_pool(worker_ip, pool_config)
+                assigned.append(worker_ip)
+                logger.info(f"Assigned {worker_ip} to order {order_request.order_id}")
+            else:
+                not_found.append(worker_ip)
+
+    response = {
+        "status": "created",
+        "order_id": order_request.order_id,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "assigned_miners": assigned,
+    }
+    if order_request.miners:
+        response["message"] = (
+            f"Order created, {len(assigned)} miners switching to "
+            f"{order_request.host}:{order_request.port}"
+        )
+
+    if not_found:
+        response["not_found"] = not_found
+        response["warning"] = f"{len(not_found)} miners not currently connected"
+
+    return response
+
+
+@router.get("/orders")
+@limiter.limit("60/minute")
+async def list_orders(
+    request: Request,
+    status: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    List all marketplace orders.
+
+    Query parameters:
+        status: Optional filter by status ('active', 'expired', 'cancelled')
+
+    Returns:
+        List of order objects
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    orders = await db.get_orders(status=status)
+
+    enriched_orders = []
+    for order in orders:
+        assignments = await db.get_order_assignments(order["order_id"])
+        assigned_miners = [a["worker_ip"] for a in assignments]
+
+        remaining = None
+        if order["expires_at"]:
+            remaining = max(
+                0,
+                (
+                    ensure_utc(order["expires_at"]) - datetime.now(timezone.utc)
+                ).total_seconds(),
+            )
+
+        enriched_orders.append(
+            {
+                "order_id": order["order_id"],
+                "host": order["host"],
+                "port": order["port"],
+                "user": order["user"],
+                "expires_at": order["expires_at"].isoformat()
+                if order["expires_at"]
+                else None,
+                "created_at": order["created_at"].isoformat()
+                if order["created_at"]
+                else None,
+                "status": order["status"],
+                "assigned_miners": assigned_miners,
+                "miner_count": len(assigned_miners),
+                "remaining_seconds": remaining,
+            }
+        )
+
+    return {"orders": enriched_orders, "total": len(enriched_orders)}
+
+
+@router.get("/orders/{order_id}")
+@limiter.limit("60/minute")
+async def get_order(
+    request: Request,
+    order_id: str,
+) -> dict[str, Any]:
+    """
+    Get details for a specific order.
+
+    Returns:
+        Order details with assigned miners
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    order = await db.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    assignments = await db.get_order_assignments(order_id)
+    assigned_miners = [a["worker_ip"] for a in assignments]
+
+    remaining = None
+    if order["expires_at"]:
+        remaining = max(
+            0,
+            (
+                ensure_utc(order["expires_at"]) - datetime.now(timezone.utc)
+            ).total_seconds(),
+        )
+
+    return {
+        "order_id": order["order_id"],
+        "host": order["host"],
+        "port": order["port"],
+        "user": order["user"],
+        "expires_at": order["expires_at"].isoformat() if order["expires_at"] else None,
+        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
+        "status": order["status"],
+        "assigned_miners": assigned_miners,
+        "miner_count": len(assigned_miners),
+        "remaining_seconds": remaining,
+    }
+
+
+@router.delete("/orders/{order_id}")
+@limiter.limit("30/minute")
+async def cancel_order(
+    request: Request,
+    order_id: str,
+) -> dict[str, Any]:
+    """
+    Cancel an order and switch all assigned miners back to default pool.
+
+    Returns:
+        Cancellation status and number of miners switched
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not redis_publisher:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    order = await db.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    assignments = await db.get_order_assignments(order_id)
+
+    miners_switched = 0
+    for assignment in assignments:
+        worker_ip = assignment["worker_ip"]
+
+        await redis_publisher.publish_switch_default(worker_ip)
+        miners_switched += 1
+
+        await db.delete_assignment(worker_ip)
+
+    await db.update_order_status(order_id, "cancelled")
+
+    logger.info(f"Cancelled order {order_id}, switched {miners_switched} miners back")
+
+    return {
+        "status": "cancelled",
+        "order_id": order_id,
+        "miners_switched": miners_switched,
+        "message": f"Order cancelled, {miners_switched} miners switched back to default pools",
+    }
+
+
+# ==================== Miner Assignment Endpoints ====================
+
+
+@router.post("/orders/{order_id}/miners")
+@limiter.limit("30/minute")
+async def assign_miners(
+    request: Request,
+    order_id: str,
+    assign_request: AssignMinersRequest,
+) -> dict[str, Any]:
+    """
+    Assign miners to an existing order.
+
+    Returns:
+        Assignment status with list of assigned miners
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not redis_publisher:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    order = await db.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    if order["status"] != "active":
+        raise HTTPException(
+            status_code=410,
+            detail=f"Order {order_id} is not active (status: {order['status']})",
+        )
+
+    # Check if order expired
+    if order["expires_at"] and ensure_utc(order["expires_at"]) <= datetime.now(
+        timezone.utc
+    ):
+        raise HTTPException(status_code=410, detail=f"Order {order_id} has expired")
+
+    connected_miners = await redis_client.get_connected_miners() if redis_client else []
+    connected_set = set(connected_miners)
+
+    assigned = []
+    not_found = []
+
+    for worker_ip in assign_request.miners:
+        old_assignment = await db.get_miner_assignment(worker_ip)
+        if old_assignment and old_assignment["order_id"] != order_id:
+            await db.delete_assignment(worker_ip)
+
+        await db.create_assignment(worker_ip, order_id)
+
+        if worker_ip in connected_set:
+            pool_config = {
+                "host": order["host"],
+                "port": order["port"],
+                "user": order["user"],
+                "pass": order["password"],
+                "label": order_id,
+            }
+            await redis_publisher.publish_switch_pool(worker_ip, pool_config)
+            assigned.append(worker_ip)
+            logger.info(f"Assigned {worker_ip} to order {order_id}")
+        else:
+            not_found.append(worker_ip)
+
+    all_assignments = await db.get_order_assignments(order_id)
+
+    response = {
+        "status": "assigned",
+        "order_id": order_id,
+        "newly_assigned": assigned,
+        "total_miners": len(all_assignments),
+    }
+
+    if not_found:
+        response["not_found"] = not_found
+        response["warning"] = f"{len(not_found)} miners not currently connected"
+
+    return response
+
+
+@router.delete("/orders/{order_id}/miners/{worker_ip:path}")
+@limiter.limit("30/minute")
+async def remove_miner(
+    request: Request,
+    order_id: str,
+    worker_ip: str,
+) -> dict[str, Any]:
+    """
+    Remove a miner from an order and switch back to default pool.
+
+    The worker_ip path parameter should be URL-encoded (e.g., worker1%3A192.168.1.100).
+
+    Returns:
+        Removal status
+    """
+    if not db or not db.client:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not redis_publisher:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    order = await db.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    assignment = await db.get_miner_assignment(worker_ip)
+    if not assignment or assignment["order_id"] != order_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Miner {worker_ip} not assigned to order {order_id}",
+        )
+
+    await db.delete_assignment(worker_ip)
+
+    await redis_publisher.publish_switch_default(worker_ip)
+
+    logger.info(f"Removed {worker_ip} from order {order_id}")
+
+    return {
+        "status": "removed",
+        "order_id": order_id,
+        "worker_ip": worker_ip,
+        "message": "Miner switched back to default pool",
+    }
+
+
+# ==================== Miner Listing Endpoint ====================
+
+
+@router.get("/miners")
+@limiter.limit("60/minute")
+async def list_miners(
+    request: Request,
+) -> dict[str, Any]:
+    """
+    List all currently connected miners across all proxy instances.
+
+    Returns miner IDs with their current order assignment (if any).
+
+    Returns:
+        List of connected miners with assignment info
+    """
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    connected_miners = await redis_client.get_connected_miners()
+
+    miners = []
+    for worker_ip in connected_miners:
+        assignment = await db.get_miner_assignment(worker_ip) if db else None
+        miners.append(
+            {
+                "worker_ip": worker_ip,
+                "order_id": assignment["order_id"] if assignment else None,
+            }
+        )
+
+    return {"miners": miners, "count": len(miners)}
+
+
+@router.get("/miners/stats")
+@limiter.limit("60/minute")
+async def get_miners_stats(
+    request: Request,
+) -> dict[str, Any]:
+    """
+    Get hashrate stats for all connected miners.
+
+    Returns miners with their real-time hashrate and pool assignment.
+    Used by marketplace to make allocation decisions.
+
+    Returns:
+        List of miners sorted by hashrate (descending)
+    """
+    if not redis_client:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    stats = await redis_client.get_all_miners_with_stats()
+
+    sorted_miners = sorted(
+        stats.items(), key=lambda x: x[1].get("hashrate", 0), reverse=True
+    )
+
+    miners = []
+    total_hashrate = 0
+    available_hashrate = 0
+
+    for worker_ip, miner_stats in sorted_miners:
+        hashrate_gh = miner_stats.get("hashrate_gh", 0)
+        pool_label = miner_stats.get("pool_label", "unknown")
+        is_available = pool_label in ("normal", "high_diff")
+
+        total_hashrate += hashrate_gh
+        if is_available:
+            available_hashrate += hashrate_gh
+
+        miners.append(
+            {
+                "worker_ip": worker_ip,
+                "hashrate": miner_stats.get("hashrate", 0),
+                "hashrate_gh": hashrate_gh,
+                "difficulty": miner_stats.get("difficulty", 0),
+                "accepted": miner_stats.get("accepted", 0),
+                "rejected": miner_stats.get("rejected", 0),
+                "pool_label": pool_label,
+                "worker_name": miner_stats.get("worker_name"),
+                "available": is_available,
+                "miner_agent": miner_stats.get("miner_agent", ""),
+                "connected_minutes": miner_stats.get("connected_minutes", 0),
+            }
+        )
+
+    return {
+        "miners": miners,
+        "total_miners": len(miners),
+        "total_hashrate_gh": total_hashrate,
+        "available_hashrate_gh": available_hashrate,
+    }
