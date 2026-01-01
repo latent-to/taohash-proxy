@@ -113,6 +113,8 @@ from src.api.services.balance_queries import (
     get_all_user_balances,
     update_user_balance_manually,
 )
+from src.api import marketplace
+from src.utils.redis_client import RedisPublisher, RedisClient
 
 logger = get_logger(__name__)
 
@@ -140,17 +142,68 @@ MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
 
 db: Optional[StatsDB] = None
+redis_publisher: Optional[RedisPublisher] = None
+redis_client: Optional[RedisClient] = None
+
+
+async def order_expiry_monitor() -> None:
+    """
+    Background task to check for expired orders and switch miners back.
+
+    Runs every 10 seconds, checks all active orders for expiry.
+    """
+    while True:
+        await asyncio.sleep(10)
+
+        if not db or not db.client or not redis_publisher:
+            continue
+
+        try:
+            expired_orders = await db.get_expired_orders()
+
+            for order in expired_orders:
+                order_id = order["order_id"]
+                logger.info(f"Order {order_id} expired")
+
+                assignments = await db.get_order_assignments(order_id)
+
+                for assignment in assignments:
+                    worker_ip = assignment["worker_ip"]
+                    await redis_publisher.publish_switch_default(worker_ip)
+                    await db.delete_assignment(worker_ip)
+
+                await db.update_order_status(order_id, "expired")
+                logger.info(f"Expired order {order_id}, switched {len(assignments)} miners back")
+
+        except Exception as e:
+            logger.error(f"Error in order expiry monitor: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    global db
+    global db, redis_publisher, redis_client
     db = StatsDB()
     if await db.init():
         logger.info("API connected to ClickHouse successfully")
     else:
         logger.warning("API running without database connection")
+
+    redis_publisher = RedisPublisher()
+    redis_client = RedisClient()
+
+    if await redis_publisher.connect():
+        logger.info("API connected to Redis publisher successfully")
+    else:
+        logger.warning("API running without Redis publisher connection")
+
+    if await redis_client.connect():
+        logger.info("API connected to Redis client successfully")
+    else:
+        logger.warning("API running without Redis client connection")
+
+    if db and redis_publisher and redis_client:
+        marketplace.set_dependencies(db, redis_publisher, redis_client)
 
     logger.info("API starting with coin configuration: %s", ACTIVE_COIN.upper())
 
@@ -166,7 +219,16 @@ async def lifespan(app: FastAPI):
     )
     background_tasks = schedule_background_tasks(factories)
 
+    expiry_task = asyncio.create_task(order_expiry_monitor())
+    logger.info("Order expiry monitor started")
+
     yield
+
+    expiry_task.cancel()
+    try:
+        await expiry_task
+    except asyncio.CancelledError:
+        pass
 
     for task in background_tasks:
         task.cancel()
@@ -174,6 +236,14 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+
+    if redis_publisher:
+        await redis_publisher.close()
+        logger.info("Redis publisher connection closed")
+
+    if redis_client:
+        await redis_client.close()
+        logger.info("Redis client connection closed")
 
     if db:
         await db.close()
@@ -200,9 +270,11 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
+
+app.include_router(marketplace.router)
 
 
 @app.middleware("http")
