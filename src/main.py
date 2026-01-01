@@ -1,39 +1,121 @@
 import asyncio
+import functools
 import os
 import sys
-from typing import Any, Optional
+from datetime import datetime, timezone
+from typing import Any
 
 import toml
 from aiohttp import web
 
 from .monitoring.dashboard import create_dashboard_app
 from .core.miner_session import MinerSession
+from .core.pool_config import PoolConfig
+from .core.command_listener import CommandListener
+from .core.app_state import AppState
 from .monitoring.stats import StatsManager
 from .storage.db import StatsDB
 from .utils.logger import get_logger
+from .utils.redis_client import RedisClient
+from .utils.time_normalize import ensure_utc
 from .utils.constants import (
     RELOAD_API_PORT,
     RELOAD_API_HOST,
     INTERNAL_DASHBOARD_PORT,
     CONFIG_PATH,
-    MINER_CONTROL_API_PORT,
-    MINER_CONTROL_API_HOST,
 )
-from .core.models import Order
 
 logger = get_logger(__name__)
 
-config: dict = {}
-active_sessions: set[MinerSession] = set()
-active_sessions_lock = asyncio.Lock()
-stats_manager = StatsManager()
-stats_db: Optional[StatsDB] = None
 
-miner_registry: dict[str, MinerSession] = {}
-miner_registry_lock = asyncio.Lock()
+async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
+    """
+    Callback invoked when a miner completes authorization.
 
-orders: dict[str, Order] = {}  # order_id -> Order
-miner_assignments: dict[str, str] = {}  # "worker:ip" -> order_id
+    Registers the session in miner_registry for per-miner control.
+    Also checks ClickHouse if the miner has an active order assignment.
+    """
+    registry_key = session.get_registry_key()
+    if not registry_key:
+        logger.warning("Cannot register miner: no registry key available")
+        return
+
+    # Check for already existing session (reconnecting miner)
+    async with state.miner_registry_lock:
+        old_session = state.miner_registry.get(registry_key)
+        if old_session and old_session is not session:
+            logger.info(f"Miner {registry_key} reconnected, replacing old session")
+
+        state.miner_registry[registry_key] = session
+        logger.info(
+            f"📝 Registered miner in registry: {registry_key} ({session.miner_agent})"
+        )
+
+    if not state.stats_db or not state.stats_db.client:
+        return
+
+    try:
+        assignment = await state.stats_db.get_miner_assignment(registry_key)
+        if not assignment:
+            return
+
+        order_id = assignment["order_id"]
+        order = await state.stats_db.get_order(order_id)
+
+        if not order:
+            # Order was deleted, clean up assignment
+            logger.info(f"Order {order_id} no longer exists, deleting assignment")
+            await state.stats_db.delete_assignment(registry_key)
+            return
+
+        if order["status"] != "active":
+            logger.info(
+                f"⏰ Order {order_id} for miner {registry_key} is not active (status: {order['status']})"
+            )
+            return
+
+        if order["expires_at"] and ensure_utc(order["expires_at"]) <= datetime.now(
+            timezone.utc
+        ):
+            logger.info(f"⏰ Order {order_id} for miner {registry_key} has expired")
+            return
+
+        logger.info(
+            f"🔀 Miner {registry_key} has active order {order_id}, switching to order pool"
+        )
+
+        pool_config = PoolConfig(
+            host=order["host"],
+            port=order["port"],
+            user=order["user"],
+            password=order["password"],
+            label=order_id,
+        )
+        task = await session.request_pool_switch(pool_config)
+        if not task:
+            logger.warning(
+                f"⚠️ Failed to request auto-switch for {registry_key} to order {order_id} "
+                f"(switch already in progress)"
+            )
+
+    except Exception as e:
+        logger.error(f"Error checking miner assignment: {e}")
+
+
+async def unregister_miner_session(session: MinerSession, state: AppState) -> None:
+    """
+    Remove a miner session from the registry on disconnect.
+
+    Note: We keep the order assignment active so the miner auto-routes on reconnect.
+    """
+    registry_key = session.get_registry_key()
+    if not registry_key:
+        return
+
+    async with state.miner_registry_lock:
+        if state.miner_registry.get(registry_key) is session:
+            del state.miner_registry[registry_key]
+            logger.info(f"📝 Unregistered miner from registry: {registry_key}")
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
@@ -46,19 +128,19 @@ def load_config(path: str = CONFIG_PATH) -> dict:
     return {"pools": data["pools"]}
 
 
-async def update_config(path: str = CONFIG_PATH) -> bool:
+async def update_config(state: AppState, path: str = CONFIG_PATH) -> bool:
     """
-    Reload TOML → swap in new `config` → schedule teardown of sessions in the background.
+    Reload TOML → swap in new config → schedule teardown of sessions in the background.
     """
     new_conf = load_config(path)
 
-    config.clear()
-    config.update(new_conf)
-    logger.info(f"🔄 Configuration reloaded: {config}")
+    state.config.clear()
+    state.config.update(new_conf)
+    logger.info(f"🔄 Configuration reloaded: {state.config}")
 
-    async with active_sessions_lock:
-        sessions = list(active_sessions)
-        active_sessions.clear()
+    async with state.active_sessions_lock:
+        sessions = list(state.active_sessions)
+        state.active_sessions.clear()
 
     async def close_sessions_background() -> None:
         for sess in sessions:
@@ -77,25 +159,32 @@ async def update_config(path: str = CONFIG_PATH) -> bool:
     return True
 
 
-async def handle_reload_request(request: web.Request) -> web.Response:
-    logger.info(f"🔁 Received reload from {request.remote}")
-    try:
-        success = await update_config()
-        if success:
-            return web.Response(text="Reload scheduled")
-        else:
-            return web.Response(status=500, text="Failed to update config")
-    except Exception as e:
-        logger.error(f"Failed to reload configuration: {e}")
-        return web.Response(status=500, text=str(e))
+def create_reload_handler(state: AppState):
+    """Create a reload request handler with access to state."""
+
+    async def handle_reload_request(request: web.Request) -> web.Response:
+        logger.info(f"🔁 Received reload from {request.remote}")
+        try:
+            success = await update_config(state)
+            if success:
+                return web.Response(text="Reload scheduled")
+            else:
+                return web.Response(status=500, text="Failed to update config")
+        except Exception as e:
+            logger.error(f"Failed to reload configuration: {e}")
+            return web.Response(status=500, text=str(e))
+
+    return handle_reload_request
 
 
 async def handle_new_miner(
-    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    state: AppState,
 ) -> None:
     """
     Fired on each TCP connection from a miner.  We:
-      1) Instantiate a MinerSession with the current pool config from global config
+      1) Instantiate a MinerSession with the current pool config from state
       2) Track it in active_sessions
       3) Schedule its run() as a background task
       4) On completion, clean up stats + the session set
@@ -107,7 +196,7 @@ async def handle_new_miner(
 
     pool_config = None
     pool_label = None
-    for pool_name, pool_cfg in config["pools"].items():
+    for pool_name, pool_cfg in state.config["pools"].items():
         expected_port = get_proxy_port(pool_name)
         if expected_port == local_port:
             pool_config = pool_cfg
@@ -120,31 +209,29 @@ async def handle_new_miner(
         await writer.wait_closed()
         return
 
-    pool_name = f"{pool_config['host']}:{pool_config['port']}"
-    logger.info(f"➕ Miner connected: {miner_address} → {pool_name}")
+    pool_cfg = PoolConfig.from_dict({**pool_config, "label": pool_label})
+    logger.info(f"➕ Miner connected: {miner_address} → {pool_cfg.connection_string}")
 
     session = MinerSession(
         reader,
         writer,
-        pool_config["host"],
-        pool_config["port"],
-        pool_config["user"],
-        pool_config["pass"],
-        stats_manager,
-        pool_label,
+        pool_cfg,
+        state.stats_manager,
     )
 
-    session.db = stats_db
+    session.db = state.stats_db
+    session.on_authorized_callback = functools.partial(on_miner_authorized, state=state)
 
     async def cleanup_session() -> None:
-        async with active_sessions_lock:
-            active_sessions.discard(session)
-        stats_manager.unregister_miner(miner_address)
+        async with state.active_sessions_lock:
+            state.active_sessions.discard(session)
+        await unregister_miner_session(session, state)
+        state.stats_manager.unregister_miner(miner_address)
         logger.info(f"➖ Miner disconnected: {miner_address}")
 
     try:
-        async with active_sessions_lock:
-            active_sessions.add(session)
+        async with state.active_sessions_lock:
+            state.active_sessions.add(session)
 
         task = asyncio.create_task(session.run())
 
@@ -158,10 +245,10 @@ async def handle_new_miner(
         raise
 
 
-async def start_reload_api() -> web.TCPSite:
+async def start_reload_api(state: AppState) -> web.TCPSite:
     """Start a separate web server just for handling reload requests (internal use only)"""
     app = web.Application()
-    app.router.add_post("/api/reload", handle_reload_request)
+    app.router.add_post("/api/reload", create_reload_handler(state))
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -175,6 +262,69 @@ async def start_reload_api() -> web.TCPSite:
     return site
 
 
+async def miner_heartbeat_loop(state: AppState) -> None:
+    """
+    Background task that publishes connected miners and their stats.
+
+    Runs every 15 seconds, publishing miners with hashrate stats
+    to Redis with a 30 second TTL.
+
+    Handles reconnection if Redis is unavailable at startup or goes down later.
+    """
+    logger.info(f"Starting heartbeat loop for proxy {state.proxy_id}")
+
+    while True:
+        try:
+            if not state.redis_client:
+                state.redis_client = RedisClient()
+
+            if not await state.redis_client.ensure_connected():
+                logger.debug("Redis not available for heartbeat, retrying in 15s")
+                await asyncio.sleep(15)
+                continue
+
+            async with state.miner_registry_lock:
+                miners = {}
+                for registry_key, session in state.miner_registry.items():
+                    miners[registry_key] = {
+                        "hashrate": session.stats.get_hashrate()
+                        if session.stats
+                        else 0,
+                        "hashrate_gh": (session.stats.get_hashrate() / 1e9)
+                        if session.stats
+                        else 0,
+                        "difficulty": session.stats.difficulty if session.stats else 0,
+                        "accepted": session.stats.accepted if session.stats else 0,
+                        "rejected": session.stats.rejected if session.stats else 0,
+                        "pool_label": session.current_pool.label,
+                        "worker_name": session.worker_name,
+                        "miner_agent": session.stats.miner_agent
+                        if session.stats
+                        else "",
+                        "connected_minutes": round(
+                            (
+                                datetime.now(timezone.utc) - session.stats.connected_at
+                            ).total_seconds()
+                            / 60,
+                            1,
+                        )
+                        if session.stats
+                        else 0,
+                    }
+
+            await state.redis_client.update_proxy_miners_with_stats(
+                state.proxy_id, miners, ttl_seconds=30
+            )
+
+            if miners:
+                logger.debug(f"Heartbeat: {len(miners)} miners published to Redis")
+
+        except Exception as e:
+            logger.error(f"Error in heartbeat loop: {e}")
+
+        await asyncio.sleep(15)
+
+
 def get_proxy_port(pool_name: str) -> int:
     if pool_name == "normal":
         return int(os.getenv("PROXY_PORT", 3331))
@@ -185,6 +335,9 @@ def get_proxy_port(pool_name: str) -> int:
 
 
 async def main() -> None:
+    state = AppState()
+    state.stats_manager = StatsManager()
+
     if os.path.exists(CONFIG_PATH):
         config_path = CONFIG_PATH
     else:
@@ -196,25 +349,50 @@ async def main() -> None:
             if os.path.exists(example_path):
                 import shutil
 
-                logger.info("📋 No config.toml found; copying from example...")
+                logger.info("No config.toml found; copying from example...")
                 shutil.copy(example_path, config_path)
             else:
                 logger.error(f"❌ Config file not found at {config_path}")
                 sys.exit(1)
 
-    await update_config(config_path)
+    await update_config(state, config_path)
 
-    global stats_db
-    stats_db = StatsDB()
-
-    db_initialized = await stats_db.init()
+    state.stats_db = StatsDB()
+    db_initialized = await state.stats_db.init()
     if db_initialized:
-        logger.info(f"✅ ClickHouse initialized at {stats_db.host}:{stats_db.port}")
+        logger.info(
+            f"✅ ClickHouse initialized at {state.stats_db.host}:{state.stats_db.port}"
+        )
     else:
-        logger.info("ℹ️ ClickHouse is disabled or not available")
+        logger.info("ClickHouse is disabled or not available")
+
+    state.redis_client = RedisClient()
+    redis_connected = await state.redis_client.connect()
+    if redis_connected:
+        logger.info("✅ Redis client connected")
+    else:
+        logger.warning(
+            "⚠️ Redis client not available, heartbeats will retry in background"
+        )
+
+    state.command_listener = CommandListener(
+        state.miner_registry,
+        state.miner_registry_lock,
+        state.config,
+    )
+    listener_connected = await state.command_listener.connect()
+    if listener_connected:
+        logger.info("✅ Command listener subscribed to Redis")
+        asyncio.create_task(state.command_listener.listen())
+        logger.info("📡 Command listener started")
+    else:
+        logger.warning(
+            "⚠️ Command listener not available, pool switching via Redis disabled"
+        )
+        state.command_listener = None
 
     logger.info("🚀 Starting with configuration:")
-    for pool_name, pool_config in config["pools"].items():
+    for pool_name, pool_config in state.config["pools"].items():
         proxy_port = get_proxy_port(pool_name)
         logger.info(
             f"  {pool_name.upper()} Pool: {pool_config['host']}:{pool_config['port']}"
@@ -223,15 +401,20 @@ async def main() -> None:
         logger.info(f"    Proxy port: {proxy_port}")
     logger.info(f"  Dashboard on: 0.0.0.0:{INTERNAL_DASHBOARD_PORT}")
     logger.info(f"  Reload API on: {RELOAD_API_HOST}:{RELOAD_API_PORT} (internal only)")
+    logger.info(f"  Proxy ID: {state.proxy_id}")
 
-    await start_reload_api()
+    await start_reload_api(state)
 
-    # Start a server for each pool configuration
+    asyncio.create_task(miner_heartbeat_loop(state))
+    logger.info("Miner heartbeat loop started")
+
+    handler = functools.partial(handle_new_miner, state=state)
+
     servers = []
-    for pool_name, pool_config in config["pools"].items():
+    for pool_name, pool_config in state.config["pools"].items():
         proxy_port = get_proxy_port(pool_name)
         server = await asyncio.start_server(
-            handle_new_miner,
+            handler,
             "0.0.0.0",
             proxy_port,
         )
@@ -240,7 +423,7 @@ async def main() -> None:
         addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
         logger.info(f"🔌 {pool_name.upper()} pool proxy listening on {addrs}")
 
-    app = create_dashboard_app(stats_manager, stats_db)
+    app = create_dashboard_app(state.stats_manager, state.stats_db)
 
     runner = web.AppRunner(app)
     await runner.setup()
@@ -251,17 +434,27 @@ async def main() -> None:
         INTERNAL_DASHBOARD_PORT,
     )
     await site.start()
-    logger.info(f"✅ Dashboard available at http://0.0.0.0:{INTERNAL_DASHBOARD_PORT}")
+    logger.info(f"Dashboard available at http://0.0.0.0:{INTERNAL_DASHBOARD_PORT}")
 
-    await asyncio.gather(*(server.serve_forever() for server in servers))
+    try:
+        await asyncio.gather(*(server.serve_forever() for server in servers))
+    finally:
+        await shutdown(state)
 
 
-async def shutdown():
+async def shutdown(state: AppState) -> None:
     """Properly close database connection and other resources."""
-    global stats_db
-    if stats_db:
-        await stats_db.close()
-        logger.info("Database connection closed")
+    if state.command_listener:
+        await state.command_listener.close()
+        logger.info("Command listener closed")
+
+    if state.redis_client:
+        await state.redis_client.close()
+        logger.info("Redis connection closed")
+
+    if state.stats_db:
+        await state.stats_db.close()
+        logger.info("ClickHouse connection closed")
 
 
 if __name__ == "__main__":
@@ -269,7 +462,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Shutting down")
-        try:
-            asyncio.run(shutdown())
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
