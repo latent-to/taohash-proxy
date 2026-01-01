@@ -9,14 +9,62 @@ calculation, and state transitions.
 import asyncio
 import json
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Optional, Any, Dict
 
 from ..utils.logger import get_logger, log_stratum_message
 from ..protocol.difficulty import calculate_share_difficulty, parse_min_difficulty
 from ..monitoring.stats import StatsManager
 from .job_queue import JobQueue
+from .pool_config import PoolConfig
 
 logger = get_logger(__name__)
+
+
+class DisconnectAction(Enum):
+    """Actions to take when a connection drops during mining session."""
+
+    EXIT = "exit"  # Clean exit, miner left
+    SWITCH_TO_MAIN = "switch_to_main"  # Pool dropped, fallback to main
+    CONTINUE_SWITCH = "continue_switch"  # Intentional switch in progress
+
+
+def determine_disconnect_action(
+    miner_disconnected: bool,
+    pool_disconnected: bool,
+    is_switching: bool,
+    has_new_pool_config: bool,
+    is_on_order_pool: bool,
+) -> DisconnectAction:
+    """
+    Function to determine the action when a connection drops.
+
+    Priority:
+    1. Intentional switch in progress -> continue with switch
+    2. Miner disconnected -> exit (no point reconnecting)
+    3. Pool disconnected while on order pool -> fallback to main
+    4. Otherwise -> exit
+
+    Args:
+        miner_disconnected: True if miner->pool task ended
+        pool_disconnected: True if pool->miner task ended
+        is_switching: True if a pool switch is in progress
+        has_new_pool_config: True if new_pool_config is set
+        is_on_order_pool: True if currently on an order pool (not main)
+
+    Returns:
+        DisconnectAction: Action to take based on the disconnect state
+    """
+    if is_switching and has_new_pool_config:
+        return DisconnectAction.CONTINUE_SWITCH
+
+    if miner_disconnected:
+        return DisconnectAction.EXIT
+
+    if pool_disconnected and is_on_order_pool and not is_switching:
+        return DisconnectAction.SWITCH_TO_MAIN
+
+    return DisconnectAction.EXIT
 
 
 class MinerSession:
@@ -31,12 +79,8 @@ class MinerSession:
         self,
         miner_reader: asyncio.StreamReader,
         miner_writer: asyncio.StreamWriter,
-        pool_host: str,
-        pool_port: int,
-        pool_user: str,
-        pool_pass: str,
+        pool_config: PoolConfig,
         stats_manager: StatsManager,
-        pool_label: str = "unknown",
     ):
         """
         Initialize miner session.
@@ -44,10 +88,7 @@ class MinerSession:
         Args:
             miner_reader: Stream reader for miner connection
             miner_writer: Stream writer for miner connection
-            pool_host: Upstream pool hostname
-            pool_port: Upstream pool port
-            pool_user: Pool authentication username
-            pool_pass: Pool authentication password (may contain d=X for min difficulty)
+            pool_config: Pool configuration (host, port, user, password, label)
             stats_manager: Stats tracking instance
         """
         self.miner_reader = miner_reader
@@ -57,20 +98,20 @@ class MinerSession:
         self.pool_reader: Optional[asyncio.StreamReader] = None
         self.pool_writer: Optional[asyncio.StreamWriter] = None
 
-        # Pool config
-        self.pool_host = pool_host
-        self.pool_port = pool_port
-        self.pool_user = pool_user
-        self.pool_pass = pool_pass
-        self.pool_label = pool_label
+        # Pool configs
+        # Main pool is the default TAOHash pool, the miner connected to (immutable).
+        # Current pool changes when a pool switch is requested (mutable).
+        self.main_pool = pool_config
+        self.current_pool = pool_config
 
         # Miner identification
         self.peer = miner_writer.get_extra_info("peername")
         self.miner_id = f"{self.peer[0]}:{self.peer[1]}" if self.peer else "unknown"
 
         # Stats tracking
-        self.stats = stats_manager.register_miner(self.peer, pool_label)
+        self.stats = stats_manager.register_miner(self.peer, pool_config.label)
         self.worker_name: Optional[str] = None
+        self.miner_agent: str = ""
 
         # Difficulty management
         self.min_difficulty: Optional[int] = None
@@ -81,56 +122,351 @@ class MinerSession:
         self.extranonce2_size: Optional[int] = None
         self.subscribe_id: Optional[int] = None
         self.pending_submits: Dict[int, dict] = {}
+        self.subscribe_params: list = []
 
         # Job tracking
         self.jobs = JobQueue(max_size=25)
         self.db = None
 
+        # Switching state
+        self.is_switching = False
+        self.new_pool_config: Optional[PoolConfig] = None
+        self._switch_task: Optional[asyncio.Task] = None
+        self._switch_lock = asyncio.Lock()
+
+        self.on_authorized_callback = None
+
         logger.info(f"[{self.miner_id}] Proxy session initialized")
+
+    def get_registry_key(self) -> Optional[str]:
+        """
+        Get unique key for miner registry (worker:ip format).
+
+        Returns:
+            Registry key in format "worker_name:ip_address" or None if not available
+        """
+        if self.worker_name and self.peer:
+            return f"{self.worker_name}:{self.peer[0]}"
+        return None
+
+    def _is_on_order_pool(self) -> bool:
+        """
+        Check if currently connected to an order's pool and not the default pool.
+
+        Returns:
+            True if on order pool, False if on main (original) pool
+        """
+        return self.current_pool != self.main_pool
+
+    def _clear_pool_state(self) -> None:
+        """
+        Clear all pool-specific state when switching pools.
+        """
+        self.jobs.clear()
+        self.pending_submits.clear()
+        self.extranonce1 = None
+        self.extranonce2_size = None
+        self.pool_difficulty = None
+        logger.debug(f"[{self.miner_id}] Cleared stale pool state")
+
+    def _apply_pool_config(self, pool_config: PoolConfig) -> None:
+        """
+        Apply pool configuration to current session.
+
+        Args:
+            pool_config: PoolConfig instance
+        """
+        self.current_pool = pool_config
+        logger.debug(
+            f"[{self.miner_id}] Applied pool config: {pool_config.connection_string} ({pool_config.label})"
+        )
+
+    async def _validate_pool(self, pool_config: PoolConfig) -> bool:
+        """
+        Validate that a pool is reachable before switching.
+
+        Args:
+            pool_config: Pool configuration
+
+        Returns:
+            True if pool is reachable, False otherwise
+        """
+        try:
+            logger.debug(
+                f"[{self.miner_id}] Validating pool {pool_config.connection_string}"
+            )
+            _, test_writer = await asyncio.wait_for(
+                asyncio.open_connection(pool_config.host, pool_config.port),
+                timeout=3.0,
+            )
+            test_writer.close()
+            await test_writer.wait_closed()
+            logger.info(
+                f"[{self.miner_id}] Pool validation successful for {pool_config.connection_string}"
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.error(
+                f"[{self.miner_id}] Pool validation timed out (3s) for {pool_config.connection_string}"
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                f"[{self.miner_id}] Pool validation failed for {pool_config.connection_string}: {e}"
+            )
+            return False
+
+    async def _validate_and_switch(self, pool_config: PoolConfig) -> bool:
+        """
+        Background task to validate pool and trigger switch.
+        If validation fails, falls back to main pool.
+
+        Args:
+            pool_config: Target pool configuration
+
+        Returns:
+            True if requested pool validated and switch triggered
+            False if validation failed (stayed put or fell back to main)
+        """
+        try:
+            logger.info(
+                f"[{self.miner_id}] Background validation for {pool_config.label} ({pool_config.connection_string})"
+            )
+
+            target_config = pool_config
+            if not await self._validate_pool(pool_config):
+                if not self._is_on_order_pool():
+                    logger.info(
+                        f"[{self.miner_id}] Pool validation failed for {pool_config.label}, "
+                        f"already on main pool {self.main_pool.connection_string}"
+                    )
+                    return False
+
+                logger.warning(
+                    f"[{self.miner_id}] Pool validation failed for {pool_config.label}, "
+                    f"falling back to main pool {self.main_pool.connection_string}"
+                )
+                target_config = self.main_pool
+                validation_succeeded = False
+            else:
+                validation_succeeded = True
+
+            async with self._switch_lock:
+                self.new_pool_config = target_config
+                self.is_switching = True
+
+                # Trigger disconnect of current pool to initiate switch
+                if self.pool_writer:
+                    try:
+                        self.pool_writer.close()
+                        await self.pool_writer.wait_closed()
+                        logger.debug(
+                            f"[{self.miner_id}] Triggered pool writer close for switch to "
+                            f"{target_config.label} ({target_config.connection_string})"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"[{self.miner_id}] Error closing pool writer for switch: {e}"
+                        )
+                        return False
+
+            return validation_succeeded
+
+        except Exception as e:
+            logger.error(f"[{self.miner_id}] Error in background switch task: {e}")
+            return False
+        finally:
+            self._switch_task = None
 
     async def run(self):
         """
         Main session loop - manages miner pool connection lifecycle.
 
-        Connects to pool immediately and runs two forwarding loops until
-        either connection drops.
+        Connects to pool immediately and runs two forwarding loops
         """
         try:
-            logger.info(
-                f"[{self.miner_id}] Connecting to pool {self.pool_host}:{self.pool_port}"
-            )
-            self.pool_reader, self.pool_writer = await asyncio.open_connection(
-                self.pool_host, self.pool_port
-            )
-            logger.info(f"[{self.miner_id}] Pool connection established")
-
-            miner_to_pool = asyncio.create_task(self._forward_miner_to_pool())
-            pool_to_miner = asyncio.create_task(self._forward_pool_to_miner())
-
-            done, pending = await asyncio.wait(
-                [miner_to_pool, pool_to_miner], return_when=asyncio.FIRST_COMPLETED
-            )
-
-            for task in done:
+            while True:
+                logger.info(
+                    f"[{self.miner_id}] Connecting to pool {self.current_pool.connection_string}"
+                )
                 try:
-                    if task.exception():
+                    self.pool_reader, self.pool_writer = await asyncio.open_connection(
+                        self.current_pool.host, self.current_pool.port
+                    )
+                    logger.info(f"[{self.miner_id}] Pool connection established")
+
+                except Exception as e:
+                    logger.error(
+                        f"[{self.miner_id}] Failed to connect to pool {self.current_pool.connection_string}: {e}"
+                    )
+
+                    # Case: Failure while switching and on order pool - roll back to the main pool
+                    if self.is_switching and self._is_on_order_pool():
                         logger.error(
-                            f"[{self.miner_id}] Task failed: {task.exception()}"
+                            f"[{self.miner_id}] New pool connection failed, "
+                            f"falling back to main pool {self.main_pool.connection_string}"
                         )
-                except asyncio.CancelledError:
-                    pass
+                        self._clear_pool_state()
+                        self._apply_pool_config(self.main_pool)
+                        self.new_pool_config = None
 
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+                        continue  # Retry with main pool
+
+                    # Case: Normal connection failure
+                    break
+
+                # Case: Initiated switch - perform handshake
+                async with self._switch_lock:
+                    if self.is_switching:
+                        await self._perform_pool_handshake()
+                        self.is_switching = False
+                        self.new_pool_config = None
+
+                miner_to_pool = asyncio.create_task(self._forward_miner_to_pool())
+                pool_to_miner = asyncio.create_task(self._forward_pool_to_miner())
+
+                done, pending = await asyncio.wait(
+                    [miner_to_pool, pool_to_miner], return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Track dropped connection
+                miner_disconnected = miner_to_pool in done
+                pool_disconnected = pool_to_miner in done
+
+                for task in done:
+                    try:
+                        if task.exception():
+                            logger.error(
+                                f"[{self.miner_id}] Task failed: {task.exception()}"
+                            )
+                    except asyncio.CancelledError:
+                        pass
+
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Determine action based on disconnect state
+                async with self._switch_lock:
+                    action = determine_disconnect_action(
+                        miner_disconnected=miner_disconnected,
+                        pool_disconnected=pool_disconnected,
+                        is_switching=self.is_switching,
+                        has_new_pool_config=self.new_pool_config is not None,
+                        is_on_order_pool=self._is_on_order_pool(),
+                    )
+
+                if action == DisconnectAction.CONTINUE_SWITCH:
+                    logger.info(f"[{self.miner_id}] Switching upstream pool...")
+
+                    if self.pool_writer:
+                        try:
+                            self.pool_writer.close()
+                            await self.pool_writer.wait_closed()
+                        except Exception as e:
+                            logger.error(f"Error closing old pool: {e}")
+
+                    async with self._switch_lock:
+                        self._clear_pool_state()
+                        self._apply_pool_config(self.new_pool_config)
+
+                    continue
+
+                elif action == DisconnectAction.SWITCH_TO_MAIN:
+                    logger.warning(
+                        f"[{self.miner_id}] Order pool {self.current_pool.label} ({self.current_pool.connection_string}) "
+                        f"disconnected unexpectedly. Switching to main pool..."
+                    )
+
+                    async with self._switch_lock:
+                        self._clear_pool_state()
+                        self._apply_pool_config(self.main_pool)
+                        self.is_switching = True
+                        self.new_pool_config = None
+
+                    continue
+
+                else:  # DisconnectAction.EXIT
+                    self.is_switching = False
+                    break
 
         except Exception as e:
             logger.error(f"[{self.miner_id}] Session error: {e}")
         finally:
-            await self._cleanup()
+            if not self.is_switching:
+                await self._cleanup()
+
+    async def request_pool_switch(
+        self, pool_config: PoolConfig
+    ) -> Optional[asyncio.Task]:
+        """
+        Request to switch the upstream pool without disconnecting miner.
+        Spawns a background task to validate and switch pools.
+
+        Args:
+            pool_config: Target pool configuration
+
+        Returns:
+            Task[bool] that resolves to True if validation succeeded, False otherwise
+            None if switch already in progress
+        """
+        logger.info(
+            f"[{self.miner_id}] Requesting switch to {pool_config.label} ({pool_config.connection_string})"
+        )
+
+        async with self._switch_lock:
+            if self._switch_task and not self._switch_task.done():
+                logger.warning(
+                    f"[{self.miner_id}] Switch already in progress, ignoring new request"
+                )
+                return None
+
+            self._switch_task = asyncio.create_task(
+                self._validate_and_switch(pool_config)
+            )
+            logger.debug(f"[{self.miner_id}] Spawned background switch task")
+
+        return self._switch_task
+
+    async def _perform_pool_handshake(self):
+        """
+        Re-establish state with new pool (Subscribe + Authorize).
+        """
+        logger.info(f"[{self.miner_id}] Performing handshake with new pool")
+
+        # 1. Subscribe
+        msg_id = self.subscribe_id or 1
+        subscribe_msg = {
+            "id": msg_id,
+            "method": "mining.subscribe",
+            "params": self.subscribe_params,
+        }
+
+        log_stratum_message(
+            logger, subscribe_msg, prefix=f"[{self.miner_id}] Handshake: Subscribe"
+        )
+        data = json.dumps(subscribe_msg).encode() + b"\n"
+        self.pool_writer.write(data)
+        await self.pool_writer.drain()
+
+        # 2. Authorize
+        auth_id = msg_id + 1
+        auth_msg = {
+            "id": auth_id,
+            "method": "mining.authorize",
+            "params": [self.current_pool.user, self.current_pool.password],
+        }
+
+        log_stratum_message(
+            logger, auth_msg, prefix=f"[{self.miner_id}] Handshake: Authorize"
+        )
+        data = json.dumps(auth_msg).encode() + b"\n"
+        self.pool_writer.write(data)
+        await self.pool_writer.drain()
 
     async def _forward_miner_to_pool(self):
         """
@@ -167,6 +503,19 @@ class MinerSession:
                     if method == "mining.subscribe":
                         # For extracting extranonce from response
                         self.subscribe_id = msg_id
+                        self.subscribe_params = message.get("params", [])
+
+                        # Extract and store miner agent
+                        if (
+                            self.subscribe_params
+                            and len(self.subscribe_params) > 0
+                            and self.subscribe_params[0]
+                        ):
+                            self.miner_agent = str(self.subscribe_params[0])
+
+                        if self.stats:
+                            self.stats.set_miner_agent(self.subscribe_params)
+
                         logger.debug(
                             f"[{self.miner_id}] Tracking subscribe request ID: {msg_id}"
                         )
@@ -186,9 +535,22 @@ class MinerSession:
                                 )
 
                             self.stats.worker_name = self.worker_name
-                            logger.info(f"[{self.miner_id}] Worker: {self.worker_name}")
+                            logger.info(
+                                f"[{self.miner_id}] Worker: {self.worker_name} ({self.miner_agent})"
+                            )
 
-                        message["params"] = [self.pool_user, self.pool_pass]
+                            if self.on_authorized_callback:
+                                try:
+                                    await self.on_authorized_callback(self)
+                                except Exception as e:
+                                    logger.error(
+                                        f"[{self.miner_id}] Auth callback failed: {e}"
+                                    )
+
+                        message["params"] = [
+                            self.current_pool.user,
+                            self.current_pool.password,
+                        ]
                         logger.debug(
                             f"[{self.miner_id}] Replaced credentials for pool auth"
                         )
@@ -212,13 +574,13 @@ class MinerSession:
                             )
 
                         if params:
-                            params[0] = self.pool_user
+                            params[0] = self.current_pool.user
 
                     elif method == "mining.suggest_difficulty":
                         params = message.get("params", [])
                         if params:
                             logger.info(
-                                f"[{self.miner_id}] Miner suggested difficulty: {params[0]}"
+                                f"[{self.miner_id} ({self.miner_agent})] Miner suggested difficulty: {params[0]}"
                             )
 
                     log_stratum_message(
@@ -272,7 +634,7 @@ class MinerSession:
                             self.extranonce1 = result[1]
                             self.extranonce2_size = result[2]
                             logger.info(
-                                f"[{self.miner_id}] Got extranonce1={self.extranonce1}, "
+                                f"[{self.miner_id} ({self.miner_agent})] Got extranonce1={self.extranonce1}, "
                                 f"extranonce2_size={self.extranonce2_size}"
                             )
 
@@ -372,7 +734,7 @@ class MinerSession:
             accepted=accepted,
             difficulty=self.stats.difficulty,
             share_difficulty=actual_difficulty,
-            pool=f"{self.pool_host}:{self.pool_port}",
+            pool=self.current_pool.connection_string,
             error=json.dumps(error) if error else None,
         )
 
@@ -381,12 +743,12 @@ class MinerSession:
                 await self.db.insert_share(
                     miner=self.miner_id,
                     worker=submit_data["worker"],
-                    pool=f"{self.pool_host}:{self.pool_port}",
+                    pool=self.current_pool.connection_string,
                     pool_difficulty=self.stats.difficulty,
                     actual_difficulty=actual_difficulty,
                     block_hash=block_hash if "block_hash" in locals() else "",
                     pool_requested_difficulty=self.pool_difficulty,
-                    pool_label=self.pool_label,
+                    pool_label=self.current_pool.label,
                     share_timestamp=submit_data.get("received_at"),
                 )
             except Exception as e:
@@ -394,7 +756,7 @@ class MinerSession:
 
         if accepted:
             logger.info(
-                f"[{self.miner_id}] {submit_data['worker']} - Share accepted: "
+                f"[{self.miner_id} ({self.miner_agent})] {submit_data['worker']} - Share accepted: "
                 f"diff={actual_difficulty:.2f}"
             )
         else:
@@ -404,7 +766,7 @@ class MinerSession:
             elif reject_reason:
                 reason = reject_reason
             logger.info(
-                f"[{self.miner_id}] {submit_data['worker']} - Share rejected ({reason}): "
+                f"[{self.miner_id} ({self.miner_agent})] {submit_data['worker']} - Share rejected ({reason}): "
                 f"diff={actual_difficulty:.2f}"
             )
 
@@ -415,7 +777,7 @@ class MinerSession:
 
             if acceptance_rate < 30:
                 logger.warning(
-                    f"[{self.miner_id}] {submit_data.get('worker', 'unknown')} - "
+                    f"[{self.miner_id} ({self.miner_agent})] {submit_data.get('worker', 'unknown')} - "
                     f"Disconnecting: {acceptance_rate:.1f}% acceptance rate "
                     f"({self.stats.accepted}/{total_shares} accepted)"
                 )
