@@ -1,6 +1,4 @@
 """
-TEMPORARY - To be reviewed again with the new DB
-
 Marketplace API endpoints for hashrate order management.
 
 Provides REST API endpoints for managing marketplace orders:
@@ -9,15 +7,28 @@ Provides REST API endpoints for managing marketplace orders:
 - List connected miners across all proxy instances
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from src.storage.db import StatsDB
+from src.api.models import AssignMinersRequest, CreateOrderRequest
+from src.api.services.market_order_queries import (
+    create_order_with_assignments,
+    get_order as fetch_order,
+    get_orders as fetch_orders,
+    update_order_status,
+)
+from src.api.services.market_assignment_queries import (
+    ConflictError,
+    assign_miners_atomic,
+    delete_assignment,
+    get_miner_assignment,
+    get_order_assignments,
+)
+from src.storage.marketplace_db import MarketplaceDB
 from src.utils.logger import get_logger
 from src.utils.redis_client import RedisPublisher, RedisClient
 from src.utils.time_normalize import ensure_utc
@@ -28,64 +39,21 @@ router = APIRouter(prefix="/api/marketplace", tags=["Marketplace"])
 
 limiter = Limiter(key_func=get_remote_address)
 
-db: Optional[StatsDB] = None
+marketplace_db: Optional[MarketplaceDB] = None
 redis_publisher: Optional[RedisPublisher] = None
 redis_client: Optional[RedisClient] = None
 
 
 def set_dependencies(
-    stats_db: StatsDB,
+    db: MarketplaceDB,
     publisher: RedisPublisher,
     client: RedisClient,
 ) -> None:
     """Set module dependencies from app startup."""
-    global db, redis_publisher, redis_client
-    db = stats_db
+    global marketplace_db, redis_publisher, redis_client
+    marketplace_db = db
     redis_publisher = publisher
     redis_client = client
-
-
-# TEMPORARY - To be reviewed again with the new DB
-# ==================== Request/Response Models ====================
-
-
-class CreateOrderRequest(BaseModel):
-    order_id: str = Field(..., description="Unique order identifier")
-    host: str = Field(..., description="Pool host address")
-    port: int = Field(..., description="Pool port")
-    user: str = Field(..., description="Pool username")
-    password: str = Field(..., alias="pass", description="Pool password")
-    duration_seconds: Optional[int] = Field(
-        None, description="Order duration in seconds (None for permanent)"
-    )
-    miners: Optional[list[str]] = Field(
-        None, description="Optional list of miner IDs to assign immediately"
-    )
-
-    class Config:
-        populate_by_name = True
-
-
-class AssignMinersRequest(BaseModel):
-    miners: list[str] = Field(..., description="List of miner IDs (worker:ip format)")
-
-
-class OrderResponse(BaseModel):
-    order_id: str
-    host: str
-    port: int
-    user: str
-    expires_at: Optional[datetime]
-    created_at: datetime
-    status: str
-    assigned_miners: list[str] = []
-    miner_count: int = 0
-    remaining_seconds: Optional[float] = None
-
-
-class MinerResponse(BaseModel):
-    worker_ip: str
-    order_id: Optional[str] = None
 
 
 # ==================== Order Endpoints ====================
@@ -101,59 +69,62 @@ async def create_order(
     Create a new marketplace order.
 
     Optionally assign miners immediately by providing the 'miners' field.
+    If any miners are already assigned to other orders, the entire request
+    fails with a 409 Conflict error.
 
     Returns:
         Order status and assigned miners
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not redis_publisher:
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
-    existing = await db.get_order(order_request.order_id)
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Order {order_request.order_id} already exists",
-        )
-
-    expires_at = None
-    if order_request.duration_seconds is not None:
-        expires_at = (
-            datetime.now(timezone.utc).timestamp() + order_request.duration_seconds
-        )
-        expires_at = datetime.fromtimestamp(expires_at, tz=timezone.utc)
-
-    success = await db.create_order(
-        order_id=order_request.order_id,
-        host=order_request.host,
-        port=order_request.port,
-        user=order_request.user,
-        password=order_request.password,
-        expires_at=expires_at,
+    expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=order_request.duration_seconds
     )
 
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to create order")
+    miners_to_assign = order_request.miners or []
+
+    try:
+        result = await create_order_with_assignments(
+            pool=marketplace_db.pool,
+            order_id=order_request.order_id,
+            host=order_request.host,
+            port=order_request.port,
+            user=order_request.user,
+            password=order_request.password,
+            expires_at=expires_at,
+            worker_ips=miners_to_assign,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ConflictError as e:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": str(e),
+                "conflicts": e.conflicts,
+                "hint": "Remove miners from their current orders first",
+            },
+        )
 
     logger.info(
         f"Created order {order_request.order_id}: {order_request.host}:{order_request.port}"
     )
 
+    # Publish pool switches for connected miners
     assigned = []
     not_found = []
 
-    if order_request.miners:
-        connected_miners = (
-            await redis_client.get_connected_miners() if redis_client else []
-        )
-        connected_set = set(connected_miners)
+    if result["assigned"]:
+        connected_miners = await redis_client.get_connected_miners()
+        if not connected_miners:
+            raise HTTPException(status_code=503, detail="No connected miners found")
 
-        for worker_ip in order_request.miners:
-            await db.create_assignment(worker_ip, order_request.order_id)
-
-            if worker_ip in connected_set:
+        for worker_ip in result["assigned"]:
+            if worker_ip in connected_miners:
                 pool_config = {
                     "host": order_request.host,
                     "port": order_request.port,
@@ -170,10 +141,11 @@ async def create_order(
     response = {
         "status": "created",
         "order_id": order_request.order_id,
-        "expires_at": expires_at.isoformat() if expires_at else None,
+        "expires_at": expires_at.isoformat(),
         "assigned_miners": assigned,
     }
-    if order_request.miners:
+
+    if miners_to_assign:
         response["message"] = (
             f"Order created, {len(assigned)} miners switching to "
             f"{order_request.host}:{order_request.port}"
@@ -201,14 +173,16 @@ async def list_orders(
     Returns:
         List of order objects
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    orders = await db.get_orders(status=status)
+    orders = await fetch_orders(marketplace_db.pool, status=status)
 
-    enriched_orders = []
+    detailed_orders = []
     for order in orders:
-        assignments = await db.get_order_assignments(order["order_id"])
+        assignments = await get_order_assignments(
+            marketplace_db.pool, order["order_id"]
+        )
         assigned_miners = [a["worker_ip"] for a in assignments]
 
         remaining = None
@@ -220,7 +194,7 @@ async def list_orders(
                 ).total_seconds(),
             )
 
-        enriched_orders.append(
+        detailed_orders.append(
             {
                 "order_id": order["order_id"],
                 "host": order["host"],
@@ -239,7 +213,7 @@ async def list_orders(
             }
         )
 
-    return {"orders": enriched_orders, "total": len(enriched_orders)}
+    return {"orders": detailed_orders, "total": len(detailed_orders)}
 
 
 @router.get("/orders/{order_id}")
@@ -254,14 +228,14 @@ async def get_order(
     Returns:
         Order details with assigned miners
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
-    order = await db.get_order(order_id)
+    order = await fetch_order(marketplace_db.pool, order_id)
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    assignments = await db.get_order_assignments(order_id)
+    assignments = await get_order_assignments(marketplace_db.pool, order_id)
     assigned_miners = [a["worker_ip"] for a in assignments]
 
     remaining = None
@@ -299,17 +273,17 @@ async def cancel_order(
     Returns:
         Cancellation status and number of miners switched
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not redis_publisher:
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
-    order = await db.get_order(order_id)
+    order = await fetch_order(marketplace_db.pool, order_id)
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    assignments = await db.get_order_assignments(order_id)
+    assignments = await get_order_assignments(marketplace_db.pool, order_id)
 
     miners_switched = 0
     for assignment in assignments:
@@ -318,9 +292,9 @@ async def cancel_order(
         await redis_publisher.publish_switch_default(worker_ip)
         miners_switched += 1
 
-        await db.delete_assignment(worker_ip)
+        await delete_assignment(marketplace_db.pool, worker_ip)
 
-    await db.update_order_status(order_id, "cancelled")
+    await update_order_status(marketplace_db.pool, order_id, "cancelled")
 
     logger.info(f"Cancelled order {order_id}, switched {miners_switched} miners back")
 
@@ -345,64 +319,73 @@ async def assign_miners(
     """
     Assign miners to an existing order.
 
+    Miners already assigned to THIS order are skipped (idempotent).
+    If any miners are assigned to OTHER orders, the entire request
+    fails with a 409 Conflict error.
+
     Returns:
         Assignment status with list of assigned miners
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not redis_publisher:
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
-    order = await db.get_order(order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
-
-    if order["status"] != "active":
+    try:
+        result = await assign_miners_atomic(
+            pool=marketplace_db.pool,
+            order_id=order_id,
+            worker_ips=assign_request.miners,
+        )
+    except ValueError as e:
+        if "not found" in str(e):
+            raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=410, detail=str(e))
+    except ConflictError as e:
         raise HTTPException(
-            status_code=410,
-            detail=f"Order {order_id} is not active (status: {order['status']})",
+            status_code=409,
+            detail={
+                "error": str(e),
+                "conflicts": e.conflicts,
+                "hint": "Remove miners from their current orders first",
+            },
         )
 
-    # Check if order expired
-    if order["expires_at"] and ensure_utc(order["expires_at"]) <= datetime.now(
-        timezone.utc
-    ):
-        raise HTTPException(status_code=410, detail=f"Order {order_id} has expired")
-
-    connected_miners = await redis_client.get_connected_miners() if redis_client else []
-    connected_set = set(connected_miners)
-
+    # Publish pool switches for newly assigned connected miners
     assigned = []
     not_found = []
 
-    for worker_ip in assign_request.miners:
-        old_assignment = await db.get_miner_assignment(worker_ip)
-        if old_assignment and old_assignment["order_id"] != order_id:
-            await db.delete_assignment(worker_ip)
+    if result["assigned"]:
+        connected_miners = (
+            await redis_client.get_connected_miners() if redis_client else []
+        )
+        connected_set = set(connected_miners)
 
-        await db.create_assignment(worker_ip, order_id)
+        order = await fetch_order(marketplace_db.pool, order_id)
 
-        if worker_ip in connected_set:
-            pool_config = {
-                "host": order["host"],
-                "port": order["port"],
-                "user": order["user"],
-                "pass": order["password"],
-                "label": order_id,
-            }
-            await redis_publisher.publish_switch_pool(worker_ip, pool_config)
-            assigned.append(worker_ip)
-            logger.info(f"Assigned {worker_ip} to order {order_id}")
-        else:
-            not_found.append(worker_ip)
+        for worker_ip in result["assigned"]:
+            if worker_ip in connected_set:
+                pool_config = {
+                    "host": order["host"],
+                    "port": order["port"],
+                    "user": order["user"],
+                    "pass": order["password"],
+                    "label": order_id,
+                }
+                await redis_publisher.publish_switch_pool(worker_ip, pool_config)
+                assigned.append(worker_ip)
+                logger.info(f"Assigned {worker_ip} to order {order_id}")
+            else:
+                not_found.append(worker_ip)
 
-    all_assignments = await db.get_order_assignments(order_id)
+    all_assignments = await get_order_assignments(marketplace_db.pool, order_id)
 
     response = {
         "status": "assigned",
         "order_id": order_id,
         "newly_assigned": assigned,
+        "skipped": result["skipped"],
         "total_miners": len(all_assignments),
     }
 
@@ -428,24 +411,24 @@ async def remove_miner(
     Returns:
         Removal status
     """
-    if not db or not db.client:
+    if not marketplace_db or not marketplace_db.pool:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     if not redis_publisher:
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
-    order = await db.get_order(order_id)
+    order = await fetch_order(marketplace_db.pool, order_id)
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    assignment = await db.get_miner_assignment(worker_ip)
+    assignment = await get_miner_assignment(marketplace_db.pool, worker_ip)
     if not assignment or assignment["order_id"] != order_id:
         raise HTTPException(
             status_code=404,
             detail=f"Miner {worker_ip} not assigned to order {order_id}",
         )
 
-    await db.delete_assignment(worker_ip)
+    await delete_assignment(marketplace_db.pool, worker_ip)
 
     await redis_publisher.publish_switch_default(worker_ip)
 
@@ -482,7 +465,11 @@ async def list_miners(
 
     miners = []
     for worker_ip in connected_miners:
-        assignment = await db.get_miner_assignment(worker_ip) if db else None
+        assignment = (
+            await get_miner_assignment(marketplace_db.pool, worker_ip)
+            if marketplace_db and marketplace_db.pool
+            else None
+        )
         miners.append(
             {
                 "worker_ip": worker_ip,
