@@ -11,3 +11,4 @@ python-multipart==0.0.6
 httpx==0.25.2
 tenacity>=8.0.0
 redis[hiredis]>=5.0.0
+asyncpg>=0.29.0
