@@ -23,6 +23,7 @@ from src.api.tasks.startup import (
     schedule_background_tasks,
 )
 from src.storage.db import StatsDB
+from src.storage.marketplace_db import MarketplaceDB
 from src.utils.env import env_bool
 from src.utils.logger import get_logger
 
@@ -142,52 +143,26 @@ MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
 
 db: Optional[StatsDB] = None
+marketplace_db: Optional[MarketplaceDB] = None
 redis_publisher: Optional[RedisPublisher] = None
 redis_client: Optional[RedisClient] = None
-
-
-async def order_expiry_monitor() -> None:
-    """
-    Background task to check for expired orders and switch miners back.
-
-    Runs every 10 seconds, checks all active orders for expiry.
-    """
-    while True:
-        await asyncio.sleep(10)
-
-        if not db or not db.client or not redis_publisher:
-            continue
-
-        try:
-            expired_orders = await db.get_expired_orders()
-
-            for order in expired_orders:
-                order_id = order["order_id"]
-                logger.info(f"Order {order_id} expired")
-
-                assignments = await db.get_order_assignments(order_id)
-
-                for assignment in assignments:
-                    worker_ip = assignment["worker_ip"]
-                    await redis_publisher.publish_switch_default(worker_ip)
-                    await db.delete_assignment(worker_ip)
-
-                await db.update_order_status(order_id, "expired")
-                logger.info(f"Expired order {order_id}, switched {len(assignments)} miners back")
-
-        except Exception as e:
-            logger.error(f"Error in order expiry monitor: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle."""
-    global db, redis_publisher, redis_client
+    global db, marketplace_db, redis_publisher, redis_client
     db = StatsDB()
     if await db.init():
         logger.info("API connected to ClickHouse successfully")
     else:
         logger.warning("API running without database connection")
+
+    marketplace_db = MarketplaceDB()
+    if await marketplace_db.init():
+        logger.info("API connected to PostgreSQL (marketplace) successfully")
+    else:
+        logger.warning("API running without marketplace database connection")
 
     redis_publisher = RedisPublisher()
     redis_client = RedisClient()
@@ -202,8 +177,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("API running without Redis client connection")
 
-    if db and redis_publisher and redis_client:
-        marketplace.set_dependencies(db, redis_publisher, redis_client)
+    if marketplace_db and redis_publisher and redis_client:
+        marketplace.set_dependencies(marketplace_db, redis_publisher, redis_client)
 
     logger.info("API starting with coin configuration: %s", ACTIVE_COIN.upper())
 
@@ -216,19 +191,12 @@ async def lifespan(app: FastAPI):
             tides=ENABLE_TIDES_MONITORING,
             tides_rewards=ENABLE_TIDES_REWARDS_MONITORING,
         ),
+        marketplace_pool=marketplace_db.pool if marketplace_db else None,
+        redis_publisher=redis_publisher,
     )
     background_tasks = schedule_background_tasks(factories)
 
-    expiry_task = asyncio.create_task(order_expiry_monitor())
-    logger.info("Order expiry monitor started")
-
     yield
-
-    expiry_task.cancel()
-    try:
-        await expiry_task
-    except asyncio.CancelledError:
-        pass
 
     for task in background_tasks:
         task.cancel()
@@ -244,6 +212,10 @@ async def lifespan(app: FastAPI):
     if redis_client:
         await redis_client.close()
         logger.info("Redis client connection closed")
+
+    if marketplace_db:
+        await marketplace_db.close()
+        logger.info("Marketplace database connection closed")
 
     if db:
         await db.close()
@@ -304,10 +276,14 @@ async def request_logging_middleware(request: Request, call_next):
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health_check():
     """Health check endpoint (no auth required)."""
+    db_ok = db and db.client
+    marketplace_ok = marketplace_db and marketplace_db.pool
+    all_ok = db_ok and marketplace_ok
     return {
-        "status": "ok",
+        "status": "ok" if all_ok else "degraded",
         "timestamp": int(time.time()),
-        "database": "connected" if db and db.client else "disconnected",
+        "database": "connected" if db_ok else "disconnected",
+        "marketplace_db": "connected" if marketplace_ok else "disconnected",
     }
 
 
