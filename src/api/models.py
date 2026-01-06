@@ -1,6 +1,7 @@
+import re
 from typing import Any, Dict, List, Optional
 from datetime import datetime
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, field_validator
 from src.utils.time_normalize import to_iso_z
 
 
@@ -10,7 +11,10 @@ class HealthResponse(BaseModel):
     status: str = Field(description="Service status")
     timestamp: int = Field(description="Unix timestamp")
     database: str = Field(
-        description="Database connection status: 'connected' or 'disconnected'"
+        description="ClickHouse connection status: 'connected' or 'disconnected'"
+    )
+    marketplace_db: str = Field(
+        description="PostgreSQL marketplace connection status: 'connected' or 'disconnected'"
     )
 
 
@@ -600,3 +604,45 @@ class BalanceUpdateResponse(BaseModel):
     old_balance: UserBalance = Field(description="Previous balance")
     new_balance: UserBalance = Field(description="Updated balance")
     message: str = Field(description="Result message")
+
+
+# ==================== Marketplace Models ====================
+
+
+class CreateOrderRequest(BaseModel):
+    order_id: str = Field(..., description="Unique order identifier")
+    host: str = Field(..., description="Pool host address")
+    port: int = Field(..., ge=1, le=65535, description="Pool port (1-65535)")
+    user: str = Field(..., description="Pool username")
+    password: str = Field(..., alias="pass", description="Pool password")
+    duration_seconds: int = Field(
+        ..., gt=0, description="Order duration in seconds (required, must be > 0)"
+    )
+    miners: Optional[List[str]] = Field(
+        None, description="Optional list of miner IDs to assign immediately"
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class AssignMinersRequest(BaseModel):
+    miners: List[str] = Field(..., description="List of miner IDs (worker:ip format)")
+
+
+class OrderResponse(BaseModel):
+    order_id: str
+    host: str
+    port: int
+    user: str
+    expires_at: Optional[datetime]
+    created_at: datetime
+    status: str
+    assigned_miners: List[str] = []
+    miner_count: int = 0
+    remaining_seconds: Optional[float] = None
+
+
+class MinerResponse(BaseModel):
+    worker_ip: str
+    order_id: Optional[str] = None
