@@ -15,6 +15,12 @@ from .core.command_listener import CommandListener
 from .core.app_state import AppState
 from .monitoring.stats import StatsManager
 from .storage.db import StatsDB
+from .storage.marketplace_db import MarketplaceDB
+from .api.services.market_order_queries import get_order
+from .api.services.market_assignment_queries import (
+    get_miner_assignment,
+    delete_assignment,
+)
 from .utils.logger import get_logger
 from .utils.redis_client import RedisClient
 from .utils.time_normalize import ensure_utc
@@ -33,7 +39,7 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
     Callback invoked when a miner completes authorization.
 
     Registers the session in miner_registry for per-miner control.
-    Also checks ClickHouse if the miner has an active order assignment.
+    Also checks PostgreSQL marketplace DB if the miner has an active order assignment.
     """
     registry_key = session.get_registry_key()
     if not registry_key:
@@ -51,21 +57,21 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
             f"📝 Registered miner in registry: {registry_key} ({session.miner_agent})"
         )
 
-    if not state.stats_db or not state.stats_db.client:
+    if not state.marketplace_db or not state.marketplace_db.pool:
         return
 
     try:
-        assignment = await state.stats_db.get_miner_assignment(registry_key)
+        assignment = await get_miner_assignment(state.marketplace_db.pool, registry_key)
         if not assignment:
             return
 
         order_id = assignment["order_id"]
-        order = await state.stats_db.get_order(order_id)
+        order = await get_order(state.marketplace_db.pool, order_id)
 
         if not order:
             # Order was deleted, clean up assignment
             logger.info(f"Order {order_id} no longer exists, deleting assignment")
-            await state.stats_db.delete_assignment(registry_key)
+            await delete_assignment(state.marketplace_db.pool, registry_key)
             return
 
         if order["status"] != "active":
@@ -366,6 +372,15 @@ async def main() -> None:
     else:
         logger.info("ClickHouse is disabled or not available")
 
+    state.marketplace_db = MarketplaceDB()
+    marketplace_initialized = await state.marketplace_db.init()
+    if marketplace_initialized:
+        logger.info(
+            f"✅ PostgreSQL marketplace DB initialized at {state.marketplace_db.host}:{state.marketplace_db.port}"
+        )
+    else:
+        logger.info("PostgreSQL marketplace DB is disabled or not available")
+
     state.redis_client = RedisClient()
     redis_connected = await state.redis_client.connect()
     if redis_connected:
@@ -451,6 +466,10 @@ async def shutdown(state: AppState) -> None:
     if state.redis_client:
         await state.redis_client.close()
         logger.info("Redis connection closed")
+
+    if state.marketplace_db:
+        await state.marketplace_db.close()
+        logger.info("PostgreSQL marketplace connection closed")
 
     if state.stats_db:
         await state.stats_db.close()
