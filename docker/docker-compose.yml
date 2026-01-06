@@ -30,6 +30,11 @@ services:
       - CLICKHOUSE_PORT=${CLICKHOUSE_PORT:-8123}
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-taohash123}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - POSTGRES_USER=${POSTGRES_USER:-taohash}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-taohash123}
+      - POSTGRES_DB=${POSTGRES_DB:-marketplace}
       - REDIS_HOST=redis
       - LOG_FILE=/app/logs/proxy.log
     restart: unless-stopped
@@ -37,6 +42,8 @@ services:
       clickhouse:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - taohash-network
@@ -57,6 +64,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       CLICKHOUSE_HOST: clickhouse
+      POSTGRES_HOST: postgres
       REDIS_HOST: redis
       COIN: ${COIN:-btc}
       LOG_FILE: /app/logs/api.log
@@ -65,6 +73,8 @@ services:
       clickhouse:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     networks:
       - taohash-network
@@ -109,6 +119,26 @@ services:
     networks:
       - taohash-network
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: taohash-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-taohash}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-taohash123}
+      - POSTGRES_DB=${POSTGRES_DB:-marketplace}
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-taohash} -d ${POSTGRES_DB:-marketplace}" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - taohash-network
+
   aggregator:
     build:
       context: ..
@@ -132,4 +162,6 @@ networks:
 
 volumes:
   clickhouse_data:
+    driver: local
+  postgres_data:
     driver: local
