@@ -13,6 +13,7 @@ import socket
 if TYPE_CHECKING:
     from ..monitoring.stats import StatsManager
     from ..storage.db import StatsDB
+    from ..storage.marketplace_db import MarketplaceDB
     from ..utils.redis_client import RedisClient
     from .command_listener import CommandListener
     from .miner_session import MinerSession
@@ -34,8 +35,11 @@ class AppState:
     # Stats manager for tracking miner statistics
     stats_manager: Optional["StatsManager"] = None
 
-    # Database connection (ClickHouse)
+    # Database connection (ClickHouse) for mining statistics
     stats_db: Optional["StatsDB"] = None
+
+    # Database connection (PostgreSQL) for marketplace orders/assignments
+    marketplace_db: Optional["MarketplaceDB"] = None
 
     # Miner registry for command routing (worker:ip -> MinerSession)
     miner_registry: Dict[str, "MinerSession"] = field(default_factory=dict)
