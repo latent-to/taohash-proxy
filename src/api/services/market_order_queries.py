@@ -1,6 +1,6 @@
 """Marketplace order queries and atomic operations."""
 
-from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 import asyncpg
@@ -17,10 +17,12 @@ async def create_order(
     port: int,
     user: str,
     password: str,
-    expires_at: Optional[datetime] = None,
+    price_btc_eh_day: Decimal,
+    amount_btc: Decimal,
+    limit_eh_s: Optional[Decimal] = None,
 ) -> bool:
     """
-    Create a new marketplace order.
+    Create a new share-based marketplace order.
 
     Args:
         pool: asyncpg connection pool
@@ -29,7 +31,9 @@ async def create_order(
         port: Pool port
         user: Pool username
         password: Pool password
-        expires_at: Optional expiry datetime (None for permanent)
+        price_btc_eh_day: Price in BTC per Exahash per Day
+        amount_btc: Total budget in BTC (initial balance)
+        limit_eh_s: Optional hashrate speed cap in EH/s
 
     Returns:
         True if created successfully, False otherwise
@@ -38,15 +42,20 @@ async def create_order(
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO marketplace_orders (order_id, host, port, username, password, expires_at, status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                INSERT INTO marketplace_orders (
+                    order_id, host, port, username, password,
+                    price_btc_eh_day, amount_btc, balance_btc, limit_eh_s, status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, 'active')
                 """,
                 order_id,
                 host,
                 port,
                 user,
                 password,
-                expires_at,
+                price_btc_eh_day,
+                amount_btc,
+                limit_eh_s,
             )
         logger.info(f"Created marketplace order: {order_id}")
         return True
@@ -70,8 +79,11 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT order_id, host, port, username, password, expires_at,
-                       created_at, updated_at, status, cancelled_at
+                SELECT order_id, host, port, username, password,
+                       price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
+                       created_at, updated_at, status,
+                       fulfilled_at, paused_at, cancelled_at,
+                       total_shares_credited, total_share_value_credited, last_share_credited_at
                 FROM marketplace_orders WHERE order_id = $1
                 """,
                 order_id,
@@ -84,11 +96,19 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
                     "port": row["port"],
                     "user": row["username"],
                     "password": row["password"],
-                    "expires_at": row["expires_at"],
+                    "price_btc_eh_day": row["price_btc_eh_day"],
+                    "amount_btc": row["amount_btc"],
+                    "balance_btc": row["balance_btc"],
+                    "limit_eh_s": row["limit_eh_s"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                     "status": row["status"],
+                    "fulfilled_at": row["fulfilled_at"],
+                    "paused_at": row["paused_at"],
                     "cancelled_at": row["cancelled_at"],
+                    "total_shares_credited": row["total_shares_credited"],
+                    "total_share_value_credited": row["total_share_value_credited"],
+                    "last_share_credited_at": row["last_share_credited_at"],
                 }
             return None
     except Exception as e:
@@ -102,30 +122,28 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
 
     Args:
         pool: asyncpg connection pool
-        status: Optional filter by status ('active', 'expired', 'cancelled')
+        status: Optional filter by status ('active', 'paused', 'fulfilled', 'cancelled')
 
     Returns:
         List of order dicts
     """
     try:
         async with pool.acquire() as conn:
+            base_query = """
+                SELECT order_id, host, port, username, password,
+                       price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
+                       created_at, updated_at, status,
+                       fulfilled_at, paused_at, cancelled_at,
+                       total_shares_credited, total_share_value_credited, last_share_credited_at
+                FROM marketplace_orders
+            """
             if status:
                 rows = await conn.fetch(
-                    """
-                    SELECT order_id, host, port, username, password, expires_at,
-                           created_at, updated_at, status, cancelled_at
-                    FROM marketplace_orders WHERE status = $1 ORDER BY created_at DESC
-                    """,
+                    base_query + " WHERE status = $1 ORDER BY created_at DESC",
                     status,
                 )
             else:
-                rows = await conn.fetch(
-                    """
-                    SELECT order_id, host, port, username, password, expires_at,
-                           created_at, updated_at, status, cancelled_at
-                    FROM marketplace_orders ORDER BY created_at DESC
-                    """
-                )
+                rows = await conn.fetch(base_query + " ORDER BY created_at DESC")
 
             orders = []
             for row in rows:
@@ -136,11 +154,19 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
                         "port": row["port"],
                         "user": row["username"],
                         "password": row["password"],
-                        "expires_at": row["expires_at"],
+                        "price_btc_eh_day": row["price_btc_eh_day"],
+                        "amount_btc": row["amount_btc"],
+                        "balance_btc": row["balance_btc"],
+                        "limit_eh_s": row["limit_eh_s"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
                         "status": row["status"],
+                        "fulfilled_at": row["fulfilled_at"],
+                        "paused_at": row["paused_at"],
                         "cancelled_at": row["cancelled_at"],
+                        "total_shares_credited": row["total_shares_credited"],
+                        "total_share_value_credited": row["total_share_value_credited"],
+                        "last_share_credited_at": row["last_share_credited_at"],
                     }
                 )
             return orders
@@ -156,7 +182,7 @@ async def update_order_status(pool: asyncpg.Pool, order_id: str, status: str) ->
     Args:
         pool: asyncpg connection pool
         order_id: Order identifier
-        status: New status ('active', 'expired', 'cancelled')
+        status: New status ('active', 'paused', 'fulfilled', 'cancelled')
 
     Returns:
         True if updated successfully, False otherwise
@@ -168,6 +194,37 @@ async def update_order_status(pool: asyncpg.Pool, order_id: str, status: str) ->
                     """
                     UPDATE marketplace_orders
                     SET status = $1, updated_at = NOW(), cancelled_at = NOW()
+                    WHERE order_id = $2
+                    """,
+                    status,
+                    order_id,
+                )
+            elif status == "fulfilled":
+                result = await conn.execute(
+                    """
+                    UPDATE marketplace_orders
+                    SET status = $1, updated_at = NOW(), fulfilled_at = NOW()
+                    WHERE order_id = $2
+                    """,
+                    status,
+                    order_id,
+                )
+            elif status == "paused":
+                result = await conn.execute(
+                    """
+                    UPDATE marketplace_orders
+                    SET status = $1, updated_at = NOW(), paused_at = NOW()
+                    WHERE order_id = $2
+                    """,
+                    status,
+                    order_id,
+                )
+            elif status == "active":
+                # Resuming from paused - clear paused_at
+                result = await conn.execute(
+                    """
+                    UPDATE marketplace_orders
+                    SET status = $1, updated_at = NOW(), paused_at = NULL
                     WHERE order_id = $2
                     """,
                     status,
@@ -192,24 +249,28 @@ async def update_order_status(pool: asyncpg.Pool, order_id: str, status: str) ->
         return False
 
 
-async def get_expired_orders(pool: asyncpg.Pool) -> list[dict]:
+async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
     """
-    Get all orders that have expired but still have 'active' status.
+    Get all orders with 'active' status for balance processing.
 
     Args:
         pool: asyncpg connection pool
 
     Returns:
-        List of expired order dicts
+        List of active order dicts
     """
     try:
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT order_id, host, port, username, password, expires_at,
-                       created_at, updated_at, status, cancelled_at
+                SELECT order_id, host, port, username, password,
+                       price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
+                       created_at, updated_at, status,
+                       fulfilled_at, paused_at, cancelled_at,
+                       total_shares_credited, total_share_value_credited, last_share_credited_at
                 FROM marketplace_orders
-                WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= NOW()
+                WHERE status = 'active' AND balance_btc > 0
+                ORDER BY created_at ASC
                 """
             )
 
@@ -222,16 +283,24 @@ async def get_expired_orders(pool: asyncpg.Pool) -> list[dict]:
                         "port": row["port"],
                         "user": row["username"],
                         "password": row["password"],
-                        "expires_at": row["expires_at"],
+                        "price_btc_eh_day": row["price_btc_eh_day"],
+                        "amount_btc": row["amount_btc"],
+                        "balance_btc": row["balance_btc"],
+                        "limit_eh_s": row["limit_eh_s"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
                         "status": row["status"],
+                        "fulfilled_at": row["fulfilled_at"],
+                        "paused_at": row["paused_at"],
                         "cancelled_at": row["cancelled_at"],
+                        "total_shares_credited": row["total_shares_credited"],
+                        "total_share_value_credited": row["total_share_value_credited"],
+                        "last_share_credited_at": row["last_share_credited_at"],
                     }
                 )
             return orders
     except Exception as e:
-        logger.error(f"Failed to get expired orders: {e}")
+        logger.error(f"Failed to get active orders: {e}")
         return []
 
 
@@ -242,7 +311,9 @@ async def create_order_with_assignments(
     port: int,
     user: str,
     password: str,
-    expires_at: Optional[datetime],
+    price_btc_eh_day: Decimal,
+    amount_btc: Decimal,
+    limit_eh_s: Optional[Decimal],
     worker_ips: list[str],
 ) -> dict:
     """
@@ -257,7 +328,9 @@ async def create_order_with_assignments(
         port: Pool port
         user: Pool username
         password: Pool password
-        expires_at: Optional expiry datetime
+        price_btc_eh_day: Price in BTC per Exahash per Day
+        amount_btc: Total budget in BTC (initial balance)
+        limit_eh_s: Optional hashrate speed cap in EH/s
         worker_ips: List of miner identifiers to assign
 
     Returns:
@@ -280,19 +353,23 @@ async def create_order_with_assignments(
             if existing:
                 raise ValueError(f"Order {order_id} already exists")
 
-            # Create order
+            # Create order with share-based pricing
             await conn.execute(
                 """
-                INSERT INTO marketplace_orders
-                (order_id, host, port, username, password, expires_at, status)
-                VALUES ($1, $2, $3, $4, $5, $6, 'active')
+                INSERT INTO marketplace_orders (
+                    order_id, host, port, username, password,
+                    price_btc_eh_day, amount_btc, balance_btc, limit_eh_s, status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, 'active')
                 """,
                 order_id,
                 host,
                 port,
                 user,
                 password,
-                expires_at,
+                price_btc_eh_day,
+                amount_btc,
+                limit_eh_s,
             )
 
             if not worker_ips:
