@@ -24,15 +24,12 @@ class StartupFlags:
     difficulty: bool
     tides: bool
     tides_rewards: bool
-    order_expiry: bool = True
 
 
 def build_background_coroutines(
     coin: str,
     db,
     flags: StartupFlags,
-    marketplace_pool=None,
-    redis_publisher=None,
 ) -> List[Awaitable]:
     """Return coroutine objects for background tasks."""
 
@@ -76,14 +73,6 @@ def build_background_coroutines(
             filtered.append(func(db))
         else:
             logger.info("%s is disabled", label)
-
-    if flags.order_expiry and marketplace_pool and redis_publisher:
-        from src.api.tasks.order_expiry import order_expiry_monitor_task
-
-        logger.info("Order expiry monitoring is enabled")
-        filtered.append(order_expiry_monitor_task(marketplace_pool, redis_publisher))
-    else:
-        logger.info("Order expiry monitoring is disabled")
 
     return filtered
 
