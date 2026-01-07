@@ -7,7 +7,6 @@ Provides REST API endpoints for managing marketplace orders:
 - List connected miners across all proxy instances
 """
 
-from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -24,6 +23,7 @@ from src.api.services.market_order_queries import (
 from src.api.services.market_assignment_queries import (
     ConflictError,
     assign_miners_atomic,
+    clear_order_assignments,
     delete_assignment,
     get_miner_assignment,
     get_order_assignments,
@@ -31,7 +31,6 @@ from src.api.services.market_assignment_queries import (
 from src.storage.marketplace_db import MarketplaceDB
 from src.utils.logger import get_logger
 from src.utils.redis_client import RedisPublisher, RedisClient
-from src.utils.time_normalize import ensure_utc
 
 logger = get_logger(__name__)
 
@@ -81,10 +80,6 @@ async def create_order(
     if not redis_publisher:
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
-        seconds=order_request.duration_seconds
-    )
-
     miners_to_assign = order_request.miners or []
 
     try:
@@ -95,7 +90,9 @@ async def create_order(
             port=order_request.port,
             user=order_request.user,
             password=order_request.password,
-            expires_at=expires_at,
+            price_btc_eh_day=order_request.price_btc_eh_day,
+            amount_btc=order_request.amount_btc,
+            limit_eh_s=order_request.limit_eh_s,
             worker_ips=miners_to_assign,
         )
     except ValueError as e:
@@ -141,7 +138,12 @@ async def create_order(
     response = {
         "status": "created",
         "order_id": order_request.order_id,
-        "expires_at": expires_at.isoformat(),
+        "price_btc_eh_day": str(order_request.price_btc_eh_day),
+        "amount_btc": str(order_request.amount_btc),
+        "balance_btc": str(order_request.amount_btc),
+        "limit_eh_s": str(order_request.limit_eh_s)
+        if order_request.limit_eh_s
+        else None,
         "assigned_miners": assigned,
     }
 
@@ -168,7 +170,7 @@ async def list_orders(
     List all marketplace orders.
 
     Query parameters:
-        status: Optional filter by status ('active', 'expired', 'cancelled')
+        status: Optional filter by status ('active', 'paused', 'fulfilled', 'cancelled')
 
     Returns:
         List of order objects
@@ -185,31 +187,37 @@ async def list_orders(
         )
         assigned_miners = [a["worker_ip"] for a in assignments]
 
-        remaining = None
-        if order["expires_at"]:
-            remaining = max(
-                0,
-                (
-                    ensure_utc(order["expires_at"]) - datetime.now(timezone.utc)
-                ).total_seconds(),
-            )
-
         detailed_orders.append(
             {
                 "order_id": order["order_id"],
                 "host": order["host"],
                 "port": order["port"],
                 "user": order["user"],
-                "expires_at": order["expires_at"].isoformat()
-                if order["expires_at"]
-                else None,
+                "status": order["status"],
                 "created_at": order["created_at"].isoformat()
                 if order["created_at"]
                 else None,
-                "status": order["status"],
+                # Share-based pricing
+                "price_btc_eh_day": str(order["price_btc_eh_day"]),
+                "amount_btc": str(order["amount_btc"]),
+                "balance_btc": str(order["balance_btc"]),
+                "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
+                # Completion tracking
+                "fulfilled_at": order["fulfilled_at"].isoformat()
+                if order["fulfilled_at"]
+                else None,
+                "paused_at": order["paused_at"].isoformat()
+                if order["paused_at"]
+                else None,
+                "cancelled_at": order["cancelled_at"].isoformat()
+                if order["cancelled_at"]
+                else None,
+                # Share tracking
+                "total_shares_credited": order["total_shares_credited"],
+                "total_share_value_credited": str(order["total_share_value_credited"]),
+                # Miners
                 "assigned_miners": assigned_miners,
                 "miner_count": len(assigned_miners),
-                "remaining_seconds": remaining,
             }
         )
 
@@ -238,26 +246,32 @@ async def get_order(
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
     assigned_miners = [a["worker_ip"] for a in assignments]
 
-    remaining = None
-    if order["expires_at"]:
-        remaining = max(
-            0,
-            (
-                ensure_utc(order["expires_at"]) - datetime.now(timezone.utc)
-            ).total_seconds(),
-        )
-
     return {
         "order_id": order["order_id"],
         "host": order["host"],
         "port": order["port"],
         "user": order["user"],
-        "expires_at": order["expires_at"].isoformat() if order["expires_at"] else None,
-        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
         "status": order["status"],
+        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
+        # Share-based pricing
+        "price_btc_eh_day": str(order["price_btc_eh_day"]),
+        "amount_btc": str(order["amount_btc"]),
+        "balance_btc": str(order["balance_btc"]),
+        "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
+        # Completion tracking
+        "fulfilled_at": order["fulfilled_at"].isoformat()
+        if order["fulfilled_at"]
+        else None,
+        "paused_at": order["paused_at"].isoformat() if order["paused_at"] else None,
+        "cancelled_at": order["cancelled_at"].isoformat()
+        if order["cancelled_at"]
+        else None,
+        # Share tracking
+        "total_shares_credited": order["total_shares_credited"],
+        "total_share_value_credited": str(order["total_share_value_credited"]),
+        # Miners
         "assigned_miners": assigned_miners,
         "miner_count": len(assigned_miners),
-        "remaining_seconds": remaining,
     }
 
 
@@ -285,16 +299,16 @@ async def cancel_order(
 
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
 
-    miners_switched = 0
+    # Switch all assigned miners back to default pool
     for assignment in assignments:
-        worker_ip = assignment["worker_ip"]
+        await redis_publisher.publish_switch_default(assignment["worker_ip"])
 
-        await redis_publisher.publish_switch_default(worker_ip)
-        miners_switched += 1
-
-        await delete_assignment(marketplace_db.pool, worker_ip)
+    # Mark all assignments as cancelled
+    await clear_order_assignments(marketplace_db.pool, order_id, status="cancelled")
 
     await update_order_status(marketplace_db.pool, order_id, "cancelled")
+
+    miners_switched = len(assignments)
 
     logger.info(f"Cancelled order {order_id}, switched {miners_switched} miners back")
 
