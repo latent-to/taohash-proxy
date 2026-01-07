@@ -81,11 +81,22 @@ class MarketplaceDB:
                     port INT NOT NULL,
                     username TEXT NOT NULL,
                     password TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('active','expired','cancelled')) DEFAULT 'active',
-                    expires_at TIMESTAMPTZ,
+                    status TEXT NOT NULL CHECK (status IN ('active','paused','fulfilled','cancelled')) DEFAULT 'active',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    cancelled_at TIMESTAMPTZ
+                    cancelled_at TIMESTAMPTZ,
+
+                    price_btc_eh_day DECIMAL(28,20) NOT NULL,
+                    amount_btc DECIMAL(28,20) NOT NULL,
+                    balance_btc DECIMAL(28,20) NOT NULL,
+                    limit_eh_s DECIMAL(28,20),
+
+                    fulfilled_at TIMESTAMPTZ,
+                    paused_at TIMESTAMPTZ,
+
+                    total_shares_credited BIGINT DEFAULT 0,
+                    total_share_value_credited DECIMAL(28,20) DEFAULT 0,
+                    last_share_credited_at TIMESTAMPTZ
                 )
             """)
 
@@ -94,16 +105,16 @@ class MarketplaceDB:
                     assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     worker_ip TEXT NOT NULL,
                     order_id TEXT NOT NULL REFERENCES marketplace_orders(order_id) ON DELETE CASCADE,
-                    status TEXT NOT NULL CHECK (status IN ('active','expired','cancelled')) DEFAULT 'active',
+                    status TEXT NOT NULL CHECK (status IN ('active','completed','cancelled')) DEFAULT 'active',
                     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     unassigned_at TIMESTAMPTZ,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
             """)
 
-            # Filtering orders by status and finding expired orders
+            # Filtering orders by status and balance for share-based processing
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_orders_status_expires ON marketplace_orders(status, expires_at)"
+                "CREATE INDEX IF NOT EXISTS idx_orders_status_balance ON marketplace_orders(status, balance_btc)"
             )
             # Partial unique index: only one active assignment per worker
             await conn.execute(
