@@ -191,8 +191,6 @@ async def lifespan(app: FastAPI):
             tides=ENABLE_TIDES_MONITORING,
             tides_rewards=ENABLE_TIDES_REWARDS_MONITORING,
         ),
-        marketplace_pool=marketplace_db.pool if marketplace_db else None,
-        redis_publisher=redis_publisher,
     )
     background_tasks = schedule_background_tasks(factories)
 
