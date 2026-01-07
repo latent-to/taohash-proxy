@@ -23,7 +23,6 @@ from .api.services.market_assignment_queries import (
 )
 from .utils.logger import get_logger
 from .utils.redis_client import RedisClient
-from .utils.time_normalize import ensure_utc
 from .utils.constants import (
     RELOAD_API_PORT,
     RELOAD_API_HOST,
@@ -80,10 +79,10 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
             )
             return
 
-        if order["expires_at"] and ensure_utc(order["expires_at"]) <= datetime.now(
-            timezone.utc
-        ):
-            logger.info(f"⏰ Order {order_id} for miner {registry_key} has expired")
+        if order["balance_btc"] <= 0:
+            logger.info(
+                f"⏰ Order {order_id} for miner {registry_key} has no remaining balance"
+            )
             return
 
         logger.info(
