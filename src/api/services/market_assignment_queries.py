@@ -1,6 +1,5 @@
 """Marketplace miner assignment queries and atomic operations."""
 
-from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -143,7 +142,7 @@ async def get_order_assignments(
 
 async def delete_assignment(pool: asyncpg.Pool, worker_ip: str) -> bool:
     """
-    Mark a miner's active assignment as expired.
+    Mark a miner's active assignment as completed.
 
     Only affects active assignments to avoid clobbering history.
 
@@ -152,34 +151,39 @@ async def delete_assignment(pool: asyncpg.Pool, worker_ip: str) -> bool:
         worker_ip: Miner identifier (worker:ip format)
 
     Returns:
-        True if an assignment was expired, False otherwise
+        True if an assignment was completed, False otherwise
     """
     try:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 """
                 UPDATE miner_assignments
-                SET status = 'expired', unassigned_at = NOW(), updated_at = NOW()
+                SET status = 'completed', unassigned_at = NOW(), updated_at = NOW()
                 WHERE worker_ip = $1 AND status = 'active'
                 """,
                 worker_ip,
             )
             updated = result != "UPDATE 0"
             if updated:
-                logger.info(f"Expired assignment for miner {worker_ip}")
+                logger.info(f"Completed assignment for miner {worker_ip}")
             return updated
     except Exception as e:
         logger.error(f"Failed to delete assignment for {worker_ip}: {e}")
         return False
 
 
-async def clear_order_assignments(pool: asyncpg.Pool, order_id: str) -> int:
+async def clear_order_assignments(
+    pool: asyncpg.Pool,
+    order_id: str,
+    status: str = "completed",
+) -> int:
     """
     Clear all active miner assignments for a specific order.
 
     Args:
         pool: asyncpg connection pool
         order_id: Order identifier
+        status: Status to set ('completed' or 'cancelled', default: 'completed')
 
     Returns:
         Number of assignments cleared
@@ -189,15 +193,18 @@ async def clear_order_assignments(pool: asyncpg.Pool, order_id: str) -> int:
             result = await conn.execute(
                 """
                 UPDATE miner_assignments
-                SET status = 'expired', unassigned_at = NOW(), updated_at = NOW()
+                SET status = $2, unassigned_at = NOW(), updated_at = NOW()
                 WHERE order_id = $1 AND status = 'active'
                 """,
                 order_id,
+                status,
             )
             # Result format is "UPDATE N"
             count = int(result.split()[-1]) if result else 0
             if count > 0:
-                logger.info(f"Cleared {count} assignments for order {order_id}")
+                logger.info(
+                    f"Cleared {count} assignments for order {order_id} (status={status})"
+                )
             return count
     except Exception as e:
         logger.error(f"Failed to clear assignments for order {order_id}: {e}")
@@ -209,7 +216,7 @@ async def get_worker_assignment_history(
     worker_ip: str,
 ) -> list[dict]:
     """
-    Get all assignments (active and expired) for a worker.
+    Get all assignments (active and completed) for a worker.
 
     Args:
         pool: asyncpg connection pool
@@ -270,7 +277,7 @@ async def assign_miners_atomic(
         {"assigned": [...], "skipped": [...]} on success
 
     Raises:
-        ValueError: If order doesn't exist, is not active, or has expired
+        ValueError: If order doesn't exist, is not active, or has no remaining balance
         ConflictError: If any miners are assigned to different orders
     """
     worker_ips = list(dict.fromkeys(worker_ips))
@@ -280,7 +287,7 @@ async def assign_miners_atomic(
             # Verify order exists and is active
             order = await conn.fetchrow(
                 """
-                SELECT order_id, status, expires_at
+                SELECT order_id, status, balance_btc
                 FROM marketplace_orders WHERE order_id = $1
                 FOR UPDATE
                 """,
@@ -293,10 +300,8 @@ async def assign_miners_atomic(
                 raise ValueError(
                     f"Order {order_id} is not active (status: {order['status']})"
                 )
-            if order["expires_at"] and order["expires_at"] <= datetime.now(
-                timezone.utc
-            ):
-                raise ValueError(f"Order {order_id} has expired")
+            if order["balance_btc"] <= 0:
+                raise ValueError(f"Order {order_id} has no remaining balance")
 
             if not worker_ips:
                 return {"assigned": [], "skipped": []}
