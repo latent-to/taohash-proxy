@@ -1,4 +1,5 @@
 import re
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, field_serializer, field_validator
@@ -615,9 +616,17 @@ class CreateOrderRequest(BaseModel):
     port: int = Field(..., ge=1, le=65535, description="Pool port (1-65535)")
     user: str = Field(..., description="Pool username")
     password: str = Field(..., alias="pass", description="Pool password")
-    duration_seconds: int = Field(
-        ..., gt=0, description="Order duration in seconds (required, must be > 0)"
+
+    price_btc_eh_day: Decimal = Field(
+        ..., gt=0, description="Price in BTC per Exahash per Day"
     )
+    amount_btc: Decimal = Field(
+        ..., gt=0, description="Total budget in BTC (initial balance)"
+    )
+    limit_eh_s: Optional[Decimal] = Field(
+        None, gt=0, description="Optional hashrate speed cap in EH/s"
+    )
+
     miners: Optional[List[str]] = Field(
         None, description="Optional list of miner IDs to assign immediately"
     )
@@ -631,16 +640,56 @@ class AssignMinersRequest(BaseModel):
 
 
 class OrderResponse(BaseModel):
-    order_id: str
-    host: str
-    port: int
-    user: str
-    expires_at: Optional[datetime]
-    created_at: datetime
-    status: str
-    assigned_miners: List[str] = []
-    miner_count: int = 0
-    remaining_seconds: Optional[float] = None
+    """Response model for marketplace order details."""
+
+    order_id: str = Field(description="Unique order identifier")
+    host: str = Field(description="Pool host address")
+    port: int = Field(description="Pool port")
+    user: str = Field(description="Pool username")
+    status: str = Field(
+        description="Order status: active, paused, fulfilled, cancelled"
+    )
+    created_at: datetime = Field(description="When order was created")
+
+    price_btc_eh_day: Decimal = Field(description="Price in BTC per Exahash per Day")
+    amount_btc: Decimal = Field(description="Total budget in BTC")
+    balance_btc: Decimal = Field(description="Remaining balance in BTC")
+    limit_eh_s: Optional[Decimal] = Field(
+        description="Optional hashrate speed cap in EH/s"
+    )
+
+    # Completion tracking
+    fulfilled_at: Optional[datetime] = Field(description="When balance was depleted")
+    paused_at: Optional[datetime] = Field(description="When order was paused")
+    cancelled_at: Optional[datetime] = Field(description="When order was cancelled")
+
+    # Share tracking
+    total_shares_credited: int = Field(default=0, description="Total shares credited")
+    total_share_value_credited: Decimal = Field(
+        default=Decimal("0"), description="Total BTC value credited from shares"
+    )
+
+    assigned_miners: List[str] = Field(
+        default=[], description="List of assigned miner IPs"
+    )
+    miner_count: int = Field(default=0, description="Number of assigned miners")
+
+    @field_serializer(
+        "created_at", "fulfilled_at", "paused_at", "cancelled_at", when_used="json"
+    )
+    def _serialize_order_datetimes(self, v: Optional[datetime]) -> Optional[str]:
+        return to_iso_z(v) if v else None
+
+    @field_serializer(
+        "price_btc_eh_day",
+        "amount_btc",
+        "balance_btc",
+        "limit_eh_s",
+        "total_share_value_credited",
+        when_used="json",
+    )
+    def _serialize_decimals(self, v: Optional[Decimal]) -> Optional[str]:
+        return str(v) if v is not None else None
 
 
 class MinerResponse(BaseModel):
