@@ -304,6 +304,46 @@ async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
         return []
 
 
+async def apply_share_credit(
+    pool: asyncpg.Pool,
+    order_id: str,
+    share_count: int,
+    cost_btc: Decimal,
+) -> Optional[dict]:
+    """
+    Apply share credit to an order by decrementing balance and updating totals.
+
+    Returns:
+        Dict with updated balance and status, or None if not updated
+    """
+    if share_count <= 0 or cost_btc <= 0:
+        return None
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                 UPDATE marketplace_orders
+                SET balance_btc = GREATEST(balance_btc - $1, 0),
+                    total_shares_credited = total_shares_credited + $2,
+                    total_share_value_credited = total_share_value_credited + $1,
+                    last_share_credited_at = NOW(),
+                    updated_at = NOW()
+                WHERE order_id = $3 AND status != 'cancelled'
+                RETURNING balance_btc, status
+                """,
+                cost_btc,
+                share_count,
+                order_id,
+            )
+        if row:
+            return {"balance_btc": row["balance_btc"], "status": row["status"]}
+        return None
+    except Exception as e:
+        logger.error(f"Failed to apply share credit to {order_id}: {e}")
+        return None
+
+
 async def create_order_with_assignments(
     pool: asyncpg.Pool,
     order_id: str,
