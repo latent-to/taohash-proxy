@@ -7,15 +7,21 @@ coordinating miner pool switches across multiple proxy instances.
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 import redis.asyncio as redis
+from redis.exceptions import ResponseError
 
 from .logger import get_logger
 
 logger = get_logger(__name__)
 
 REDIS_CHANNEL = "miner:commands"
+ORDER_SHARE_STREAM = "order_shares"
+ORDER_SHARE_GROUP = "order_share_processing"
+ORDER_SHARE_CONSUMER = "share_processing_worker"
+ORDER_SHARE_STREAM_MAXLEN = 10_000_000
 
 
 class RedisPublisher:
@@ -173,6 +179,117 @@ class RedisClient:
             except Exception:
                 pass
             return await self.connect()
+
+    async def ensure_order_share_group(self) -> bool:
+        """
+        Ensure the order share processing consumer group exists.
+
+        Returns:
+            True if the group exists or was created successfully.
+        """
+        if not self.redis:
+            return False
+
+        try:
+            await self.redis.xgroup_create(
+                ORDER_SHARE_STREAM,
+                ORDER_SHARE_GROUP,
+                id="$",
+                mkstream=True,
+            )
+            logger.info(
+                "Created Redis stream group '%s' on '%s'",
+                ORDER_SHARE_GROUP,
+                ORDER_SHARE_STREAM,
+            )
+        except ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                logger.error("Failed to create Redis stream group: %s", e)
+                return False
+        return True
+
+    async def publish_order_share(
+        self,
+        order_id: str,
+        difficulty: float,
+        worker: Optional[str] = None,
+        share_timestamp: Optional[datetime] = None,
+    ) -> bool:
+        """
+        Publish an accepted share to the order share stream.
+
+        Args:
+            order_id: Marketplace order identifier
+            difficulty: Actual share difficulty
+            worker: Optional worker name
+            share_timestamp: Optional share timestamp
+        """
+        if not self.redis:
+            return False
+
+        ts = share_timestamp or datetime.now(timezone.utc)
+        ts_value = ts.isoformat() if isinstance(ts, datetime) else str(ts)
+
+        data = {
+            "order_id": order_id,
+            "difficulty": str(difficulty),
+            "ts": ts_value,
+        }
+        if worker:
+            data["worker"] = worker
+
+        try:
+            await self.redis.xadd(
+                ORDER_SHARE_STREAM,
+                data,
+                maxlen=ORDER_SHARE_STREAM_MAXLEN,
+                approximate=True,
+            )
+            return True
+        except Exception as e:
+            logger.error("Failed to publish order share: %s", e)
+            return False
+
+    async def read_order_share_batch(
+        self, count: int, block_ms: int, read_id: str = ">"
+    ) -> list[tuple[str, dict]]:
+        """
+        Read a batch of order share messages for this consumer.
+        """
+        if not self.redis:
+            return []
+
+        try:
+            response = await self.redis.xreadgroup(
+                ORDER_SHARE_GROUP,
+                ORDER_SHARE_CONSUMER,
+                {ORDER_SHARE_STREAM: read_id},
+                count=count,
+                block=block_ms,
+            )
+        except Exception as e:
+            logger.error("Failed to read order share stream: %s", e)
+            return []
+
+        messages: list[tuple[str, dict]] = []
+        for _, entries in response:
+            for message_id, data in entries:
+                messages.append((message_id, data))
+        return messages
+
+    async def ack_order_shares(self, message_ids: list[str]) -> bool:
+        """
+        Acknowledge processed order share messages.
+        """
+        if not self.redis or not message_ids:
+            return False
+
+        try:
+            await self.redis.xack(ORDER_SHARE_STREAM, ORDER_SHARE_GROUP, *message_ids)
+            return True
+        except Exception as e:
+            logger.error("Failed to ack order share messages: %s", e)
+            return False
 
     async def get_connected_miners(self) -> list[str]:
         """
