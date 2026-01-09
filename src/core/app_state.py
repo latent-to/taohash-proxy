@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from ..storage.db import StatsDB
     from ..storage.marketplace_db import MarketplaceDB
     from ..utils.redis_client import RedisClient
+    from ..utils.order_share_publisher import OrderSharePublisher
     from .command_listener import CommandListener
     from .miner_session import MinerSession
 
@@ -48,6 +49,9 @@ class AppState:
     # Redis client for heartbeat publishing
     redis_client: Optional["RedisClient"] = None
 
+    # Publisher for order share events
+    order_share_publisher: Optional["OrderSharePublisher"] = None
+
     # Command listener for Redis pub/sub
     command_listener: Optional["CommandListener"] = None
 
@@ -55,5 +59,3 @@ class AppState:
     proxy_id: str = field(
         default_factory=lambda: os.getenv("HOSTNAME", socket.gethostname())
     )
-
-
