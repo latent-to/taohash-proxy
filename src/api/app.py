@@ -20,6 +20,7 @@ from slowapi.util import get_remote_address
 from src.api.tasks.startup import (
     StartupFlags,
     build_background_coroutines,
+    build_marketplace_coroutines,
     schedule_background_tasks,
 )
 from src.storage.db import StatsDB
@@ -141,6 +142,8 @@ ENABLE_TIDES_REWARDS_MONITORING = env_bool("ENABLE_TIDES_REWARDS_MONITORING")
 POOL_FEE = float(os.environ.get("POOL_FEE", ""))
 MINIMUM_PAYOUT_THRESHOLD = float(os.environ.get("MINIMUM_PAYOUT_THRESHOLD", ""))
 MINIMUM_PAYOUT_THRESHOLD_UNIT = os.environ.get("MINIMUM_PAYOUT_THRESHOLD_UNIT", "BTC")
+ORDER_BILLING_POLL_SECONDS = int(os.environ.get("ORDER_BILLING_POLL_SECONDS", "30"))
+
 
 db: Optional[StatsDB] = None
 marketplace_db: Optional[MarketplaceDB] = None
@@ -191,6 +194,14 @@ async def lifespan(app: FastAPI):
             tides=ENABLE_TIDES_MONITORING,
             tides_rewards=ENABLE_TIDES_REWARDS_MONITORING,
         ),
+    )
+    factories.extend(
+        build_marketplace_coroutines(
+            marketplace_db,
+            redis_client,
+            redis_publisher,
+            ORDER_BILLING_POLL_SECONDS,
+        )
     )
     background_tasks = schedule_background_tasks(factories)
 
@@ -259,15 +270,19 @@ async def request_logging_middleware(request: Request, call_next):
         path = request.url.path
         if request.url.query:
             path += f"?{request.url.query}"
-        logger.info(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code}")
+        logger.info(
+            f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code}"
+        )
         return response
-        
+
     except Exception as e:
         alias = getattr(request.state, "validator_alias", None)
         path = request.url.path
         if request.url.query:
             path += f"?{request.url.query}"
-        logger.error(f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code} {e}")
+        logger.error(
+            f"[{client_host}]-[{alias or 'unauthenticated'}]: {request.method} {path} {status_code} {e}"
+        )
         raise
 
 
