@@ -127,6 +127,7 @@ class MinerSession:
         # Job tracking
         self.jobs = JobQueue(max_size=25)
         self.db = None
+        self.order_share_publisher = None
 
         # Switching state
         self.is_switching = False
@@ -753,6 +754,21 @@ class MinerSession:
                 )
             except Exception as e:
                 logger.error(f"[{self.miner_id}] Failed to insert share: {e}")
+
+            try:
+                if self.order_share_publisher and self._is_on_order_pool():
+                    published = self.order_share_publisher.enqueue_share(
+                        order_id=self.current_pool.label,
+                        difficulty=actual_difficulty,
+                        worker=submit_data.get("worker"),
+                        share_timestamp=submit_data.get("received_at"),
+                    )
+                    if not published:
+                        logger.warning(
+                            f"[{self.miner_id}] Failed to publish share for order {self.current_pool.label}"
+                        )
+            except Exception as e:
+                logger.error(f"[{self.miner_id}] Failed to publish share: {e}")
 
         if accepted:
             logger.info(
