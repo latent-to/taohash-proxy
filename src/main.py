@@ -23,6 +23,7 @@ from .api.services.market_assignment_queries import (
 )
 from .utils.logger import get_logger
 from .utils.redis_client import RedisClient
+from .utils.order_share_publisher import OrderSharePublisher
 from .utils.constants import (
     RELOAD_API_PORT,
     RELOAD_API_HOST,
@@ -225,6 +226,7 @@ async def handle_new_miner(
     )
 
     session.db = state.stats_db
+    session.order_share_publisher = state.order_share_publisher
     session.on_authorized_callback = functools.partial(on_miner_authorized, state=state)
 
     async def cleanup_session() -> None:
@@ -389,6 +391,10 @@ async def main() -> None:
             "⚠️ Redis client not available, heartbeats will retry in background"
         )
 
+    state.order_share_publisher = OrderSharePublisher(state.redis_client)
+    state.order_share_publisher.start()
+    logger.info("Order share publisher started")
+
     state.command_listener = CommandListener(
         state.miner_registry,
         state.miner_registry_lock,
@@ -461,6 +467,10 @@ async def shutdown(state: AppState) -> None:
     if state.command_listener:
         await state.command_listener.close()
         logger.info("Command listener closed")
+
+    if state.order_share_publisher:
+        await state.order_share_publisher.stop()
+        logger.info("Order share publisher stopped")
 
     if state.redis_client:
         await state.redis_client.close()
