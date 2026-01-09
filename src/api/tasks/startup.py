@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, List
+from typing import Awaitable
 
 from src.difficulty_monitoring.monitor import (
     difficulty_monitor_task,
@@ -12,6 +12,7 @@ from src.tides_monitoring.monitor import tides_monitor_task, tides_monitor_task_
 from src.tides_monitoring.btc.ocean_rewards_monitor import (
     tides_rewards_ocean_monitor_task,
 )
+from src.api.tasks.order_share_processing import order_share_processing_loop
 from src.tides_monitoring.bch.rewards_monitor import tides_rewards_monitor_task_bch
 from src.utils.logger import get_logger
 
@@ -30,7 +31,7 @@ def build_background_coroutines(
     coin: str,
     db,
     flags: StartupFlags,
-) -> List[Awaitable]:
+) -> list[Awaitable]:
     """Return coroutine objects for background tasks."""
 
     coin = coin.lower()
@@ -64,7 +65,7 @@ def build_background_coroutines(
         logger.warning("Unsupported coin '%s'. No background tasks scheduled.", coin)
         return []
 
-    filtered: List[Awaitable] = []
+    filtered: list[Awaitable] = []
 
     for flag_name, label, func in task_map[coin]:
         enabled = getattr(flags, flag_name)
@@ -77,7 +78,29 @@ def build_background_coroutines(
     return filtered
 
 
-def schedule_background_tasks(coros: List[Awaitable]) -> List[asyncio.Task]:
+def build_marketplace_coroutines(
+    marketplace_db,
+    redis_client,
+    redis_publisher,
+    poll_seconds: int,
+) -> list[Awaitable]:
+    """Return coroutine objects for marketplace background tasks."""
+
+    if not marketplace_db or not redis_client or not redis_publisher:
+        logger.info("Marketplace background tasks disabled: missing dependencies")
+        return []
+
+    return [
+        order_share_processing_loop(
+            marketplace_db,
+            redis_client,
+            redis_publisher,
+            poll_seconds,
+        )
+    ]
+
+
+def schedule_background_tasks(coros: list[Awaitable]) -> list[asyncio.Task]:
     """Create asyncio tasks from coroutine objects."""
 
     return [asyncio.create_task(coro) for coro in coros]
