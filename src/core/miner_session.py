@@ -788,6 +788,9 @@ class MinerSession:
                 f"diff={actual_difficulty:.2f}"
             )
         else:
+            self._insert_rejected_share(
+                submit_data, actual_difficulty, error, reject_reason
+            )
             reason = "unknown"
             if error and isinstance(error, list) and len(error) > 1:
                 reason = error[1]
@@ -813,6 +816,77 @@ class MinerSession:
                 # Close the miner connection
                 self.miner_writer.close()
                 await self.miner_writer.wait_closed()
+
+    def _insert_rejected_share(
+        self,
+        submit_data: dict[str, Any],
+        actual_difficulty: float,
+        error: Any,
+        reject_reason: Optional[str],
+    ) -> None:
+        """Add rejected share to the database."""
+        if not self.db:
+            return
+
+        share_timestamp = submit_data.get("received_at")
+        miner_id = self.miner_id
+        worker = submit_data.get("worker", "")
+        pool = self.current_pool.connection_string
+        pool_label = self.current_pool.label
+        pool_difficulty = self.stats.difficulty
+        pool_requested_difficulty = self.pool_difficulty or 0.0
+        min_difficulty = self.min_difficulty or 0.0
+        job_id = submit_data.get("job_id", "")
+        extranonce2 = submit_data.get("extranonce2", "")
+        ntime = submit_data.get("ntime", "")
+        nonce = submit_data.get("nonce", "")
+        version = submit_data.get("version")
+
+        error_code = 0
+        error_message = ""
+        if isinstance(error, list):
+            if error:
+                try:
+                    error_code = int(error[0])
+                except (TypeError, ValueError):
+                    error_code = 0
+            if len(error) > 1 and error[1] is not None:
+                error_message = str(error[1])
+        elif error is not None:
+            error_message = str(error)
+
+        reject_reason_value = str(reject_reason) if reject_reason else ""
+        error_raw = json.dumps(
+            {"error": error, "reject_reason": reject_reason},
+            default=str,
+        )
+
+        async def _insert_rejected_share() -> None:
+            try:
+                await self.db.insert_rejected_share(
+                    miner=miner_id,
+                    worker=worker,
+                    pool=pool,
+                    pool_difficulty=pool_difficulty,
+                    actual_difficulty=actual_difficulty,
+                    pool_label=pool_label,
+                    job_id=job_id,
+                    extranonce2=extranonce2,
+                    ntime=ntime,
+                    nonce=nonce,
+                    version=version,
+                    share_timestamp=share_timestamp,
+                    pool_requested_difficulty=pool_requested_difficulty,
+                    min_difficulty=min_difficulty,
+                    error_code=error_code,
+                    error_message=error_message,
+                    reject_reason=reject_reason_value,
+                    error_raw=error_raw,
+                )
+            except Exception as e:
+                logger.error(f"[{miner_id}] Failed to insert rejected share: {e}")
+
+        asyncio.create_task(_insert_rejected_share())
 
     async def _cleanup(self):
         """Clean up resources on disconnect."""
