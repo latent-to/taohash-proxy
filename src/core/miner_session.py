@@ -740,20 +740,32 @@ class MinerSession:
         )
 
         if accepted and self.db and actual_difficulty > 0:
-            try:
-                await self.db.insert_share(
-                    miner=self.miner_id,
-                    worker=submit_data["worker"],
-                    pool=self.current_pool.connection_string,
-                    pool_difficulty=self.stats.difficulty,
-                    actual_difficulty=actual_difficulty,
-                    block_hash=block_hash if "block_hash" in locals() else "",
-                    pool_requested_difficulty=self.pool_difficulty,
-                    pool_label=self.current_pool.label,
-                    share_timestamp=submit_data.get("received_at"),
-                )
-            except Exception as e:
-                logger.error(f"[{self.miner_id}] Failed to insert share: {e}")
+            block_hash_value = block_hash if "block_hash" in locals() else ""
+            share_timestamp = submit_data.get("received_at")
+            miner_id = self.miner_id
+            worker = submit_data["worker"]
+            pool = self.current_pool.connection_string
+            pool_label = self.current_pool.label
+            pool_difficulty = self.stats.difficulty
+            pool_requested_difficulty = self.pool_difficulty
+
+            async def _insert_share() -> None:
+                try:
+                    await self.db.insert_share(
+                        miner=miner_id,
+                        worker=worker,
+                        pool=pool,
+                        pool_difficulty=pool_difficulty,
+                        actual_difficulty=actual_difficulty,
+                        block_hash=block_hash_value,
+                        pool_requested_difficulty=pool_requested_difficulty,
+                        pool_label=pool_label,
+                        share_timestamp=share_timestamp,
+                    )
+                except Exception as e:
+                    logger.error(f"[{miner_id}] Failed to insert share: {e}")
+
+            asyncio.create_task(_insert_share())
 
             try:
                 if self.order_share_publisher and self._is_on_order_pool():
