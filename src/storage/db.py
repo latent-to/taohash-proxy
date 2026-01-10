@@ -210,6 +210,36 @@ class StatsDB:
             ORDER BY (ts, worker)
             TTL ts + INTERVAL 2 DAY TO VOLUME 'cold'
             SETTINGS index_granularity = 8192, storage_policy = 'tiered'""",
+            """CREATE TABLE IF NOT EXISTS rejected_shares (
+                ts DateTime DEFAULT now(),
+                miner String,
+                worker String,
+                pool LowCardinality(String),
+                pool_label LowCardinality(String) DEFAULT 'unknown',
+                pool_difficulty Float32,
+                actual_difficulty Float32,
+                pool_requested_difficulty Float32 DEFAULT 0,
+                min_difficulty Float32 DEFAULT 0,
+
+                job_id String,
+                extranonce2 String,
+                ntime String,
+                nonce String,
+                version String,
+
+                error_code Int32 DEFAULT 0,
+                error_message String DEFAULT '',
+                reject_reason String DEFAULT '',
+                error_raw String DEFAULT '',
+
+                INDEX idx_worker (worker) TYPE bloom_filter GRANULARITY 1,
+                INDEX idx_ts (ts) TYPE minmax GRANULARITY 1
+            )
+            ENGINE = MergeTree()
+            PARTITION BY toYYYYMM(ts)
+            ORDER BY (ts, worker, pool_label)
+            TTL ts + INTERVAL 2 DAY TO VOLUME 'cold'
+            SETTINGS index_granularity = 8192, storage_policy = 'tiered'""",
             # Worker stats materialized view
             """CREATE MATERIALIZED VIEW IF NOT EXISTS worker_stats_mv
             ENGINE = AggregatingMergeTree()
@@ -579,5 +609,105 @@ class StatsDB:
             )
         except Exception as e:
             logger.error(f"Insert failed: {e}")
+            if self.required:
+                raise
+
+    async def insert_rejected_share(
+        self,
+        miner: str,
+        worker: str,
+        pool: str,
+        pool_difficulty: float,
+        actual_difficulty: float,
+        pool_label: str,
+        job_id: str,
+        extranonce2: str,
+        ntime: str,
+        nonce: str,
+        version: Optional[str] = None,
+        share_timestamp: Optional[datetime] = None,
+        pool_requested_difficulty: float = 0.0,
+        min_difficulty: float = 0.0,
+        error_code: int = 0,
+        error_message: str = "",
+        reject_reason: str = "",
+        error_raw: str = "",
+    ) -> None:
+        """
+        Insert a rejected share submission directly to ClickHouse.
+
+        Args:
+            miner: Miner identifier
+            worker: Worker name
+            pool: Pool address
+            pool_difficulty: Pool difficulty
+            actual_difficulty: Actual share difficulty
+            pool_label: Pool label or order ID
+            job_id: Job identifier
+            extranonce2: Extranonce2 value from submit
+            ntime: Ntime from submit
+            nonce: Nonce from submit
+            version: Optional version field from submit
+            share_timestamp: Timestamp when share was received
+            pool_requested_difficulty: Pool-reported difficulty (before min diff enforcement)
+            min_difficulty: Miner-requested minimum difficulty (if set)
+            error_code: Parsed error code (if available)
+            error_message: Parsed error message (if available)
+            reject_reason: Raw reject-reason string (if present)
+            error_raw: Raw JSON payload for error/reject_reason
+        """
+        if not self.client:
+            logger.error("ClickHouse client is not initialised")
+            return
+
+        ts = share_timestamp or datetime.now(timezone.utc)
+        try:
+            await self.client.insert(
+                "rejected_shares",
+                [
+                    [
+                        ts,
+                        miner,
+                        worker,
+                        pool,
+                        pool_label,
+                        pool_difficulty,
+                        actual_difficulty,
+                        pool_requested_difficulty,
+                        min_difficulty,
+                        job_id,
+                        extranonce2,
+                        ntime,
+                        nonce,
+                        version or "",
+                        error_code,
+                        error_message,
+                        reject_reason,
+                        error_raw,
+                    ]
+                ],
+                column_names=[
+                    "ts",
+                    "miner",
+                    "worker",
+                    "pool",
+                    "pool_label",
+                    "pool_difficulty",
+                    "actual_difficulty",
+                    "pool_requested_difficulty",
+                    "min_difficulty",
+                    "job_id",
+                    "extranonce2",
+                    "ntime",
+                    "nonce",
+                    "version",
+                    "error_code",
+                    "error_message",
+                    "reject_reason",
+                    "error_raw",
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Rejected share insert failed: {e}")
             if self.required:
                 raise
