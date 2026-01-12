@@ -276,6 +276,51 @@ async def get_order(
     }
 
 
+@router.post("/orders/{order_id}/pause")
+@limiter.limit("30/minute")
+async def pause_order(
+    request: Request,
+    order_id: str,
+) -> dict[str, Any]:
+    """
+    Pause an order and switch assigned miners back to the default pool.
+    """
+    if not marketplace_db or not marketplace_db.pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not redis_publisher:
+        raise HTTPException(status_code=503, detail="Redis unavailable")
+
+    order = await fetch_order(marketplace_db.pool, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    if order["status"] == "cancelled":
+        raise HTTPException(status_code=409, detail="Order is cancelled")
+
+    if order["status"] == "paused":
+        return {
+            "status": "paused",
+            "order_id": order_id,
+            "miners_switched": 0,
+            "message": "Order already paused",
+        }
+
+    assignments = await get_order_assignments(marketplace_db.pool, order_id)
+    for assignment in assignments:
+        await redis_publisher.publish_switch_default(assignment["worker_ip"])
+
+    await clear_order_assignments(marketplace_db.pool, order_id, status="completed")
+    await update_order_status(marketplace_db.pool, order_id, "paused")
+
+    return {
+        "status": "paused",
+        "order_id": order_id,
+        "miners_switched": len(assignments),
+        "message": f"Order paused, {len(assignments)} miners switched back",
+    }
+
+
 @router.patch("/orders/{order_id}")
 @limiter.limit("30/minute")
 async def update_order(
