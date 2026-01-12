@@ -635,6 +635,20 @@ class CreateOrderRequest(BaseModel):
         populate_by_name = True
 
 
+class UpdateOrderRequest(BaseModel):
+    """Request model for updating order price, limit, or balance."""
+
+    price_btc_eh_day: Optional[Decimal] = Field(
+        None, gt=0, description="Updated price in BTC per Exahash per Day"
+    )
+    limit_eh_s: Optional[Decimal] = Field(
+        None, gt=0, description="Updated hashrate cap in EH/s (null to clear)"
+    )
+    topup_btc: Optional[Decimal] = Field(
+        None, gt=0, description="Additional BTC to add to the order balance"
+    )
+
+
 class AssignMinersRequest(BaseModel):
     miners: List[str] = Field(..., description="List of miner IDs (worker:ip format)")
 
