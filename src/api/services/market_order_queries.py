@@ -81,8 +81,8 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
                 """
                 SELECT order_id, host, port, username, password,
                        price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
-                       created_at, updated_at, status,
-                       fulfilled_at, paused_at, cancelled_at,
+                       created_at, updated_at, queue_position_time, status,
+                       fulfilled_at, paused_at, cancelled_at, last_rebalance_at,
                        total_shares_credited, total_share_value_credited, last_share_credited_at
                 FROM marketplace_orders WHERE order_id = $1
                 """,
@@ -102,10 +102,12 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
                     "limit_eh_s": row["limit_eh_s"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
+                    "queue_position_time": row["queue_position_time"],
                     "status": row["status"],
                     "fulfilled_at": row["fulfilled_at"],
                     "paused_at": row["paused_at"],
                     "cancelled_at": row["cancelled_at"],
+                    "last_rebalance_at": row["last_rebalance_at"],
                     "total_shares_credited": row["total_shares_credited"],
                     "total_share_value_credited": row["total_share_value_credited"],
                     "last_share_credited_at": row["last_share_credited_at"],
@@ -132,8 +134,8 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
             base_query = """
                 SELECT order_id, host, port, username, password,
                        price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
-                       created_at, updated_at, status,
-                       fulfilled_at, paused_at, cancelled_at,
+                       created_at, updated_at, queue_position_time, status,
+                       fulfilled_at, paused_at, cancelled_at, last_rebalance_at,
                        total_shares_credited, total_share_value_credited, last_share_credited_at
                 FROM marketplace_orders
             """
@@ -160,10 +162,12 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
                         "limit_eh_s": row["limit_eh_s"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
+                        "queue_position_time": row["queue_position_time"],
                         "status": row["status"],
                         "fulfilled_at": row["fulfilled_at"],
                         "paused_at": row["paused_at"],
                         "cancelled_at": row["cancelled_at"],
+                        "last_rebalance_at": row["last_rebalance_at"],
                         "total_shares_credited": row["total_shares_credited"],
                         "total_share_value_credited": row["total_share_value_credited"],
                         "last_share_credited_at": row["last_share_credited_at"],
@@ -249,6 +253,110 @@ async def update_order_status(pool: asyncpg.Pool, order_id: str, status: str) ->
         return False
 
 
+async def update_order_fields(
+    pool: asyncpg.Pool,
+    order_id: str,
+    price_btc_eh_day: Optional[Decimal] = None,
+    limit_eh_s: Optional[Decimal] = None,
+    limit_provided: bool = False,
+    topup_btc: Optional[Decimal] = None,
+) -> bool:
+    """
+    Update mutable order fields like price, limit, and balance top-ups.
+
+    Resets queue_position_time when price or limit is lowered, or when a
+    fulfilled order is topped up and reactivated.
+    """
+    if (
+        price_btc_eh_day is None
+        and not limit_provided
+        and (topup_btc is None or topup_btc <= 0)
+    ):
+        return False
+
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    SELECT price_btc_eh_day, limit_eh_s, amount_btc, balance_btc, status
+                    FROM marketplace_orders
+                    WHERE order_id = $1
+                    FOR UPDATE
+                    """,
+                    order_id,
+                )
+                if not row:
+                    return False
+                if row["status"] == "cancelled":
+                    raise ValueError(f"Order {order_id} is cancelled")
+
+                update_fields: list[str] = []
+                values: list[object] = []
+
+                if price_btc_eh_day is not None:
+                    update_fields.append(
+                        f"price_btc_eh_day = ${len(values) + 1}"
+                    )
+                    values.append(price_btc_eh_day)
+
+                if limit_provided:
+                    update_fields.append(f"limit_eh_s = ${len(values) + 1}")
+                    values.append(limit_eh_s)
+
+                if topup_btc is not None and topup_btc > 0:
+                    update_fields.append(f"amount_btc = ${len(values) + 1}")
+                    values.append(row["amount_btc"] + topup_btc)
+                    update_fields.append(f"balance_btc = ${len(values) + 1}")
+                    values.append(row["balance_btc"] + topup_btc)
+
+                reset_queue = False
+                if (
+                    price_btc_eh_day is not None
+                    and price_btc_eh_day < row["price_btc_eh_day"]
+                ):
+                    reset_queue = True
+
+                if limit_provided:
+                    current_limit = row["limit_eh_s"]
+                    new_limit = limit_eh_s
+                    if new_limit is not None:
+                        if current_limit is None or new_limit < current_limit:
+                            reset_queue = True
+
+                if (
+                    topup_btc is not None
+                    and topup_btc > 0
+                    and row["status"] == "fulfilled"
+                ):
+                    update_fields.append("status = 'active'")
+                    update_fields.append("fulfilled_at = NULL")
+                    reset_queue = True
+
+                if reset_queue:
+                    update_fields.append("queue_position_time = NOW()")
+
+                update_fields.append("updated_at = NOW()")
+
+                if not update_fields:
+                    return False
+
+                query = (
+                    "UPDATE marketplace_orders SET "
+                    + ", ".join(update_fields)
+                    + f" WHERE order_id = ${len(values) + 1}"
+                )
+                values.append(order_id)
+                result = await conn.execute(query, *values)
+
+        return result != "UPDATE 0"
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update order {order_id}: {e}")
+        return False
+
+
 async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
     """
     Get all orders with 'active' status for balance processing.
@@ -265,8 +373,8 @@ async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
                 """
                 SELECT order_id, host, port, username, password,
                        price_btc_eh_day, amount_btc, balance_btc, limit_eh_s,
-                       created_at, updated_at, status,
-                       fulfilled_at, paused_at, cancelled_at,
+                       created_at, updated_at, queue_position_time, status,
+                       fulfilled_at, paused_at, cancelled_at, last_rebalance_at,
                        total_shares_credited, total_share_value_credited, last_share_credited_at
                 FROM marketplace_orders
                 WHERE status = 'active' AND balance_btc > 0
@@ -289,10 +397,12 @@ async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
                         "limit_eh_s": row["limit_eh_s"],
                         "created_at": row["created_at"],
                         "updated_at": row["updated_at"],
+                        "queue_position_time": row["queue_position_time"],
                         "status": row["status"],
                         "fulfilled_at": row["fulfilled_at"],
                         "paused_at": row["paused_at"],
                         "cancelled_at": row["cancelled_at"],
+                        "last_rebalance_at": row["last_rebalance_at"],
                         "total_shares_credited": row["total_shares_credited"],
                         "total_share_value_credited": row["total_share_value_credited"],
                         "last_share_credited_at": row["last_share_credited_at"],
