@@ -13,12 +13,13 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from src.api.models import AssignMinersRequest, CreateOrderRequest
+from src.api.models import AssignMinersRequest, CreateOrderRequest, UpdateOrderRequest
 from src.api.services.market_order_queries import (
     create_order_with_assignments,
     get_order as fetch_order,
     get_orders as fetch_orders,
     update_order_status,
+    update_order_fields,
 )
 from src.api.services.market_assignment_queries import (
     ConflictError,
@@ -270,6 +271,73 @@ async def get_order(
         "total_shares_credited": order["total_shares_credited"],
         "total_share_value_credited": str(order["total_share_value_credited"]),
         # Miners
+        "assigned_miners": assigned_miners,
+        "miner_count": len(assigned_miners),
+    }
+
+
+@router.patch("/orders/{order_id}")
+@limiter.limit("30/minute")
+async def update_order(
+    request: Request,
+    order_id: str,
+    update_request: UpdateOrderRequest,
+) -> dict[str, Any]:
+    """
+    Update order pricing, limits, or balance.
+
+    Supports updating one or more fields in a single request.
+    """
+    if not marketplace_db or not marketplace_db.pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    if not update_request.model_fields_set:
+        raise HTTPException(status_code=400, detail="No fields provided to update")
+
+    limit_provided = "limit_eh_s" in update_request.model_fields_set
+
+    try:
+        updated = await update_order_fields(
+            pool=marketplace_db.pool,
+            order_id=order_id,
+            price_btc_eh_day=update_request.price_btc_eh_day,
+            limit_eh_s=update_request.limit_eh_s,
+            limit_provided=limit_provided,
+            topup_btc=update_request.topup_btc,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    order = await fetch_order(marketplace_db.pool, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    assignments = await get_order_assignments(marketplace_db.pool, order_id)
+    assigned_miners = [a["worker_ip"] for a in assignments]
+
+    return {
+        "order_id": order["order_id"],
+        "host": order["host"],
+        "port": order["port"],
+        "user": order["user"],
+        "status": order["status"],
+        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
+        "price_btc_eh_day": str(order["price_btc_eh_day"]),
+        "amount_btc": str(order["amount_btc"]),
+        "balance_btc": str(order["balance_btc"]),
+        "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
+        "fulfilled_at": order["fulfilled_at"].isoformat()
+        if order["fulfilled_at"]
+        else None,
+        "paused_at": order["paused_at"].isoformat() if order["paused_at"] else None,
+        "cancelled_at": order["cancelled_at"].isoformat()
+        if order["cancelled_at"]
+        else None,
+        "total_shares_credited": order["total_shares_credited"],
+        "total_share_value_credited": str(order["total_share_value_credited"]),
         "assigned_miners": assigned_miners,
         "miner_count": len(assigned_miners),
     }
