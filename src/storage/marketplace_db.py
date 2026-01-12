@@ -84,6 +84,7 @@ class MarketplaceDB:
                     status TEXT NOT NULL CHECK (status IN ('active','paused','fulfilled','cancelled')) DEFAULT 'active',
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    queue_position_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     cancelled_at TIMESTAMPTZ,
 
                     price_btc_eh_day DECIMAL(28,20) NOT NULL,
@@ -93,6 +94,7 @@ class MarketplaceDB:
 
                     fulfilled_at TIMESTAMPTZ,
                     paused_at TIMESTAMPTZ,
+                    last_rebalance_at TIMESTAMPTZ,
 
                     total_shares_credited BIGINT DEFAULT 0,
                     total_share_value_credited DECIMAL(28,20) DEFAULT 0,
