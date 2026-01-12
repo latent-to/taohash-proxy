@@ -321,6 +321,44 @@ async def pause_order(
     }
 
 
+@router.post("/orders/{order_id}/resume")
+@limiter.limit("30/minute")
+async def resume_order(
+    request: Request,
+    order_id: str,
+) -> dict[str, Any]:
+    """
+    Resume a paused order.
+    """
+    if not marketplace_db or not marketplace_db.pool:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    order = await fetch_order(marketplace_db.pool, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+
+    if order["status"] == "cancelled":
+        raise HTTPException(status_code=409, detail="Order is cancelled")
+
+    if order["status"] == "active":
+        return {
+            "status": "active",
+            "order_id": order_id,
+            "message": "Order already active",
+        }
+
+    if order["balance_btc"] <= 0:
+        raise HTTPException(status_code=409, detail="Order has no remaining balance")
+
+    await update_order_status(marketplace_db.pool, order_id, "active")
+
+    return {
+        "status": "active",
+        "order_id": order_id,
+        "message": "Order resumed",
+    }
+
+
 @router.patch("/orders/{order_id}")
 @limiter.limit("30/minute")
 async def update_order(
