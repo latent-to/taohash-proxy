@@ -228,7 +228,13 @@ async def update_order_status(pool: asyncpg.Pool, order_id: str, status: str) ->
                 result = await conn.execute(
                     """
                     UPDATE marketplace_orders
-                    SET status = $1, updated_at = NOW(), paused_at = NULL
+                    SET status = $1,
+                        updated_at = NOW(),
+                        paused_at = NULL,
+                        queue_position_time = CASE
+                            WHEN status = 'paused' THEN NOW()
+                            ELSE queue_position_time
+                        END
                     WHERE order_id = $2
                     """,
                     status,
@@ -295,9 +301,7 @@ async def update_order_fields(
                 values: list[object] = []
 
                 if price_btc_eh_day is not None:
-                    update_fields.append(
-                        f"price_btc_eh_day = ${len(values) + 1}"
-                    )
+                    update_fields.append(f"price_btc_eh_day = ${len(values) + 1}")
                     values.append(price_btc_eh_day)
 
                 if limit_provided:
