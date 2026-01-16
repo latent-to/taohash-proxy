@@ -94,3 +94,83 @@ async def _fetch_mempool_height(session: aiohttp.ClientSession) -> int:
     except ValueError as exc:
         raise ValueError(f"Invalid height value: {data}") from exc
 
+
+async def hashprice_monitor_loop(redis_client: RedisClient) -> None:
+    """
+    Fetch raw inputs and compute hashprice, then cache in Redis.
+    """
+    if not redis_client:
+        logger.warning("Hashprice monitor disabled: Redis client unavailable")
+        return
+
+    logger.info(f"Hashprice monitor started (poll={HASHPRICE_POLL_SECONDS}s)")
+
+    timeout = aiohttp.ClientTimeout(total=HASHPRICE_REQUEST_TIMEOUT_SECONDS)
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "taohash-proxy/1.0",
+    }
+
+    while True:
+        try:
+            if not await redis_client.ensure_connected():
+                logger.warning("Hashprice monitor: Redis unavailable")
+                await asyncio.sleep(HASHPRICE_POLL_SECONDS)
+                continue
+
+            async with aiohttp.ClientSession(
+                timeout=timeout, headers=headers
+            ) as session:
+                results = await asyncio.gather(
+                    _fetch_braiins_avg_fees(session),
+                    _fetch_braiins_difficulty(session),
+                    _fetch_mempool_price(session),
+                    _fetch_mempool_height(session),
+                    return_exceptions=True,
+                )
+
+            avg_fees_btc, difficulty, btc_usd, height = results
+
+            for result in results:
+                if isinstance(result, Exception):
+                    raise result
+
+            if difficulty <= 0:
+                raise ValueError("Difficulty must be positive")
+
+            subsidy_btc = _block_subsidy_btc(height)
+            hashprice_btc_eh_day = (
+                (subsidy_btc + avg_fees_btc)
+                * SECONDS_PER_DAY
+                * EH_MULTIPLIER
+                / (difficulty * DIFF_FACTOR)
+            )
+            hashprice_usd_eh_day = hashprice_btc_eh_day * btc_usd
+
+            payload = {
+                "btc_eh_day": str(hashprice_btc_eh_day),
+                "usd_eh_day": str(hashprice_usd_eh_day),
+                "difficulty": str(difficulty),
+                "avg_fees_btc": str(avg_fees_btc),
+                "btc_usd": str(btc_usd),
+                "subsidy_btc": str(subsidy_btc),
+                "height": height,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "sources": {
+                    "fees": "braiins",
+                    "difficulty": "braiins",
+                    "price": "mempool",
+                    "height": "mempool",
+                },
+            }
+
+            stored = await redis_client.set_hashprice_cache(payload)
+            if stored:
+                logger.debug("Hashprice cache updated")
+        except asyncio.CancelledError:
+            logger.info("Hashprice monitor stopped")
+            raise
+        except Exception as e:
+            logger.error(f"Hashprice monitor error: {e}")
+
+        await asyncio.sleep(HASHPRICE_POLL_SECONDS)
