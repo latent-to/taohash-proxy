@@ -14,6 +14,7 @@ import redis.asyncio as redis
 from redis.exceptions import ResponseError
 
 from .logger import get_logger
+from ..core.heartbeat_stats import MinerGroupStats
 
 logger = get_logger(__name__)
 
@@ -22,6 +23,8 @@ ORDER_SHARE_STREAM = "order_shares"
 ORDER_SHARE_GROUP = "order_share_processing"
 ORDER_SHARE_CONSUMER = "share_processing_worker"
 ORDER_SHARE_STREAM_MAXLEN = 10_000_000
+HASHPRICE_CACHE_KEY = "market:hashprice"
+HASHPRICE_CACHE_TTL_SECONDS = int(os.getenv("HASHPRICE_CACHE_TTL_SECONDS", "1800"))
 
 
 class RedisPublisher:
@@ -59,7 +62,12 @@ class RedisPublisher:
             logger.error(f"Failed to connect to Redis: {e}")
             return False
 
-    async def publish_switch_pool(self, worker_ip: str, pool_config: dict) -> bool:
+    async def publish_switch_pool(
+        self,
+        worker_ip: str,
+        pool_config: dict,
+        session_id: str | None = None,
+    ) -> bool:
         """
         Publish command to switch a miner to a specific pool.
 
@@ -79,6 +87,7 @@ class RedisPublisher:
                 {
                     "type": "switch_pool",
                     "worker_ip": worker_ip,
+                    **({"session_id": session_id} if session_id else {}),
                     "pool_config": pool_config,
                 }
             )
@@ -89,7 +98,9 @@ class RedisPublisher:
             logger.error(f"Failed to publish switch_pool: {e}")
             return False
 
-    async def publish_switch_default(self, worker_ip: str) -> bool:
+    async def publish_switch_default(
+        self, worker_ip: str, session_id: str | None = None
+    ) -> bool:
         """
         Publish command to switch a miner back to their default pool.
 
@@ -110,6 +121,7 @@ class RedisPublisher:
                 {
                     "type": "switch_default",
                     "worker_ip": worker_ip,
+                    **({"session_id": session_id} if session_id else {}),
                 }
             )
             await self.redis.publish(self.channel, message)
@@ -291,6 +303,8 @@ class RedisClient:
             logger.error("Failed to ack order share messages: %s", e)
             return False
 
+
+
     async def get_connected_miners(self) -> list[str]:
         """
         Get all connected miners across all proxy instances.
@@ -358,14 +372,69 @@ class RedisClient:
             return {}
 
         try:
-            all_miners = {}
+            miners_by_proxy: list[tuple[Optional[str], dict]] = []
             proxy_keys = await self.redis.keys("proxy:*:miners")
 
             for key in proxy_keys:
                 data = await self.redis.get(key)
-                if data:
+                if not data:
+                    continue
+
+                try:
                     miners = json.loads(data)
-                    all_miners.update(miners)
+                except Exception:
+                    continue
+
+                proxy_id = None
+                try:
+                    parts = str(key).split(":")
+                    if len(parts) >= 3:
+                        proxy_id = parts[1]
+                except Exception:
+                    pass
+
+                miners_by_proxy.append((proxy_id, miners))
+
+            # Aggregate stats per worker_ip
+            aggregators: dict[str, MinerGroupStats] = {}
+            worker_names: dict[str, list[str]] = {}
+            miner_agents: dict[str, list[str]] = {}
+
+            for proxy_id, miners in miners_by_proxy:
+                for worker_ip, stats in miners.items():
+                    if not isinstance(stats, dict):
+                        continue
+
+                    if proxy_id and isinstance(stats.get("sessions"), list):
+                        annotated_sessions: list[dict] = []
+                        for session in stats.get("sessions") or []:
+                            if isinstance(session, dict):
+                                session_dict = dict(session)
+                                session_dict.setdefault("proxy_id", proxy_id)
+                                annotated_sessions.append(session_dict)
+                        stats["sessions"] = annotated_sessions
+
+                    if worker_ip not in aggregators:
+                        aggregators[worker_ip] = MinerGroupStats()
+                        worker_names[worker_ip] = []
+                        miner_agents[worker_ip] = []
+
+                    aggregators[worker_ip].merge_from_dict(
+                        stats,
+                        worker_name_out=worker_names[worker_ip],
+                        miner_agent_out=miner_agents[worker_ip],
+                    )
+
+            all_miners: dict[str, dict] = {}
+            for worker_ip, agg in aggregators.items():
+                all_miners[worker_ip] = agg.to_merged_dict(
+                    worker_name=worker_names[worker_ip][0]
+                    if worker_names[worker_ip]
+                    else "",
+                    miner_agent=miner_agents[worker_ip][0]
+                    if miner_agents[worker_ip]
+                    else "",
+                )
 
             return all_miners
         except Exception as e:
