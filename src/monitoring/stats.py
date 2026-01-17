@@ -61,6 +61,9 @@ class MinerStats:
     rejected_low_diff: int = 0
     rejected_other: int = 0
 
+    last_notify_time: float = 0.0
+    pool_disconnects: int = 0
+
     last_hashrate: float = 0.0
     last_hashrate_time: float = 0.0
 
