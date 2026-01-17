@@ -33,7 +33,8 @@ class CommandListener:
 
     def __init__(
         self,
-        miner_registry: dict[str, "MinerSession"],
+        miner_registry: dict[str, dict[str, "MinerSession"]],
+        miner_sessions_by_id: dict[str, "MinerSession"],
         miner_registry_lock: asyncio.Lock,
         config: dict,
     ):
@@ -49,6 +50,7 @@ class CommandListener:
         self.pubsub: Optional[redis.client.PubSub] = None
         self.channel = REDIS_CHANNEL
         self.miner_registry = miner_registry
+        self.miner_sessions_by_id = miner_sessions_by_id
         self.miner_registry_lock = miner_registry_lock
         self.config = config
         self._running = False
@@ -134,6 +136,7 @@ class CommandListener:
             data: Command data dict with type, worker_ip, and command-specific fields
         """
         worker_ip = data.get("worker_ip")
+        session_id = data.get("session_id")
         cmd_type = data.get("type")
 
         if not worker_ip or not cmd_type:
@@ -141,17 +144,46 @@ class CommandListener:
             return
 
         async with self.miner_registry_lock:
-            session = self.miner_registry.get(worker_ip)
+            targets: list["MinerSession"] = []
 
-        if not session:
+            if session_id:
+                session = self.miner_sessions_by_id.get(str(session_id))
+                if session:
+                    registry_key = session.get_registry_key() or ""
+                    if registry_key and registry_key != str(worker_ip):
+                        logger.warning(
+                            f"Command session_id={session_id} resolves to registry_key={registry_key} (command worker_ip={worker_ip})"
+                        )
+                    targets = [session]
+            else:
+                registry_key = self.miner_registry.get(str(worker_ip))
+                if registry_key:
+                    targets = list(registry_key.values())
+
+        if not targets:
             return
 
-        logger.info(f"Received {cmd_type} command for {worker_ip}")
+        logger.info(
+            f"Received {cmd_type} command for {worker_ip} (sessions={len(targets)})",
+        )
 
         if cmd_type == "switch_pool":
-            await self._handle_switch_pool(session, data)
+            results = await asyncio.gather(
+                *(self._handle_switch_pool(session, data) for session in targets),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Error handling switch_pool: %s", result)
+
         elif cmd_type == "switch_default":
-            await self._handle_switch_default(session)
+            results = await asyncio.gather(
+                *(self._handle_switch_default(session) for session in targets),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.error("Error handling switch_default: %s", result)
         else:
             logger.warning(f"Unknown command type: {cmd_type}")
 
