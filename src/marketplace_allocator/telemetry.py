@@ -54,3 +54,16 @@ def _diag_to_dict(diag: TickDiagnostics) -> dict:
             for e in diag.events
         ],
     }
+
+
+async def publish_last_tick(redis_client: RedisClient, diag: TickDiagnostics) -> None:
+    """Publish the latest tick diagnostics to Redis."""
+
+    redis = getattr(redis_client, "redis", None)
+    if not redis:
+        return
+    try:
+        payload = json.dumps(_diag_to_dict(diag))
+        await redis.set(_KEY_LAST_TICK, payload, ex=600)
+    except Exception as e:
+        logger.error("Failed to publish allocator telemetry: %s", e)
