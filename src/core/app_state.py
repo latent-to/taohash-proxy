@@ -5,7 +5,7 @@ This module provides the AppState dataclass that holds all shared state.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, TYPE_CHECKING, Set, Dict
+from typing import Optional, TYPE_CHECKING
 import asyncio
 import os
 import socket
@@ -30,7 +30,7 @@ class AppState:
     config: dict = field(default_factory=dict)
 
     # Active miner sessions
-    active_sessions: Set["MinerSession"] = field(default_factory=set)
+    active_sessions: set["MinerSession"] = field(default_factory=set)
     active_sessions_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     # Stats manager for tracking miner statistics
@@ -42,8 +42,10 @@ class AppState:
     # Database connection (PostgreSQL) for marketplace orders/assignments
     marketplace_db: Optional["MarketplaceDB"] = None
 
-    # Miner registry for command routing (worker:ip -> MinerSession)
-    miner_registry: Dict[str, "MinerSession"] = field(default_factory=dict)
+    miner_registry: dict[str, dict[str, "MinerSession"]] = field(default_factory=dict)
+
+    miner_sessions_by_id: dict[str, "MinerSession"] = field(default_factory=dict)
+
     miner_registry_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     # Redis client for heartbeat publishing
