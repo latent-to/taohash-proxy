@@ -8,6 +8,8 @@ calculation, and state transitions.
 
 import asyncio
 import json
+import time
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Any, Dict
@@ -107,6 +109,9 @@ class MinerSession:
         # Miner identification
         self.peer = miner_writer.get_extra_info("peername")
         self.miner_id = f"{self.peer[0]}:{self.peer[1]}" if self.peer else "unknown"
+        # Ephemeral per-TCP-connection id.
+        # Used to track multiple concurrent sessions that share the same registry_key (worker_name:ip).
+        self.session_id: str = uuid.uuid4().hex
 
         # Stats tracking
         self.stats = stats_manager.register_miner(self.peer, pool_config.label)
@@ -138,6 +143,11 @@ class MinerSession:
         self.on_authorized_callback = None
 
         logger.info(f"[{self.miner_id}] Proxy session initialized")
+
+    def get_session_id(self) -> str:
+        """Return the ephemeral session id for this TCP connection."""
+
+        return self.session_id
 
     def get_registry_key(self) -> Optional[str]:
         """
@@ -618,6 +628,11 @@ class MinerSession:
                 line = await self.pool_reader.readline()
                 if not line:
                     logger.info(f"[{self.miner_id}] Pool disconnected")
+                    try:
+                        if self.stats:
+                            self.stats.pool_disconnects += 1
+                    except Exception:
+                        pass
                     break
 
                 try:
@@ -642,6 +657,11 @@ class MinerSession:
                     elif method == "mining.notify":
                         params = message.get("params", [])
                         if len(params) >= 9:
+                            try:
+                                if self.stats:
+                                    self.stats.last_notify_time = time.time()
+                            except Exception:
+                                pass
                             job_id = params[0]
                             job_data = {
                                 "job_id": job_id,
