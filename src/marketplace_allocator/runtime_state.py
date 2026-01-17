@@ -172,3 +172,27 @@ class AllocatorRuntimeState:
                 miner_counters={},
                 order_health={},
             )
+
+    async def persist_miner_counters(
+        self, counters: dict[str, "MinerCounterRecord"]
+    ) -> None:
+        if not self._redis or not counters:
+            return
+        try:
+            mapping = {k: json.dumps(v.as_dict()) for k, v in counters.items()}
+            await self._redis.hset(_HASH_MINER_COUNTERS, mapping=mapping)
+        except Exception as e:
+            logger.error("Failed to persist miner counters: %s", e)
+
+    async def persist_order_health(
+        self, health: dict[str, "OrderHealthRecord"]
+    ) -> None:
+        if not self._redis or not health:
+            return
+        try:
+            mapping = {k: json.dumps(v.as_dict()) for k, v in health.items()}
+            await self._redis.hset(_HASH_ORDER_HEALTH, mapping=mapping)
+        except Exception as e:
+            logger.error("Failed to persist order health: %s", e)
+
+    
