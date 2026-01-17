@@ -13,6 +13,7 @@ from .core.miner_session import MinerSession
 from .core.pool_config import PoolConfig
 from .core.command_listener import CommandListener
 from .core.app_state import AppState
+from .core.heartbeat_stats import MinerGroupStats
 from .monitoring.stats import StatsManager
 from .storage.db import StatsDB
 from .storage.marketplace_db import MarketplaceDB
@@ -46,16 +47,19 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
         logger.warning("Cannot register miner: no registry key available")
         return
 
-    # Check for already existing session (reconnecting miner)
     async with state.miner_registry_lock:
-        old_session = state.miner_registry.get(registry_key)
-        if old_session and old_session is not session:
-            logger.info(f"Miner {registry_key} reconnected, replacing old session")
+        group = state.miner_registry.setdefault(registry_key, {})
+        group[session.get_session_id()] = session
+        state.miner_sessions_by_id[session.get_session_id()] = session
 
-        state.miner_registry[registry_key] = session
-        logger.info(
-            f"📝 Registered miner in registry: {registry_key} ({session.miner_agent})"
-        )
+        if len(group) > 1:
+            logger.info(
+                f"🧩 Registered additional session for {registry_key}: sessions={len(group)}"
+            )
+        else:
+            logger.info(
+                f"📝 Registered miner in registry: {registry_key} ({session.miner_agent})"
+            )
 
     if not state.marketplace_db or not state.marketplace_db.pool:
         return
@@ -119,9 +123,16 @@ async def unregister_miner_session(session: MinerSession, state: AppState) -> No
         return
 
     async with state.miner_registry_lock:
-        if state.miner_registry.get(registry_key) is session:
-            del state.miner_registry[registry_key]
-            logger.info(f"📝 Unregistered miner from registry: {registry_key}")
+        group = state.miner_registry.get(registry_key)
+        if group and group.get(session.get_session_id()) is session:
+            del group[session.get_session_id()]
+            if not group:
+                state.miner_registry.pop(registry_key, None)
+            logger.info(
+                f"📝 Unregistered miner session from registry: {registry_key} (session={session.get_session_id()})"
+            )
+
+        state.miner_sessions_by_id.pop(session.get_session_id(), None)
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
@@ -292,32 +303,19 @@ async def miner_heartbeat_loop(state: AppState) -> None:
 
             async with state.miner_registry_lock:
                 miners = {}
-                for registry_key, session in state.miner_registry.items():
-                    miners[registry_key] = {
-                        "hashrate": session.stats.get_hashrate()
-                        if session.stats
-                        else 0,
-                        "hashrate_gh": (session.stats.get_hashrate() / 1e9)
-                        if session.stats
-                        else 0,
-                        "difficulty": session.stats.difficulty if session.stats else 0,
-                        "accepted": session.stats.accepted if session.stats else 0,
-                        "rejected": session.stats.rejected if session.stats else 0,
-                        "pool_label": session.current_pool.label,
-                        "worker_name": session.worker_name,
-                        "miner_agent": session.stats.miner_agent
-                        if session.stats
-                        else "",
-                        "connected_minutes": round(
-                            (
-                                datetime.now(timezone.utc) - session.stats.connected_at
-                            ).total_seconds()
-                            / 60,
-                            1,
-                        )
-                        if session.stats
-                        else 0,
-                    }
+                now_dt = datetime.now(timezone.utc)
+                now_ts = now_dt.timestamp()
+
+                for registry_key, sessions_by_id in state.miner_registry.items():
+                    sessions = list(sessions_by_id.values())
+                    if not sessions:
+                        continue
+
+                    stats = MinerGroupStats()
+                    for sess in sessions:
+                        stats.add_session(sess, now_dt, now_ts)
+
+                    miners[registry_key] = stats.to_dict(sessions)
 
             await state.redis_client.update_proxy_miners_with_stats(
                 state.proxy_id, miners, ttl_seconds=30
@@ -397,6 +395,7 @@ async def main() -> None:
 
     state.command_listener = CommandListener(
         state.miner_registry,
+        state.miner_sessions_by_id,
         state.miner_registry_lock,
         state.config,
     )
