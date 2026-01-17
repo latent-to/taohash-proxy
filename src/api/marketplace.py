@@ -7,6 +7,7 @@ Provides REST API endpoints for managing marketplace orders:
 - List connected miners across all proxy instances
 """
 
+import os
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -29,6 +30,7 @@ from src.api.services.market_assignment_queries import (
     get_miner_assignment,
     get_order_assignments,
 )
+from src.api.services.pool_probe import probe_stratum_v1
 from src.storage.marketplace_db import MarketplaceDB
 from src.utils.logger import get_logger
 from src.utils.redis_client import RedisPublisher, RedisClient
@@ -82,6 +84,33 @@ async def create_order(
         raise HTTPException(status_code=503, detail="Redis unavailable")
 
     miners_to_assign = order_request.miners or []
+
+    # Preflight probe of the upstream pool
+    pool_probe = None
+    if os.getenv("MARKETPLACE_PROBE_POOLS_ON_CREATE", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }:
+        pool_probe = await probe_stratum_v1(
+            host=order_request.host,
+            port=int(order_request.port),
+            user=order_request.user,
+            password=order_request.password,
+            timeout_s=float(os.getenv("POOL_PROBE_TIMEOUT_SECONDS", "3.0")),
+            allow_private_hosts=os.getenv("ALLOW_PRIVATE_POOL_HOSTS", "false").lower()
+            in {"1", "true", "yes", "y", "on"},
+        )
+        if pool_probe.severity == "fail":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "Pool preflight probe failed",
+                    "probe": pool_probe.to_dict(),
+                },
+            )
 
     try:
         result = await create_order_with_assignments(
@@ -147,6 +176,11 @@ async def create_order(
         else None,
         "assigned_miners": assigned,
     }
+
+    if pool_probe is not None:
+        response["pool_probe"] = pool_probe.to_dict()
+        if pool_probe.severity == "warn":
+            response.setdefault("warning", "Pool probe returned warnings")
 
     if miners_to_assign:
         response["message"] = (
