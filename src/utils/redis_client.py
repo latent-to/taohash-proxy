@@ -303,7 +303,42 @@ class RedisClient:
             logger.error("Failed to ack order share messages: %s", e)
             return False
 
+    async def set_hashprice_cache(
+        self, payload: dict, ttl_seconds: Optional[int] = None
+    ) -> bool:
+        """
+        Cache the latest hashprice payload in Redis.
+        """
+        if not self.redis:
+            return False
 
+        try:
+            value = json.dumps(payload)
+            ttl = HASHPRICE_CACHE_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+            if ttl and ttl > 0:
+                await self.redis.set(HASHPRICE_CACHE_KEY, value, ex=ttl)
+            else:
+                await self.redis.set(HASHPRICE_CACHE_KEY, value)
+            return True
+        except Exception as e:
+            logger.error("Failed to set hashprice cache: %s", e)
+            return False
+
+    async def get_hashprice_cache(self) -> Optional[dict]:
+        """
+        Read the latest hashprice payload from Redis.
+        """
+        if not self.redis:
+            return None
+
+        try:
+            value = await self.redis.get(HASHPRICE_CACHE_KEY)
+            if not value:
+                return None
+            return json.loads(value)
+        except Exception as e:
+            logger.error("Failed to get hashprice cache: %s", e)
+            return None
 
     async def get_connected_miners(self) -> list[str]:
         """
