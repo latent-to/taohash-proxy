@@ -195,4 +195,43 @@ class AllocatorRuntimeState:
         except Exception as e:
             logger.error("Failed to persist order health: %s", e)
 
-    
+    async def set_last_tick(self, now: datetime) -> None:
+        if not self._redis:
+            return
+        try:
+            await self._redis.hset(
+                _HASH_META, _META_LAST_TICK_TS, str(_to_unix_seconds(now))
+            )
+        except Exception as e:
+            logger.error("Failed to persist allocator last_tick_ts: %s", e)
+
+    async def record_miner_moves(self, worker_ips: list[str], now: datetime) -> None:
+        """Persist cooldown timestamps for moved miners."""
+
+        if not self._redis or not worker_ips:
+            return
+
+        ts = str(_to_unix_seconds(now))
+        ttl = self._miner_last_move_ttl_seconds
+        try:
+            pipe = self._redis.pipeline()
+            for worker_ip in worker_ips:
+                pipe.set(self._miner_last_move_key(worker_ip), ts, ex=ttl)
+            await pipe.execute()
+        except Exception as e:
+            logger.error("Failed to persist miner cooldown timestamps: %s", e)
+
+    @property
+    def _miner_last_move_ttl_seconds(self) -> int:
+        try:
+            cooldown_env = int(
+                os.getenv("ORDER_ALLOCATOR_MINER_COOLDOWN_SECONDS", "600")
+            )
+        except Exception:
+            cooldown_env = 600
+
+        ttl = int(_MINER_LAST_MOVE_TTL_SECONDS_DEFAULT)
+        return max(60, ttl, cooldown_env * 2)
+
+    def _miner_last_move_key(self, worker_ip: str) -> str:
+        return f"{_KEY_MINER_LAST_MOVE_PREFIX}{worker_ip}"
