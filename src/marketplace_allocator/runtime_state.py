@@ -80,3 +80,95 @@ class AllocatorRuntimeState:
     @property
     def _redis(self):
         return getattr(self._redis_client, "redis", None)
+
+    async def load_view(
+        self,
+        worker_ips: list[str],
+        order_ids: Optional[list[str]] = None,
+    ) -> RuntimeStateView:
+        """
+        Load runtime state for this tick.
+
+        This view contains:
+          * last_tick timestamp (for dt/alpha)
+          * per-miner last move timestamps (cooldowns)
+          * per-miner cumulative counters (for pool health)
+          * per-order pool health state (HEALTHY/WARMUP/DEGRADED/BACKOFF)
+
+        Args:
+            worker_ips: List of worker IPs to load state for.
+            order_ids: List of order IDs to load state for.
+
+        Returns:
+            RuntimeStateView: View of allocator runtime state for this tick.
+        """
+
+        if not self._redis:
+            return RuntimeStateView(
+                last_tick_ts=None,
+                miner_last_move_at={},
+                miner_counters={},
+                order_health={},
+            )
+
+        try:
+            last_tick_raw = await self._redis.hget(_HASH_META, _META_LAST_TICK_TS)
+            last_tick_ts = (
+                _from_unix_seconds(float(last_tick_raw)) if last_tick_raw else None
+            )
+
+            # Fetch last movement information from miners
+            miner_last_move_at: dict[str, datetime] = {}
+            if worker_ips:
+                keys = [self._miner_last_move_key(w) for w in worker_ips]
+                raw_values = await self._redis.mget(keys)
+                for worker_ip, raw in zip(worker_ips, raw_values):
+                    if raw is None:
+                        continue
+                    try:
+                        miner_last_move_at[worker_ip] = _from_unix_seconds(float(raw))
+                    except (TypeError, ValueError):
+                        continue
+
+            # Fetch per-miner share share stats for pool health tracking
+            miner_counters: dict[str, "MinerCounterRecord"] = {}
+            if worker_ips:
+                raw_values = await self._redis.hmget(_HASH_MINER_COUNTERS, worker_ips)
+                for worker_ip, raw in zip(worker_ips, raw_values):
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                        miner_counters[worker_ip] = MinerCounterRecord.from_dict(
+                            payload
+                        )
+                    except Exception:
+                        continue
+
+            # Fetch per-order health status
+            order_health: dict[str, "OrderHealthRecord"] = {}
+            if order_ids:
+                raw_values = await self._redis.hmget(_HASH_ORDER_HEALTH, order_ids)
+                for oid, raw in zip(order_ids, raw_values):
+                    if not raw:
+                        continue
+                    try:
+                        payload = json.loads(raw)
+                        order_health[oid] = OrderHealthRecord.from_dict(payload)
+                    except Exception:
+                        continue
+
+            return RuntimeStateView(
+                last_tick_ts=last_tick_ts,
+                miner_last_move_at=miner_last_move_at,
+                miner_counters=miner_counters,
+                order_health=order_health,
+            )
+        except Exception as e:
+            logger.error("Failed to load allocator runtime state: %s", e)
+            return RuntimeStateView(
+                last_tick_ts=None,
+                miner_last_move_at={},
+                miner_counters={},
+                order_health={},
+            )
