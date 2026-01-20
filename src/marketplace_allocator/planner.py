@@ -73,3 +73,67 @@ def _order_id_from_label(ctx: PlanningContext, label: str) -> Optional[str]:
         return None
     return label
 
+
+def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
+
+    now = ctx.snapshot.now
+    ranked = _rank_orders(ctx)
+    eligible_orders = {order.order_id for order in ranked}
+
+    # ----------------------------------------------------------------------
+    # Sum all miner hashrates to know how much capacity we have to allocate.
+    # ----------------------------------------------------------------------
+    supply_eh_s = float(sum(miner.hashrate_eh_s for miner in ctx.snapshot.miners))
+
+    # ----------------------------------------------------------------------
+    # Walk orders in priority order, giving each as much hashrate as it can
+    # take (up to its cap) before moving to the next. This ensures highest-
+    # paying orders are fully satisfied first.
+    # ----------------------------------------------------------------------
+    targets: dict[str, float] = {}
+    # Effective caps include overshoot allowance to prevent rejecting miners
+    # whose hashrate slightly exceeds the remaining capacity.
+    effective_caps: dict[str, float] = {}
+    remaining = supply_eh_s
+    for order in ranked:
+        cap = float("inf")
+        if order.limit_eh_s is not None:
+            try:
+                cap = float(order.limit_eh_s)
+            except Exception:
+                cap = float("inf")
+            cap = cap * (1.0 + float(ctx.config.overshoot_pct))
+
+        effective_caps[order.order_id] = cap
+
+        if remaining <= 0:
+            targets[order.order_id] = 0.0
+            continue
+
+        target = min(cap, remaining)
+        if target < 0:
+            target = 0.0
+
+        targets[order.order_id] = target
+        remaining -= target
+
+    # ----------------------------------------------------------------------
+    # Group miners by their current pool_label to see where hashrate is now.
+    # This lets us compute deltas (target - current) for each order.
+    # ----------------------------------------------------------------------
+    current_allocation: dict[str, float] = {}
+    miners_by_order: dict[str, list["MinerSnapshot"]] = {}
+    idle_miners: list["MinerSnapshot"] = []
+    currently_mined: set[str] = set()
+
+    for miner in ctx.snapshot.miners:
+        order_id = _order_id_from_label(ctx, miner.pool_label)
+        if order_id is None:
+            idle_miners.append(miner)
+            continue
+
+        currently_mined.add(order_id)
+        current_allocation[order_id] = current_allocation.get(order_id, 0.0) + float(
+            miner.hashrate_eh_s
+        )
+        miners_by_order.setdefault(order_id, []).append(miner)
