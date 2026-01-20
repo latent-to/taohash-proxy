@@ -137,3 +137,90 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             miner.hashrate_eh_s
         )
         miners_by_order.setdefault(order_id, []).append(miner)
+
+    # ----------------------------------------------------------------------
+    # Orders flagged by rules (ineligible, unhealthy pools) must be emptied.
+    # Set their target to 0 so all their miners become donors.
+    # ----------------------------------------------------------------------
+    hard_drain_ids = set(ctx.hard_drain_ids)
+    for order_id in hard_drain_ids:
+        targets[order_id] = 0.0
+
+    # ----------------------------------------------------------------------
+    # Limit how much hashrate can move per tick to avoid thrashing. Market
+    # moves use exponential damping (alpha); hard-drain moves get full budget.
+    # ----------------------------------------------------------------------
+    alpha = _compute_alpha(
+        ctx.config.rebalance_rate,
+        ctx.tick_elapsed_clamped_seconds,
+        float(ctx.config.interval_seconds),
+    )
+    if ctx.freeze_market_moves:
+        alpha = 0.0
+
+    budget: dict[str, float] = {}
+
+    deadband = float(ctx.config.rebalance_threshold_eh_s)
+
+    # Eligible orders: damped budget
+    for order in ranked:
+        order_id = order.order_id
+        delta = targets.get(order_id, 0.0) - current_allocation.get(order_id, 0.0)
+        if abs(delta) <= deadband:
+            budget[order_id] = 0.0
+        else:
+            budget[order_id] = alpha * abs(delta)
+
+    # Hard drain orders: full drain budget
+    for order_id in hard_drain_ids:
+        budget[order_id] = current_allocation.get(order_id, 0.0)
+
+    # ----------------------------------------------------------------------
+    # Categorize miners that can be moved: idle (unassigned), forced (on bad
+    # orders), and soft (on oversupplied orders). See _AvailableMiners docstring.
+    # ----------------------------------------------------------------------
+    donors_idle = sorted(idle_miners, key=lambda miner: -miner.hashrate_eh_s)
+
+    donors_forced: list = []
+    for order_id in hard_drain_ids:
+        donors_forced.extend(miners_by_order.get(order_id, []))
+    donors_forced.sort(key=lambda miner: -miner.hashrate_eh_s)
+
+    # Soft donors: eligible orders that are oversupplied (current > target)
+    rank_index = {order.order_id: rank for rank, order in enumerate(ranked)}
+    soft_donor_order_ids = [
+        order_id
+        for order_id in eligible_orders
+        if current_allocation.get(order_id, 0.0) > targets.get(order_id, 0.0) + deadband
+    ]
+    soft_donor_order_ids.sort(
+        key=lambda order_id: rank_index.get(order_id, 10**9), reverse=True
+    )
+
+    donors_soft_by_order: dict[str, list] = {}
+    for order_id in soft_donor_order_ids:
+        order_miners = list(miners_by_order.get(order_id, []))
+        order_miners.sort(key=lambda miner: -miner.hashrate_eh_s)
+        donors_soft_by_order[order_id] = order_miners
+
+    donors = _AvailableMiners(
+        idle=donors_idle, forced=donors_forced, soft_by_order=donors_soft_by_order
+    )
+
+    # ----------------------------------------------------------------------
+    # Orders that need more hashrate (target > current). Processed in priority
+    # order so highest-paying orders receive miners first.
+    # ----------------------------------------------------------------------
+    receivers: list[str] = []
+    for order in ranked:
+        order_id = order.order_id
+        need_total = targets.get(order_id, 0.0) - current_allocation.get(order_id, 0.0)
+        if need_total > deadband:
+            receivers.append(order_id)
+
+    # ----------------------------------------------------------------------
+    # Miner Selection Helpers
+    # These functions draw miners from donor pools while respecting cooldowns
+    # (recently moved miners) and capacity limits (miner too large for order).
+    # ----------------------------------------------------------------------
+    moved_ips: set[str] = set()  # Track miners moved this tick to avoid double-moves
