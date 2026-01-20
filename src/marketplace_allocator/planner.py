@@ -1,3 +1,25 @@
+"""
+TaoHash Marketplace Allocator Planner.
+
+This module implements the core marketplace algorithm. It consumes a
+PlanningContext (prepared by the rules pipeline) and produces:
+
+  * AllocationPlan: a list of miner moves
+  * TickDiagnostics: a compact explanation of targets, budgets, and moves
+
+Key Algorithm Properties:
+  * Price-time ranking: highest-paying orders fill first, ties broken by queue time
+  * Greedy fill: each order receives hashrate up to its cap before moving to the next
+  * Exponential damping: market rebalances happen gradually to avoid thrashing
+  * Hard-drain: miners on ineligible/unknown orders are evacuated immediately
+
+Entry Point:
+  plan_tick(ctx: PlanningContext) -> (AllocationPlan, TickDiagnostics)
+
+Called By:
+  order_allocator.py -> _run_once() invokes plan_tick() after rules are applied
+"""
+
 from __future__ import annotations
 
 import math
@@ -75,17 +97,53 @@ def _order_id_from_label(ctx: PlanningContext, label: str) -> Optional[str]:
 
 
 def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
+    """Plan one allocator tick.
+
+    Overview:
+        The planner answers: "Given current miner positions and order priorities,
+        which miners should move where?" It computes ideal targets for each order,
+        compares to current allocation, and generates moves to close the gap.
+        Moves are damped (gradual) to avoid thrashing, except for hard-drains
+        which happen immediately.
+
+    Algorithm Steps:
+        1. Rank orders by price (desc), then queue time (asc)
+        2. Compute total supply from all miners
+        3. Compute targets via greedy fill (high-priority orders fill first)
+        4. Compute current allocation from each miner's pool_label
+        5. Set target=0 for hard-drain orders (must evacuate)
+        6. Compute movement budgets: damped for market moves, full for hard-drain
+        7. Build donor pools: idle → forced → soft (in priority order)
+        8. Identify receivers (orders where target > current)
+        9. Execute moves:
+           a) Fill receivers by drawing from donor pools
+           b) Evacuate any remaining forced-drain miners to default
+           c) Shed excess from oversupplied orders to default
+        10. Build diagnostics for telemetry
+
+    Args:
+        ctx: PlanningContext with eligibility/health rules already applied.
+
+    Returns:
+        (AllocationPlan, TickDiagnostics) - moves to execute and telemetry.
+
+    Note:
+        This function is pure and deterministic. All side effects
+        (DB/Redis writes) happen in the executor.
+    """
 
     now = ctx.snapshot.now
     ranked = _rank_orders(ctx)
     eligible_orders = {order.order_id for order in ranked}
 
     # ----------------------------------------------------------------------
+    # Step 1-2: Total Supply
     # Sum all miner hashrates to know how much capacity we have to allocate.
     # ----------------------------------------------------------------------
     supply_eh_s = float(sum(miner.hashrate_eh_s for miner in ctx.snapshot.miners))
 
     # ----------------------------------------------------------------------
+    # Step 3: Compute Ideal Targets (Greedy Fill)
     # Walk orders in priority order, giving each as much hashrate as it can
     # take (up to its cap) before moving to the next. This ensures highest-
     # paying orders are fully satisfied first.
@@ -118,6 +176,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         remaining -= target
 
     # ----------------------------------------------------------------------
+    # Step 4: Compute Current Allocation
     # Group miners by their current pool_label to see where hashrate is now.
     # This lets us compute deltas (target - current) for each order.
     # ----------------------------------------------------------------------
@@ -139,6 +198,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         miners_by_order.setdefault(order_id, []).append(miner)
 
     # ----------------------------------------------------------------------
+    # Step 5: Hard Drain Orders
     # Orders flagged by rules (ineligible, unhealthy pools) must be emptied.
     # Set their target to 0 so all their miners become donors.
     # ----------------------------------------------------------------------
@@ -147,6 +207,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         targets[order_id] = 0.0
 
     # ----------------------------------------------------------------------
+    # Step 6: Movement Budgets
     # Limit how much hashrate can move per tick to avoid thrashing. Market
     # moves use exponential damping (alpha); hard-drain moves get full budget.
     # ----------------------------------------------------------------------
@@ -176,6 +237,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         budget[order_id] = current_allocation.get(order_id, 0.0)
 
     # ----------------------------------------------------------------------
+    # Step 7: Build Donor Pools
     # Categorize miners that can be moved: idle (unassigned), forced (on bad
     # orders), and soft (on oversupplied orders). See _AvailableMiners docstring.
     # ----------------------------------------------------------------------
@@ -208,6 +270,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     )
 
     # ----------------------------------------------------------------------
+    # Step 8: Identify Receivers
     # Orders that need more hashrate (target > current). Processed in priority
     # order so highest-paying orders receive miners first.
     # ----------------------------------------------------------------------
@@ -231,7 +294,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             worker_ip, now, ctx.config.miner_cooldown_seconds
         )
 
-    _FIT_EPS = 1e-12
+    _FIT_EPS = 1e-12  # Tolerance for floating-point hashrate comparisons
 
     def _fits(miner: MinerSnapshot, max_hashrate: float) -> bool:
         """Check if miner's hashrate fits within the remaining capacity."""
@@ -300,6 +363,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         return None
 
     # ----------------------------------------------------------------------
+    # Step 9: Execute Moves (Plan Construction)
     # Fill receivers from donors, then evacuate remaining forced miners,
     # then shed excess from oversupplied orders. Respects max_switches limit.
     # ----------------------------------------------------------------------
@@ -340,6 +404,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
 
     max_switches = int(ctx.config.max_switches_per_tick)
 
+    # Phase 1: Fill receivers by drawing from donor pools (idle -> forced -> soft)
     for receiver_id in receivers:
         if len(moves) >= max_switches:
             break
@@ -355,6 +420,8 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             continue
 
         while need > deadband and len(moves) < max_switches:
+            # Respect effective caps: if miner chunks are large, prefer smaller
+            # miners that fit within the remaining capacity.
             remaining_cap = effective_caps.get(receiver_id, float("inf"))
             if not math.isinf(remaining_cap):
                 remaining_cap = max(
@@ -386,6 +453,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             record_move(miner, source_order_id, receiver_id, reason)
             need -= float(miner.hashrate_eh_s)
 
+    # Phase 2: Evacuate remaining forced-drain miners to default (idle) pool
     while len(moves) < max_switches:
         picked = pick_forced(float("inf"), allow_cooldown=True)
         if picked is None:
@@ -393,6 +461,8 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         miner, source_order_id = picked
         record_move(miner, source_order_id, None, MoveReason.HARD_DRAIN)
 
+    # Phase 3: Shed excess from oversupplied orders to default (damped)
+    # Needed when order caps shrink or there are no undersupplied receivers.
     for donor_order_id in soft_donor_order_ids:
         if len(moves) >= max_switches:
             break
@@ -415,7 +485,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             shed -= float(miner.hashrate_eh_s)
 
     # ----------------------------------------------------------------------
-    # Build Diagnostics
+    # Step 10: Build Diagnostics
     # Compile telemetry data for monitoring and debugging. Includes per-order
     # stats (target, current, budget) and tick-level summary.
     # ----------------------------------------------------------------------
