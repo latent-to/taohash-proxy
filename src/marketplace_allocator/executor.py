@@ -1,3 +1,12 @@
+"""
+TaoHash Marketplace Allocator Executor.
+
+The executor applies a plan by:
+  * updating miner assignments in Postgres
+  * publishing switch commands to proxies via Redis pub/sub (immediate state)
+  * updating allocator runtime state (cooldowns, last_tick)
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -53,12 +62,15 @@ class PlanExecutor:
         for move in plan.moves:
             try:
                 if move.to_order_id is None:
+                    # No active assignment
                     await delete_assignment(self._db.pool, move.worker_ip)
+                    # Switch back to miner's main pool
                     await self._publisher.publish_switch_default(move.worker_ip)
                     moved_ips.append(move.worker_ip)
                     result.moved += 1
                     continue
 
+                # Move to an order
                 order = order_map.get(move.to_order_id)
                 if not order:
                     logger.warning(
@@ -69,11 +81,13 @@ class PlanExecutor:
                     result.failed += 1
                     continue
 
+                # Ensure assignment points to this order
                 await delete_assignment(self._db.pool, move.worker_ip)
                 created = await create_assignment(
                     self._db.pool, move.worker_ip, order.order_id
                 )
                 if created is None:
+                    # Best effort fallback: keep miner on default to avoid ghost mining
                     logger.warning(
                         "Allocator failed to create assignment for miner %s -> order %s",
                         move.worker_ip,
@@ -100,6 +114,7 @@ class PlanExecutor:
                 )
                 result.failed += 1
 
+        # Persist runtime state
         try:
             await self._state.record_miner_moves(moved_ips, snapshot.now)
             await self._state.set_last_tick(snapshot.now)
