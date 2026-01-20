@@ -290,3 +290,60 @@ async def order_allocator_loop(
         pool_health_backoff_base_seconds=health_backoff_base,
         pool_health_backoff_max_seconds=health_backoff_max,
     )
+
+    # Runtime state + executor
+    runtime_state = AllocatorRuntimeState(redis_client)
+    executor = PlanExecutor(marketplace_db, redis_publisher, runtime_state)
+
+    lock_key = _allocator_lock_key()
+    logger.info(
+        "Order allocator starting (poll=%ss, p=%.2f, interval=%ss, max_switches=%s)",
+        config.poll_seconds,
+        config.rebalance_rate,
+        config.interval_seconds,
+        config.max_switches_per_tick,
+    )
+
+    # Leader lock: only one allocator should be active
+    while True:
+        try:
+            async with marketplace_db.pool.acquire() as conn:
+                got_lock = await conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1)",
+                    lock_key,
+                )
+
+                if not got_lock:
+                    logger.debug("Allocator follower: lock held by another instance")
+                    await asyncio.sleep(config.poll_seconds)
+                    continue
+
+                logger.info("Allocator leader lock acquired")
+
+                try:
+                    while True:
+                        await _run_once(
+                            marketplace_db=marketplace_db,
+                            redis_client=redis_client,
+                            redis_publisher=redis_publisher,
+                            config=config,
+                            runtime_state=runtime_state,
+                            executor=executor,
+                        )
+                        await asyncio.sleep(config.poll_seconds)
+                finally:
+                    try:
+                        await conn.fetchval(
+                            "SELECT pg_advisory_unlock($1)",
+                            lock_key,
+                        )
+                    except Exception:
+                        pass
+                    logger.warning("Allocator leader lock released")
+
+        except asyncio.CancelledError:
+            logger.info("Order allocator stopped")
+            raise
+        except Exception as e:
+            logger.error("Allocator loop error: %s", e)
+            await asyncio.sleep(config.poll_seconds)
