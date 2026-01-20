@@ -203,3 +203,90 @@ async def _run_once(
             diag.alpha,
         )
 
+
+async def order_allocator_loop(
+    marketplace_db: MarketplaceDB,
+    redis_client: RedisClient,
+    redis_publisher: RedisPublisher,
+    poll_seconds: int,
+) -> None:
+    """Main allocator loop.
+
+    Enabled by env var:
+      ENABLE_MARKETPLACE_ALLOCATOR=true
+
+    Optional tuning env vars:
+      ORDER_ALLOCATOR_POLL_SECONDS
+      ORDER_ALLOCATOR_P
+      ORDER_ALLOCATOR_INTERVAL_SECONDS
+      ORDER_ALLOCATOR_OVERSHOOT_PCT
+      ORDER_ALLOCATOR_MINER_COOLDOWN_SECONDS
+      ORDER_ALLOCATOR_MAX_SWITCHES_PER_TICK
+      ORDER_ALLOCATOR_ENFORCE_HASHPRICE_FLOOR
+      ORDER_ALLOCATOR_DELTA_DEADBAND_EH_S
+    """
+
+    if not env_bool("ENABLE_MARKETPLACE_ALLOCATOR", default=False):
+        logger.info(
+            "Order allocator disabled (set ENABLE_MARKETPLACE_ALLOCATOR=true to enable)"
+        )
+        return
+
+    if not marketplace_db or not marketplace_db.pool:
+        logger.warning("Order allocator disabled: marketplace DB unavailable")
+        return
+
+    if not redis_client or not redis_publisher:
+        logger.warning("Order allocator disabled: Redis unavailable")
+        return
+
+    # Config
+    poll = int(os.getenv("ORDER_ALLOCATOR_POLL_SECONDS", str(poll_seconds)))
+    p = float(os.getenv("ORDER_ALLOCATOR_P", "0.20"))
+    interval = int(os.getenv("ORDER_ALLOCATOR_INTERVAL_SECONDS", "300"))
+    overshoot = float(os.getenv("ORDER_ALLOCATOR_OVERSHOOT_PCT", "0.15"))
+    cooldown = int(os.getenv("ORDER_ALLOCATOR_MINER_COOLDOWN_SECONDS", "600"))
+    max_switches = int(os.getenv("ORDER_ALLOCATOR_MAX_SWITCHES_PER_TICK", "50"))
+    enforce_floor = env_bool("ORDER_ALLOCATOR_ENFORCE_HASHPRICE_FLOOR", default=False)
+    deadband = float(os.getenv("ORDER_ALLOCATOR_DELTA_DEADBAND_EH_S", "0"))
+
+    # Pool health tuning
+    enable_pool_health = env_bool("ORDER_ALLOCATOR_ENABLE_POOL_HEALTH", default=True)
+    health_warmup = int(os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_WARMUP_SECONDS", "120"))
+    health_min_samples = int(os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_MIN_SAMPLES", "20"))
+    health_no_notify = int(
+        os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_NO_NOTIFY_SECONDS", "120")
+    )
+    health_other_reject = float(
+        os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_OTHER_REJECT_THRESHOLD", "0.20")
+    )
+    health_reject = float(
+        os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_REJECT_THRESHOLD", "0.50")
+    )
+    health_ema = float(os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_EMA_ALPHA", "0.30"))
+    health_backoff_base = int(
+        os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_BACKOFF_BASE_SECONDS", "120")
+    )
+    health_backoff_max = int(
+        os.getenv("ORDER_ALLOCATOR_POOL_HEALTH_BACKOFF_MAX_SECONDS", "900")
+    )
+
+    config = AllocatorConfig(
+        poll_seconds=poll,
+        rebalance_rate=p,
+        interval_seconds=interval,
+        overshoot_pct=overshoot,
+        miner_cooldown_seconds=cooldown,
+        max_switches_per_tick=max_switches,
+        enforce_hashprice_floor=enforce_floor,
+        rebalance_threshold_eh_s=deadband,
+        enable_pool_health=enable_pool_health,
+        pool_health_warmup_seconds=health_warmup,
+        pool_health_min_samples=health_min_samples,
+        pool_health_no_notify_seconds=health_no_notify,
+        pool_health_other_reject_threshold=health_other_reject,
+        pool_health_reject_threshold=health_reject,
+        pool_health_ema_alpha=health_ema,
+        pool_health_backoff_base_seconds=health_backoff_base,
+        pool_health_backoff_max_seconds=health_backoff_max,
+    )
