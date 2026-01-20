@@ -142,3 +142,139 @@ class MinerGroupStats:
             return top_label
 
         return "unknown"
+
+    def to_dict(self, sessions: list[Any]) -> dict:
+        """Convert to the dict format expected by the allocator.
+
+        Args:
+            sessions: List of original session objects (for worker_name/miner_agent).
+
+        Returns:
+            Dict matching the schema used by update_proxy_miners_with_stats().
+        """
+        return {
+            "hashrate": self.hashrate,
+            "hashrate_gh": self.hashrate / 1e9,
+            "difficulty": self.difficulty,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "rejected_breakdown": {
+                "stale": self.rejected_stale,
+                "duplicate": self.rejected_duplicate,
+                "low_diff": self.rejected_low_diff,
+                "other": self.rejected_other,
+            },
+            "pool_disconnects": self.pool_disconnects,
+            "pool_label": self.get_pool_label(),
+            "worker_name": sessions[0].worker_name or "" if sessions else "",
+            "miner_agent": (
+                sessions[0].stats.miner_agent if sessions and sessions[0].stats else ""
+            ),
+            "connected_minutes": round(self.connected_minutes, 1),
+            "last_notify_age_s": (
+                min(self.last_notify_ages) if self.last_notify_ages else None
+            ),
+            "session_count": len(sessions),
+            "sessions": self.session_rows,
+        }
+
+    def merge_from_dict(
+        self,
+        stats: dict,
+        worker_name_out: Optional[list] = None,
+        miner_agent_out: Optional[list] = None,
+    ) -> None:
+        """Merge stats from a dict representation into this instance.
+
+        Used for cross-proxy aggregation when the same worker_ip appears on
+        multiple proxies.
+
+        Args:
+            stats: Dict from Redis (output of to_dict or similar).
+            worker_name_out: Optional list to collect worker_name values.
+            miner_agent_out: Optional list to collect miner_agent values.
+        """
+        # Sum primary counters
+        self.hashrate += _to_float(stats.get("hashrate"))
+        self.accepted += _to_int(stats.get("accepted"))
+        self.rejected += _to_int(stats.get("rejected"))
+        self.pool_disconnects += _to_int(stats.get("pool_disconnects"))
+
+        # Max for difficulty and connected_minutes
+        self.difficulty = max(self.difficulty, _to_float(stats.get("difficulty")))
+        self.connected_minutes = max(
+            self.connected_minutes,
+            _to_float(stats.get("connected_minutes")),
+        )
+
+        # Merge rejected breakdown
+        breakdown = stats.get("rejected_breakdown") or {}
+        self.rejected_stale += _to_int(breakdown.get("stale"))
+        self.rejected_duplicate += _to_int(breakdown.get("duplicate"))
+        self.rejected_low_diff += _to_int(breakdown.get("low_diff"))
+        self.rejected_other += _to_int(breakdown.get("other"))
+
+        # last_notify_age_s: smaller is better (more recent). Collect for min.
+        last_notify_age = stats.get("last_notify_age_s")
+        if last_notify_age is not None:
+            self.last_notify_ages.append(_to_float(last_notify_age, 1e18))
+
+        # Concatenate sessions
+        src_sessions = stats.get("sessions") or []
+        self.session_rows.extend(src_sessions)
+
+        # Collect pool labels from sessions for majority vote
+        for session in src_sessions:
+            if isinstance(session, dict) and session.get("pool_label"):
+                self.pool_labels.append(str(session.get("pool_label")))
+
+        # If no session-level labels, use top-level pool_label
+        if not src_sessions and stats.get("pool_label"):
+            self.pool_labels.append(str(stats.get("pool_label")))
+
+        # Collect worker_name and miner_agent for first-non-empty logic
+        if worker_name_out is not None and stats.get("worker_name"):
+            worker_name_out.append(stats.get("worker_name"))
+        if miner_agent_out is not None and stats.get("miner_agent"):
+            miner_agent_out.append(stats.get("miner_agent"))
+
+    def to_merged_dict(
+        self,
+        worker_name: str = "",
+        miner_agent: str = "",
+    ) -> dict:
+        """Convert to dict after cross-proxy merging.
+
+        Unlike to_dict(), this doesn't require session objects since we're
+        working with already-serialized data from Redis.
+
+        Args:
+            worker_name: First non-empty worker_name collected during merging.
+            miner_agent: First non-empty miner_agent collected during merging.
+
+        Returns:
+            Dict matching the schema for the allocator.
+        """
+        return {
+            "hashrate": self.hashrate,
+            "hashrate_gh": self.hashrate / 1e9,
+            "difficulty": self.difficulty,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "rejected_breakdown": {
+                "stale": self.rejected_stale,
+                "duplicate": self.rejected_duplicate,
+                "low_diff": self.rejected_low_diff,
+                "other": self.rejected_other,
+            },
+            "pool_disconnects": self.pool_disconnects,
+            "pool_label": self.get_pool_label(),
+            "worker_name": worker_name,
+            "miner_agent": miner_agent,
+            "connected_minutes": round(self.connected_minutes, 1),
+            "last_notify_age_s": (
+                min(self.last_notify_ages) if self.last_notify_ages else None
+            ),
+            "session_count": len(self.session_rows),
+            "sessions": self.session_rows,
+        }
