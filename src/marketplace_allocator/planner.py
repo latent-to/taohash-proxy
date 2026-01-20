@@ -413,3 +413,42 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
                 continue
             record_move(miner, donor_order_id, None, MoveReason.MARKET_REBALANCE)
             shed -= float(miner.hashrate_eh_s)
+
+    # ----------------------------------------------------------------------
+    # Build Diagnostics
+    # Compile telemetry data for monitoring and debugging. Includes per-order
+    # stats (target, current, budget) and tick-level summary.
+    # ----------------------------------------------------------------------
+    order_diagnostics: list[OrderDiagnostics] = []
+    for order in ctx.snapshot.orders:
+        order_id = order.order_id
+        eligible = order_id in eligible_orders
+        order_diagnostics.append(
+            OrderDiagnostics(
+                order_id=order_id,
+                eligible=eligible,
+                ineligible_reason=ctx.ineligible_reason.get(order_id),
+                price_btc_eh_day=order.price_btc_eh_day,
+                limit_eh_s=order.limit_eh_s,
+                balance_btc=order.balance_btc,
+                target_eh_s=float(targets.get(order_id, 0.0)),
+                current_eh_s=float(current_allocation.get(order_id, 0.0)),
+                budget_eh_s=float(budget.get(order_id, 0.0)),
+                hard_drain=order_id in hard_drain_ids,
+            )
+        )
+
+    tick_diagnostics = TickDiagnostics(
+        tick_ts=now,
+        dt_seconds=float(ctx.tick_elapsed_seconds),
+        supply_eh_s=float(supply_eh_s),
+        miner_count=len(ctx.snapshot.miners),
+        eligible_order_count=len(ranked),
+        hard_drain_order_count=len(hard_drain_ids),
+        planned_switches=len(moves),
+        alpha=float(alpha),
+        orders=order_diagnostics,
+        events=list(ctx.events),
+    )
+
+    return AllocationPlan(moves=moves), tick_diagnostics
