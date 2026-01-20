@@ -1,3 +1,15 @@
+"""
+TaoHash Marketplace Allocator Pool Health Evaluation.
+
+This module provides a pool health layer for upstream pools:
+
+  * Uses proxy heartbeats (accepted/rejected counts, reject breakdown,
+    last_notify_age_s) to infer whether an upstream pool is doing useful work.
+  * Applies hysteresis via EMA smoothing, warmup windows, and backoff.
+  * Produces a simple per-order state that the allocator can use to
+    temporarily exclude an order (drain miners) when the pool looks unhealthy.
+"""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
