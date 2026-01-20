@@ -224,3 +224,192 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     # (recently moved miners) and capacity limits (miner too large for order).
     # ----------------------------------------------------------------------
     moved_ips: set[str] = set()  # Track miners moved this tick to avoid double-moves
+
+    def in_cooldown(worker_ip: str) -> bool:
+        """Check if miner was recently moved and should not be moved again yet."""
+        return ctx.runtime.miner_in_cooldown(
+            worker_ip, now, ctx.config.miner_cooldown_seconds
+        )
+
+    _FIT_EPS = 1e-12
+
+    def _fits(miner: MinerSnapshot, max_hashrate: float) -> bool:
+        """Check if miner's hashrate fits within the remaining capacity."""
+        if math.isinf(max_hashrate):
+            return True
+        return float(miner.hashrate_eh_s) <= float(max_hashrate) + _FIT_EPS
+
+    def pick_idle(max_hashrate: float) -> Optional[tuple[MinerSnapshot, None]]:
+        """Pick an idle miner that fits within max_hashrate.
+
+        Returns (miner, None) since idle miners have no source order.
+        Skips miners in cooldown. Keeps large miners in pool for larger-cap orders.
+        """
+        for idx, miner in enumerate(donors.idle):
+            if miner.worker_ip in moved_ips:
+                continue
+            if in_cooldown(miner.worker_ip):
+                continue
+            if not _fits(miner, max_hashrate):
+                continue
+            donors.idle.pop(idx)
+            return miner, None
+        return None
+
+    def pick_forced(
+        max_hashrate: float, allow_cooldown: bool
+    ) -> Optional[tuple[MinerSnapshot, Optional[str]]]:
+        """Pick a miner from forced-drain orders (must evacuate).
+
+        Returns (miner, source_order_id). Forced miners can bypass cooldown
+        when allow_cooldown=True because they MUST be moved off bad orders.
+        """
+        for idx, miner in enumerate(donors.forced):
+            if miner.worker_ip in moved_ips:
+                continue
+            if (not allow_cooldown) and in_cooldown(miner.worker_ip):
+                continue
+            if not _fits(miner, max_hashrate):
+                continue
+            donors.forced.pop(idx)
+            source_order_id = _order_id_from_label(ctx, miner.pool_label)
+            return miner, source_order_id
+        return None
+
+    def pick_soft(
+        max_hashrate: float, allow_cooldown: bool
+    ) -> Optional[tuple[MinerSnapshot, str]]:
+        """Pick a miner from an oversupplied eligible order.
+
+        Returns (miner, source_order_id). Iterates lowest-priority orders first
+        to minimize disruption to high-paying customers.
+        """
+        for donor_order_id in soft_donor_order_ids:
+            pool = donors.soft_by_order.get(donor_order_id)
+            if not pool:
+                continue
+            for idx, miner in enumerate(pool):
+                if miner.worker_ip in moved_ips:
+                    continue
+                if (not allow_cooldown) and in_cooldown(miner.worker_ip):
+                    continue
+                if not _fits(miner, max_hashrate):
+                    continue
+                pool.pop(idx)
+                return miner, donor_order_id
+        return None
+
+    # ----------------------------------------------------------------------
+    # Fill receivers from donors, then evacuate remaining forced miners,
+    # then shed excess from oversupplied orders. Respects max_switches limit.
+    # ----------------------------------------------------------------------
+    moves: list[PlanMove] = []
+
+    def record_move(
+        miner: MinerSnapshot,
+        source_order_id: Optional[str],
+        dest_order_id: Optional[str],
+        reason: MoveReason,
+    ) -> None:
+        """Record a planned move and update local allocation accounting.
+
+        Also marks the miner as moved so it won't be picked again this tick.
+        """
+        nonlocal moves
+        moved_ips.add(miner.worker_ip)
+        moves.append(
+            PlanMove(
+                worker_ip=miner.worker_ip,
+                from_label=miner.pool_label,
+                to_order_id=dest_order_id,
+                reason=reason,
+                hashrate_eh_s=float(miner.hashrate_eh_s),
+            )
+        )
+        # Update local accounting
+        if source_order_id:
+            current_allocation[source_order_id] = max(
+                0.0,
+                current_allocation.get(source_order_id, 0.0)
+                - float(miner.hashrate_eh_s),
+            )
+        if dest_order_id:
+            current_allocation[dest_order_id] = current_allocation.get(
+                dest_order_id, 0.0
+            ) + float(miner.hashrate_eh_s)
+
+    max_switches = int(ctx.config.max_switches_per_tick)
+
+    for receiver_id in receivers:
+        if len(moves) >= max_switches:
+            break
+
+        need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
+            receiver_id, 0.0
+        )
+        if need_total <= deadband:
+            continue
+
+        need = min(need_total, budget.get(receiver_id, 0.0))
+        if need <= 0:
+            continue
+
+        while need > deadband and len(moves) < max_switches:
+            remaining_cap = effective_caps.get(receiver_id, float("inf"))
+            if not math.isinf(remaining_cap):
+                remaining_cap = max(
+                    0.0,
+                    float(remaining_cap)
+                    - float(current_allocation.get(receiver_id, 0.0)),
+                )
+                if remaining_cap <= deadband:
+                    break
+
+            picked = pick_idle(remaining_cap)
+            source_kind = "idle"
+            if picked is None:
+                picked = pick_forced(remaining_cap, allow_cooldown=True)
+                source_kind = "forced"
+            if picked is None:
+                picked = pick_soft(remaining_cap, allow_cooldown=False)
+                source_kind = "soft"
+
+            if picked is None:
+                break
+
+            miner, source_order_id = picked
+            reason = (
+                MoveReason.HARD_DRAIN
+                if source_kind == "forced"
+                else MoveReason.MARKET_REBALANCE
+            )
+            record_move(miner, source_order_id, receiver_id, reason)
+            need -= float(miner.hashrate_eh_s)
+
+    while len(moves) < max_switches:
+        picked = pick_forced(float("inf"), allow_cooldown=True)
+        if picked is None:
+            break
+        miner, source_order_id = picked
+        record_move(miner, source_order_id, None, MoveReason.HARD_DRAIN)
+
+    for donor_order_id in soft_donor_order_ids:
+        if len(moves) >= max_switches:
+            break
+        excess = current_allocation.get(donor_order_id, 0.0) - targets.get(
+            donor_order_id, 0.0
+        )
+        if excess <= deadband:
+            continue
+        shed = min(excess, budget.get(donor_order_id, 0.0))
+        if shed <= 0:
+            continue
+        pool = donors.soft_by_order.get(donor_order_id, [])
+        while pool and shed > deadband and len(moves) < max_switches:
+            miner = pool.pop(0)
+            if miner.worker_ip in moved_ips:
+                continue
+            if in_cooldown(miner.worker_ip):
+                continue
+            record_move(miner, donor_order_id, None, MoveReason.MARKET_REBALANCE)
+            shed -= float(miner.hashrate_eh_s)
