@@ -158,6 +158,7 @@ def evaluate_pool_health(
     config: AllocatorConfig,
 ) -> PoolHealthDecision:
     """Evaluate order pool health and compute an updated state."""
+    # TODO: Add more documentation and explain what it returns
 
     if not config.enable_pool_health:
         miner_counters = {
@@ -178,7 +179,7 @@ def evaluate_pool_health(
     # ------------------------------------------------------------------
     # 1) Build per-order aggregated deltas from miner cumulative counters
     # ------------------------------------------------------------------
-    per_order: dict[str, OrderHealthTick] = {}
+    per_order_health: dict[str, OrderHealthTick] = {}
     miner_counters: dict[str, MinerCounterRecord] = {}
 
     for miner in miners:
@@ -194,7 +195,7 @@ def evaluate_pool_health(
         # If we don't have history, or the miner just moved pools, don't
         # attribute deltas this tick (avoids misclassifying new pools).
         if previous is None or str(previous.pool_label) != label:
-            tick = per_order.setdefault(label, OrderHealthTick())
+            tick = per_order_health.setdefault(label, OrderHealthTick())
             tick.observe_notify_age(miner.last_notify_age_s)
             continue
 
@@ -205,7 +206,7 @@ def evaluate_pool_health(
             or current.rejected < previous.rejected
             or current.rejected_other < previous.rejected_other
         ):
-            tick = per_order.setdefault(label, OrderHealthTick())
+            tick = per_order_health.setdefault(label, OrderHealthTick())
             tick.observe_notify_age(miner.last_notify_age_s)
             continue
 
@@ -214,7 +215,7 @@ def evaluate_pool_health(
         delta_other_rejected = current.rejected_other - previous.rejected_other
         delta_total = max(0, delta_accepted + delta_rejected)
 
-        tick = per_order.setdefault(label, OrderHealthTick())
+        tick = per_order_health.setdefault(label, OrderHealthTick())
         tick.delta_accepted += int(max(0, delta_accepted))
         tick.delta_rejected += int(max(0, delta_rejected))
         tick.delta_other_rejected += int(max(0, delta_other_rejected))
@@ -230,11 +231,11 @@ def evaluate_pool_health(
     # Consider only orders that are currently being mined (seen in per_order) or
     # already tracked in state.
     # Union of existing health records and new orders seen this tick.
-    relevant_order_ids = set(updated.keys()) | set(per_order.keys())
+    relevant_order_ids = set(updated.keys()) | set(per_order_health.keys())
 
     for order_id in relevant_order_ids:
         record = updated.get(order_id) or OrderHealthRecord()
-        tick = per_order.get(order_id) or OrderHealthTick()
+        tick = per_order_health.get(order_id) or OrderHealthTick()
 
         # Backoff handling
         if record.status == OrderHealthStatus.BACKOFF and record.backoff_until_ts > 0:
