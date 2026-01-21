@@ -417,7 +417,8 @@ class RedisClient:
 
                 try:
                     miners = json.loads(data)
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Failed to load miners from Redis: {e}")
                     continue
 
                 proxy_id = None
@@ -425,7 +426,8 @@ class RedisClient:
                     parts = str(key).split(":")
                     if len(parts) >= 3:
                         proxy_id = parts[1]
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Failed to parse proxy ID from Redis key: {e}")
                     pass
 
                 miners_by_proxy.append((proxy_id, miners))
@@ -441,13 +443,13 @@ class RedisClient:
                         continue
 
                     if proxy_id and isinstance(stats.get("sessions"), list):
-                        annotated_sessions: list[dict] = []
+                        _sessions: list[dict] = []
                         for session in stats.get("sessions") or []:
                             if isinstance(session, dict):
                                 session_dict = dict(session)
                                 session_dict.setdefault("proxy_id", proxy_id)
-                                annotated_sessions.append(session_dict)
-                        stats["sessions"] = annotated_sessions
+                                _sessions.append(session_dict)
+                        stats["sessions"] = _sessions
 
                     if worker_ip not in aggregators:
                         aggregators[worker_ip] = MinerGroupStats()
