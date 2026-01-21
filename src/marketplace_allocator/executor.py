@@ -89,9 +89,7 @@ class PlanExecutor:
                 if created is None:
                     # Best effort fallback: keep miner on default to avoid ghost mining
                     logger.warning(
-                        "Allocator failed to create assignment for miner %s -> order %s",
-                        move.worker_ip,
-                        order.order_id,
+                        f"Allocator failed to create assignment for miner {move.worker_ip} -> order {order.order_id}",
                     )
                     await self._publisher.publish_switch_default(move.worker_ip)
                     result.failed += 1
@@ -110,7 +108,7 @@ class PlanExecutor:
 
             except Exception as e:
                 logger.error(
-                    "Allocator executor error for miner %s: %s", move.worker_ip, e
+                    f"Allocator executor error for miner {move.worker_ip}: {e}"
                 )
                 result.failed += 1
 
@@ -119,7 +117,7 @@ class PlanExecutor:
             await self._state.record_miner_moves(moved_ips, snapshot.now)
             await self._state.set_last_tick(snapshot.now)
         except Exception as e:
-            logger.error("Failed to persist allocator runtime state: %s", e)
+            logger.error(f"Failed to persist allocator runtime state: {e}")
 
         return result
 

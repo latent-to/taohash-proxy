@@ -219,7 +219,7 @@ class AllocatorRuntimeState:
                 pipe.set(self._miner_last_move_key(worker_ip), ts, ex=ttl)
             await pipe.execute()
         except Exception as e:
-            logger.error("Failed to persist miner cooldown timestamps: %s", e)
+            logger.error(f"Failed to persist miner cooldown timestamps: {e}")
 
     @property
     def _miner_last_move_ttl_seconds(self) -> int:

@@ -66,4 +66,4 @@ async def publish_last_tick(redis_client: RedisClient, diag: TickDiagnostics) ->
         payload = json.dumps(_diag_to_dict(diag))
         await redis.set(_KEY_LAST_TICK, payload, ex=600)
     except Exception as e:
-        logger.error("Failed to publish allocator telemetry: %s", e)
+        logger.error(f"Failed to publish allocator telemetry: {e}")
