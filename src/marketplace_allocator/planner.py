@@ -96,7 +96,9 @@ def _order_id_from_label(ctx: PlanningContext, label: str) -> Optional[str]:
     return label
 
 
-def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
+def plan_tick(
+    planning_context: PlanningContext,
+) -> tuple[AllocationPlan, TickDiagnostics]:
     """Plan one allocator tick.
 
     Overview:
@@ -132,15 +134,17 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         (DB/Redis writes) happen in the executor.
     """
 
-    now = ctx.snapshot.now
-    ranked = _rank_orders(ctx)
+    now = planning_context.snapshot.now
+    ranked = _rank_orders(planning_context)
     eligible_orders = {order.order_id for order in ranked}
 
     # ----------------------------------------------------------------------
     # Step 1-2: Total Supply
     # Sum all miner hashrates to know how much capacity we have to allocate.
     # ----------------------------------------------------------------------
-    supply_eh_s = float(sum(miner.hashrate_eh_s for miner in ctx.snapshot.miners))
+    supply_eh_s = float(
+        sum(miner.hashrate_eh_s for miner in planning_context.snapshot.miners)
+    )
 
     # ----------------------------------------------------------------------
     # Step 3: Compute Ideal Targets (Greedy Fill)
@@ -160,7 +164,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
                 cap = float(order.limit_eh_s)
             except Exception:
                 cap = float("inf")
-            cap = cap * (1.0 + float(ctx.config.overshoot_pct))
+            cap = cap * (1.0 + float(planning_context.config.overshoot_pct))
 
         effective_caps[order.order_id] = cap
 
@@ -185,8 +189,8 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     idle_miners: list["MinerSnapshot"] = []
     currently_mined: set[str] = set()
 
-    for miner in ctx.snapshot.miners:
-        order_id = _order_id_from_label(ctx, miner.pool_label)
+    for miner in planning_context.snapshot.miners:
+        order_id = _order_id_from_label(planning_context, miner.pool_label)
         if order_id is None:
             idle_miners.append(miner)
             continue
@@ -202,7 +206,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     # Orders flagged by rules (ineligible, unhealthy pools) must be emptied.
     # Set their target to 0 so all their miners become donors.
     # ----------------------------------------------------------------------
-    hard_drain_ids = set(ctx.hard_drain_ids)
+    hard_drain_ids = set(planning_context.hard_drain_ids)
     for order_id in hard_drain_ids:
         targets[order_id] = 0.0
 
@@ -212,16 +216,16 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     # moves use exponential damping (alpha); hard-drain moves get full budget.
     # ----------------------------------------------------------------------
     alpha = _compute_alpha(
-        ctx.config.rebalance_rate,
-        ctx.tick_elapsed_clamped_seconds,
-        float(ctx.config.interval_seconds),
+        planning_context.config.rebalance_rate,
+        planning_context.tick_elapsed_clamped_seconds,
+        float(planning_context.config.interval_seconds),
     )
-    if ctx.freeze_market_moves:
+    if planning_context.freeze_market_moves:
         alpha = 0.0
 
     budget: dict[str, float] = {}
 
-    deadband = float(ctx.config.rebalance_threshold_eh_s)
+    deadband = float(planning_context.config.rebalance_threshold_eh_s)
 
     # Eligible orders: damped budget
     for order in ranked:
@@ -249,6 +253,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     donors_forced.sort(key=lambda miner: -miner.hashrate_eh_s)
 
     # Soft donors: eligible orders that are oversupplied (current > target)
+    # Priority is determined by the order's position in the ranked list.
     rank_index = {order.order_id: rank for rank, order in enumerate(ranked)}
     soft_donor_order_ids = [
         order_id
@@ -290,8 +295,8 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
 
     def in_cooldown(worker_ip: str) -> bool:
         """Check if miner was recently moved and should not be moved again yet."""
-        return ctx.runtime.miner_in_cooldown(
-            worker_ip, now, ctx.config.miner_cooldown_seconds
+        return planning_context.runtime.miner_in_cooldown(
+            worker_ip, now, planning_context.config.miner_cooldown_seconds
         )
 
     _FIT_EPS = 1e-12  # Tolerance for floating-point hashrate comparisons
@@ -335,7 +340,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
             if not _fits(miner, max_hashrate):
                 continue
             donors.forced.pop(idx)
-            source_order_id = _order_id_from_label(ctx, miner.pool_label)
+            source_order_id = _order_id_from_label(planning_context, miner.pool_label)
             return miner, source_order_id
         return None
 
@@ -402,9 +407,9 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
                 dest_order_id, 0.0
             ) + float(miner.hashrate_eh_s)
 
-    max_switches = int(ctx.config.max_switches_per_tick)
+    max_switches = int(planning_context.config.max_switches_per_tick)
 
-    # Phase 1: Fill receivers by drawing from donor pools (idle -> forced -> soft)
+    # Phase 1: Fill receivers by drawing from donor pools (forced -> idle -> soft)
     for receiver_id in receivers:
         if len(moves) >= max_switches:
             break
@@ -432,11 +437,11 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
                 if remaining_cap <= deadband:
                     break
 
-            picked = pick_idle(remaining_cap)
-            source_kind = "idle"
+            picked = pick_forced(remaining_cap, allow_cooldown=True)
+            source_kind = "forced"
             if picked is None:
-                picked = pick_forced(remaining_cap, allow_cooldown=True)
-                source_kind = "forced"
+                picked = pick_idle(remaining_cap)
+                source_kind = "idle"
             if picked is None:
                 picked = pick_soft(remaining_cap, allow_cooldown=False)
                 source_kind = "soft"
@@ -463,6 +468,7 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
 
     # Phase 3: Shed excess from oversupplied orders to default (damped)
     # Needed when order caps shrink or there are no undersupplied receivers.
+    # Use smallest miners first to avoid overshooting the excess.
     for donor_order_id in soft_donor_order_ids:
         if len(moves) >= max_switches:
             break
@@ -475,6 +481,8 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
         if shed <= 0:
             continue
         pool = donors.soft_by_order.get(donor_order_id, [])
+        # Reverse pool to get smallest miners first (prevent overshooting excess)
+        pool = list(reversed(pool))
         while pool and shed > deadband and len(moves) < max_switches:
             miner = pool.pop(0)
             if miner.worker_ip in moved_ips:
@@ -490,14 +498,14 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
     # stats (target, current, budget) and tick-level summary.
     # ----------------------------------------------------------------------
     order_diagnostics: list[OrderDiagnostics] = []
-    for order in ctx.snapshot.orders:
+    for order in planning_context.snapshot.orders:
         order_id = order.order_id
         eligible = order_id in eligible_orders
         order_diagnostics.append(
             OrderDiagnostics(
                 order_id=order_id,
                 eligible=eligible,
-                ineligible_reason=ctx.ineligible_reason.get(order_id),
+                ineligible_reason=planning_context.ineligible_reason.get(order_id),
                 price_btc_eh_day=order.price_btc_eh_day,
                 limit_eh_s=order.limit_eh_s,
                 balance_btc=order.balance_btc,
@@ -510,15 +518,15 @@ def plan_tick(ctx: PlanningContext) -> tuple[AllocationPlan, TickDiagnostics]:
 
     tick_diagnostics = TickDiagnostics(
         tick_ts=now,
-        dt_seconds=float(ctx.tick_elapsed_seconds),
+        dt_seconds=float(planning_context.tick_elapsed_seconds),
         supply_eh_s=float(supply_eh_s),
-        miner_count=len(ctx.snapshot.miners),
+        miner_count=len(planning_context.snapshot.miners),
         eligible_order_count=len(ranked),
         hard_drain_order_count=len(hard_drain_ids),
         planned_switches=len(moves),
         alpha=float(alpha),
         orders=order_diagnostics,
-        events=list(ctx.events),
+        events=list(planning_context.events),
     )
 
     return AllocationPlan(moves=moves), tick_diagnostics
