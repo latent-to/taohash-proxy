@@ -56,3 +56,48 @@ async def probe_stratum_v1(
         "port": port,
         "timeout_s": timeout_s,
     }
+
+    # 1) DNS resolution (and SSRF safety)
+    try:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        ips = sorted({info[4][0] for info in infos})
+        details["resolved_ips"] = ips
+    except Exception as e:
+        return PoolProbeResult(
+            ok=False,
+            severity="warn",
+            reason="dns_resolution_failed",
+            details={
+                **details,
+                "error": str(e),
+                "took_ms": int((time.time() - t0) * 1000),
+            },
+        )
+
+    allowed_ips = []
+    disallowed_ips = []
+    for ip in ips:
+        if allow_private_hosts:
+            allowed_ips.append(ip)
+        else:
+            if _is_disallowed_ip(ip):
+                disallowed_ips.append(ip)
+            else:
+                allowed_ips.append(ip)
+
+    details["allowed_ips"] = allowed_ips
+    details["disallowed_ips"] = disallowed_ips
+
+    if not allowed_ips:
+        return PoolProbeResult(
+            ok=False,
+            severity="fail",
+            reason="disallowed_ip",
+            details={
+                **details,
+                "took_ms": int((time.time() - t0) * 1000),
+                "hint": "Pool host resolved only to private/loopback/reserved addresses. "
+                "Set ALLOW_PRIVATE_POOL_HOSTS=true to override (not recommended).",
+            },
+        )
