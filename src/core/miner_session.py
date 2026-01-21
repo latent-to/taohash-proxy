@@ -697,6 +697,22 @@ class MinerSession:
 
                             self.stats.update_difficulty(effective_diff)
 
+                    elif method == "client.reconnect":
+                        params = message.get("params", [])
+                        target_host = (
+                            params[0] if len(params) > 0 else self.current_pool.host
+                        )
+                        target_port = (
+                            params[1] if len(params) > 1 else self.current_pool.port
+                        )
+                        wait_time = params[2] if len(params) > 2 else None
+                        logger.warning(
+                            f"[{self.miner_id} ({self.miner_agent})] "
+                            f"Blocked upstream client.reconnect to {target_host}:{target_port} "
+                            f"(wait={wait_time})"
+                        )
+                        continue
+
                     elif msg_id in self.pending_submits:
                         await self._handle_submit_response(message, msg_id)
 
