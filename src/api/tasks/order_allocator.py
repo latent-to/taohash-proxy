@@ -1,7 +1,7 @@
 """
 TaoHash Marketplace Order Allocator Background Task.
 
-This task runs in the API service and acts as the control plane* for
+This task runs as a background service and acts as the control plane for
 the TaoHash hashrate marketplace:
 
   * reads the current state (orders from Postgres, miners from Redis heartbeats)
@@ -70,6 +70,7 @@ async def _run_once(
     now = datetime.now(timezone.utc)
 
     # 1) Snapshot orders
+    # TODO: Add data structures for get_orders and use them internally and for api calls
     order_rows = await get_orders(marketplace_db.pool, status="active")
     orders: list[OrderSnapshot] = []
     for row in order_rows:
@@ -93,11 +94,12 @@ async def _run_once(
 
     # 2) Snapshot miners (from Redis heartbeats)
     miners_stats = await redis_client.get_all_miners_with_stats()
+    # TODO: Add data structures for get_all_miners_with_stats and use them internally and for api calls
     miners: list[MinerSnapshot] = []
     for worker_ip, stats in miners_stats.items():
         try:
             hashrate_gh = float(stats.get("hashrate_gh") or 0.0)
-            rb = stats.get("rejected_breakdown") or {}
+            rejected_breakdown = stats.get("rejected_breakdown") or {}
             miners.append(
                 MinerSnapshot(
                     worker_ip=worker_ip,
@@ -105,10 +107,10 @@ async def _run_once(
                     pool_label=str(stats.get("pool_label") or "unknown"),
                     accepted=int(stats.get("accepted") or 0),
                     rejected=int(stats.get("rejected") or 0),
-                    rejected_stale=int(rb.get("stale") or 0),
-                    rejected_duplicate=int(rb.get("duplicate") or 0),
-                    rejected_low_diff=int(rb.get("low_diff") or 0),
-                    rejected_other=int(rb.get("other") or 0),
+                    rejected_stale=int(rejected_breakdown.get("stale") or 0),
+                    rejected_duplicate=int(rejected_breakdown.get("duplicate") or 0),
+                    rejected_low_diff=int(rejected_breakdown.get("low_diff") or 0),
+                    rejected_other=int(rejected_breakdown.get("other") or 0),
                     last_notify_age_s=(
                         float(stats.get("last_notify_age_s"))
                         if stats.get("last_notify_age_s") is not None
@@ -117,7 +119,8 @@ async def _run_once(
                     worker_name=str(stats.get("worker_name") or ""),
                 )
             )
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to parse miner snapshot: {e}")
             continue
 
     # 3) Hashprice
@@ -125,7 +128,13 @@ async def _run_once(
     if config.enforce_hashprice_floor:
         hashprice_payload = await redis_client.get_hashprice_cache()
         if hashprice_payload:
-            hashprice_btc_eh_day = _parse_decimal(hashprice_payload.get("btc_eh_day"))
+            try:
+                hashprice_btc_eh_day = _parse_decimal(
+                    hashprice_payload.get("btc_eh_day")
+                )
+            except Exception as e:
+                logger.error(f"Failed to parse hashprice: {e}")
+                hashprice_btc_eh_day = None
 
     snapshot = AllocationSnapshot(
         now=now,
@@ -138,9 +147,9 @@ async def _run_once(
     worker_ips = [m.worker_ip for m in miners]
     order_ids: set[str] = {o.order_id for o in orders}
     # Include any currently mined non-default labels so backoff/warmup state is stable
-    for m in miners:
-        if m.pool_label not in config.default_labels:
-            order_ids.add(str(m.pool_label))
+    for miner in miners:
+        if miner.pool_label not in config.default_labels:
+            order_ids.add(str(miner.pool_label))
 
     runtime_view = await runtime_state.load_view(
         worker_ips, order_ids=sorted(order_ids)
@@ -158,32 +167,36 @@ async def _run_once(
         await runtime_state.persist_miner_counters(decision.miner_counters)
         await runtime_state.persist_order_health(decision.order_health)
     except Exception as e:
-        logger.error("Pool health evaluation failed: %s", e)
+        logger.error(f"Pool health evaluation failed: {e}")
         decision = None
 
     # 5) Apply rules
-    ctx = PlanningContext(snapshot=snapshot, config=config, runtime=runtime_view)
+    planning_context = PlanningContext(
+        snapshot=snapshot, config=config, runtime=runtime_view
+    )
     if decision is not None:
-        ctx.order_health = decision.order_health
+        planning_context.order_health = decision.order_health
         # Attach health events for telemetry
-        for ev in decision.events:
+        for event in decision.events:
             try:
-                data = dict(ev.get("data") or {})
-                if ev.get("order_id"):
-                    data.setdefault("order_id", ev.get("order_id"))
-                ctx.add_event(
-                    ev.get("level", "info"),
-                    ev.get("code", "POOL_HEALTH"),
-                    ev.get("message", "Pool health event"),
+                data = dict(event.get("data") or {})
+                if event.get("order_id"):
+                    data.setdefault("order_id", event.get("order_id"))
+                planning_context.add_event(
+                    event.get("level", "info"),
+                    event.get("code", "POOL_HEALTH"),
+                    event.get("message", "Pool health event"),
                     **data,
                 )
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to add event to planning context: {e}")
                 continue
+
     for rule in default_rules():
-        rule.apply(ctx)
+        rule.apply(planning_context)
 
     # 6) Plan
-    plan, diag = plan_tick(ctx)
+    plan, diag = plan_tick(planning_context)
 
     # 7) Execute (DB + Redis) and persist runtime state
     await executor.apply(snapshot, plan)
@@ -194,13 +207,13 @@ async def _run_once(
     # Tick summary log
     if diag.planned_switches:
         logger.info(
-            "Allocator tick: miners=%s supply_eh_s=%.6f eligible=%s hard_drain=%s moves=%s alpha=%.3f",
-            diag.miner_count,
-            diag.supply_eh_s,
-            diag.eligible_order_count,
-            diag.hard_drain_order_count,
-            diag.planned_switches,
-            diag.alpha,
+            f"Allocator tick: "
+            f"miners={diag.miner_count} "
+            f"supply_eh_s={diag.supply_eh_s} "
+            f"eligible={diag.eligible_order_count} "
+            f"hard_drain={diag.hard_drain_order_count} "
+            f"moves={diag.planned_switches} "
+            f"alpha={diag.alpha:.3f}"
         )
 
 
@@ -217,7 +230,7 @@ async def order_allocator_loop(
 
     Optional tuning env vars:
       ORDER_ALLOCATOR_POLL_SECONDS
-      ORDER_ALLOCATOR_P
+      ORDER_ALLOCATOR_REBALANCE_RATE
       ORDER_ALLOCATOR_INTERVAL_SECONDS
       ORDER_ALLOCATOR_OVERSHOOT_PCT
       ORDER_ALLOCATOR_MINER_COOLDOWN_SECONDS
@@ -242,12 +255,12 @@ async def order_allocator_loop(
 
     # Config
     poll = int(os.getenv("ORDER_ALLOCATOR_POLL_SECONDS", str(poll_seconds)))
-    p = float(os.getenv("ORDER_ALLOCATOR_P", "0.20"))
+    rebalance_rate = float(os.getenv("ORDER_ALLOCATOR_REBALANCE_RATE", "0.20"))
     interval = int(os.getenv("ORDER_ALLOCATOR_INTERVAL_SECONDS", "300"))
     overshoot = float(os.getenv("ORDER_ALLOCATOR_OVERSHOOT_PCT", "0.15"))
     cooldown = int(os.getenv("ORDER_ALLOCATOR_MINER_COOLDOWN_SECONDS", "600"))
     max_switches = int(os.getenv("ORDER_ALLOCATOR_MAX_SWITCHES_PER_TICK", "50"))
-    enforce_floor = env_bool("ORDER_ALLOCATOR_ENFORCE_HASHPRICE_FLOOR", default=False)
+    enforce_floor = env_bool("ORDER_ALLOCATOR_ENFORCE_HASHPRICE_FLOOR", default=True)
     deadband = float(os.getenv("ORDER_ALLOCATOR_DELTA_DEADBAND_EH_S", "0"))
 
     # Pool health tuning
@@ -273,7 +286,7 @@ async def order_allocator_loop(
 
     config = AllocatorConfig(
         poll_seconds=poll,
-        rebalance_rate=p,
+        rebalance_rate=rebalance_rate,
         interval_seconds=interval,
         overshoot_pct=overshoot,
         miner_cooldown_seconds=cooldown,
@@ -297,11 +310,12 @@ async def order_allocator_loop(
 
     lock_key = _allocator_lock_key()
     logger.info(
-        "Order allocator starting (poll=%ss, p=%.2f, interval=%ss, max_switches=%s)",
-        config.poll_seconds,
-        config.rebalance_rate,
-        config.interval_seconds,
-        config.max_switches_per_tick,
+        f"Order allocator starting (\n"
+        f"  poll={config.poll_seconds}s,\n"
+        f"  p={config.rebalance_rate:.2f},\n"
+        f"  interval={config.interval_seconds}s,\n"
+        f"  max_switches={config.max_switches_per_tick}\n"
+        f")"
     )
 
     # Leader lock: only one allocator should be active
@@ -345,5 +359,5 @@ async def order_allocator_loop(
             logger.info("Order allocator stopped")
             raise
         except Exception as e:
-            logger.error("Allocator loop error: %s", e)
+            logger.error(f"Allocator loop error: {e}")
             await asyncio.sleep(config.poll_seconds)
