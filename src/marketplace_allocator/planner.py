@@ -2,7 +2,7 @@
 TaoHash Marketplace Allocator Planner.
 
 This module implements the core marketplace algorithm. It consumes a
-PlanningContext (prepared by the rules pipeline) and produces:
+PlanningInput (prepared by the rules pipeline) and produces:
 
   * AllocationPlan: a list of miner moves
   * TickDiagnostics: a compact explanation of targets, budgets, and moves
@@ -14,7 +14,7 @@ Key Algorithm Properties:
   * Hard-drain: miners on ineligible/unknown orders are evacuated immediately
 
 Entry Point:
-  plan_tick(ctx: PlanningContext) -> (AllocationPlan, TickDiagnostics)
+  plan_tick(ctx: PlanningInput) -> (AllocationPlan, TickDiagnostics)
 
 Called By:
   order_allocator.py -> _run_once() invokes plan_tick() after rules are applied
@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.marketplace_allocator.types import MinerSnapshot
-from src.marketplace_allocator.rules import PlanningContext
+from src.marketplace_allocator.rules import PlanningInput
 from src.marketplace_allocator.types import (
     AllocationPlan,
     MoveReason,
@@ -67,11 +67,11 @@ class _AvailableMiners:
 def _compute_alpha(rate: float, dt_seconds: float, interval_seconds: float) -> float:
     """Compute exponential smoothing coefficient for movement damping.
 
-    Calculates the damping factor (alpha) used to limit how much hashrate can
+    Calculates the damping factor (damping_factor) used to limit how much hashrate can
     move per tick, preventing thrashing. The formula ensures that over the
     specified interval, approximately 'rate' fraction of the delta will move.
 
-    Formula: alpha = 1 - (1 - rate)^(dt/interval)
+    Formula: damping_factor = 1 - (1 - rate)^(dt/interval)
 
     Args:
         rate: Target rebalance rate (0-1), fraction of delta to move per interval
@@ -93,7 +93,7 @@ def _compute_alpha(rate: float, dt_seconds: float, interval_seconds: float) -> f
     return 1.0 - math.pow(1.0 - float(rate), exponent)
 
 
-def _rank_orders(ctx: PlanningContext) -> list:
+def _rank_orders(ctx: PlanningInput) -> list:
     """Rank eligible orders by priority for greedy allocation.
 
     Sorts orders by price (descending), then by queue time (ascending).
@@ -112,7 +112,7 @@ def _rank_orders(ctx: PlanningContext) -> list:
     )
 
 
-def _is_default_label(ctx: PlanningContext, label: str) -> bool:
+def _is_default_label(ctx: PlanningInput, label: str) -> bool:
     """Check if a pool label is a default/idle label.
 
     Default labels (e.g., "normal", "high_diff") indicate miners not assigned
@@ -129,7 +129,7 @@ def _is_default_label(ctx: PlanningContext, label: str) -> bool:
     return label in ctx.config.default_labels
 
 
-def _order_id_from_label(ctx: PlanningContext, label: str) -> Optional[str]:
+def _order_id_from_label(ctx: PlanningInput, label: str) -> Optional[str]:
     """Extract order_id from a pool label. Returns None if it's a default label."""
     if _is_default_label(ctx, label):
         return None
@@ -154,6 +154,43 @@ def _fits(miner: MinerSnapshot, max_hashrate: float) -> bool:
     if math.isinf(max_hashrate):
         return True
     return float(miner.hashrate_eh_s) <= float(max_hashrate) + _FIT_EPS
+
+
+def _compute_effective_deadband(
+    config_deadband: float,
+    miners: list[MinerSnapshot],
+) -> float:
+    """Compute a deadband consistent with miner chunk sizes.
+
+    We move discrete miner chunks (groups). If the planner chases deltas smaller
+    than realistic chunk sizes, it can get stuck retrying the same tiny residual
+    every tick. This adjusts the deadband upward based on the smallest positive
+    miner chunk.
+
+    Behavior:
+        effective_deadband = max(config_deadband, 0.5 * min_positive_chunk)
+
+    Args:
+        config_deadband: configured rebalance threshold (EH/s)
+        miners: list of miner snapshots for this tick
+
+    Returns:
+        effective deadband (EH/s)
+    """
+    min_chunk: Optional[float] = None
+    for miner in miners:
+        try:
+            hashrate = float(miner.hashrate_eh_s)
+        except Exception:
+            continue
+        if hashrate <= 0:
+            continue
+        min_chunk = hashrate if min_chunk is None else min(min_chunk, hashrate)
+
+    if min_chunk is None:
+        return float(config_deadband)
+
+    return max(float(config_deadband), 0.5 * float(min_chunk))
 
 
 # Data computation functions
@@ -229,7 +266,7 @@ def _compute_targets(
 
 
 def _compute_current_allocation(
-    ctx: PlanningContext,
+    ctx: PlanningInput,
     miners: list[MinerSnapshot],
 ) -> tuple[
     dict[str, float], dict[str, list[MinerSnapshot]], list[MinerSnapshot], set[str]
@@ -299,13 +336,13 @@ def _compute_budgets(
     targets: dict[str, float],
     current_allocation: dict[str, float],
     hard_drain_ids: set[str],
-    alpha: float,
+    damping_factor: float,
     deadband: float,
 ) -> dict[str, float]:
     """Compute movement budgets to limit hashrate movement per tick.
 
     Limits how much hashrate can move per tick to avoid thrashing. Market
-    moves use exponential damping (alpha * delta), while hard-drain moves
+    moves use exponential damping (damping_factor * delta), while hard-drain moves
     get full budget (must evacuate immediately). Movements below deadband
     threshold are ignored to prevent micro-adjustments.
 
@@ -314,12 +351,12 @@ def _compute_budgets(
         targets: Target allocation per order
         current_allocation: Current allocation per order
         hard_drain_ids: Orders that must be evacuated (get full budget)
-        alpha: Damping coefficient (0-1) from exponential smoothing
+        damping_factor: Damping coefficient (0-1) from exponential smoothing
         deadband: Minimum delta threshold to trigger movement (EH/s)
 
     Returns:
         Dict mapping order_id -> movement budget (EH/s). Budget is 0.0 if
-        delta is below deadband, alpha * abs(delta) for eligible orders,
+        delta is below deadband, damping_factor * abs(delta) for eligible orders,
         or full current_allocation for hard-drain orders.
     """
     budget: dict[str, float] = {}
@@ -331,7 +368,7 @@ def _compute_budgets(
         if abs(delta) <= deadband:
             budget[order_id] = 0.0
         else:
-            budget[order_id] = alpha * abs(delta)
+            budget[order_id] = damping_factor * abs(delta)
 
     # Hard drain orders: full drain budget
     for order_id in hard_drain_ids:
@@ -341,7 +378,7 @@ def _compute_budgets(
 
 
 def _build_donor_pools(
-    ctx: PlanningContext,
+    ctx: PlanningInput,
     idle_miners: list[MinerSnapshot],
     miners_by_order: dict[str, list[MinerSnapshot]],
     hard_drain_ids: set[str],
@@ -456,7 +493,7 @@ class MinerPicker:
     def __init__(
         self,
         donors: _AvailableMiners,
-        ctx: PlanningContext,
+        ctx: PlanningInput,
         moved_ips: set[str],
         now: datetime,
         soft_donor_order_ids: list[str],
@@ -632,7 +669,7 @@ class MoveRecorder:
 
 
 def _fill_receivers(
-    ctx: PlanningContext,
+    ctx: PlanningInput,
     receivers: list[str],
     targets: dict[str, float],
     current_allocation: dict[str, float],
@@ -646,42 +683,36 @@ def _fill_receivers(
     """Phase 1: Fill undersupplied orders by drawing miners from donor pools.
 
     Allocates miners to orders that need more hashrate (receivers) by drawing
-    from donor pools in priority order: forced -> idle -> soft. Respects movement
-    budgets (damped), effective caps (with overshoot), and max_switches limit.
+    from donor pools in priority order: forced -> idle -> soft.
 
-    Priority ensures forced-drain miners are moved first (must evacuate), then
-    idle miners (no disruption), then soft donors (minimal disruption to low-priority
-    orders).
-
-    Args:
-        ctx: Planning context
-        receivers: List of order IDs that need hashrate (in priority order)
-        targets: Target allocation per order
-        current_allocation: Current allocation per order (updated as moves recorded)
-        budget: Movement budget per order (damped)
-        effective_caps: Effective caps per order (with overshoot allowance)
-        deadband: Minimum delta threshold
-        max_switches: Maximum number of moves allowed this tick
-        picker: Miner picker for selecting miners from donor pools
-        recorder: Move recorder for tracking planned moves
+    Budget discipline (B-fix):
+      - Forced-drain moves are NOT budget-limited (still cap-limited).
+      - Market moves (idle/soft) are budget-limited, and selection is bounded by:
+            min(remaining_cap, remaining_need, remaining_market_budget)
     """
     for receiver_id in receivers:
         if len(recorder.moves) >= max_switches:
             break
 
-        need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
+        # Receiver must actually need hashrate (target > current)
+        initial_need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
             receiver_id, 0.0
         )
-        if need_total <= deadband:
+        if initial_need_total <= deadband:
             continue
 
-        need = min(need_total, budget.get(receiver_id, 0.0))
-        if need <= 0:
-            continue
+        market_budget_total = float(budget.get(receiver_id, 0.0))
+        market_used = 0.0
 
-        while need > deadband and len(recorder.moves) < max_switches:
-            # Respect effective caps: if miner chunks are large, prefer smaller
-            # miners that fit within the remaining capacity.
+        while len(recorder.moves) < max_switches:
+            # Recompute need_total after any move (forced or market) updates local accounting
+            need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
+                receiver_id, 0.0
+            )
+            if need_total <= deadband:
+                break
+
+            # Respect effective caps
             remaining_cap = effective_caps.get(receiver_id, float("inf"))
             if not math.isinf(remaining_cap):
                 remaining_cap = max(
@@ -692,26 +723,33 @@ def _fill_receivers(
                 if remaining_cap <= deadband:
                     break
 
-            picked = picker.pick_forced(remaining_cap, allow_cooldown=True)
-            source_kind = "forced"
+            # 1) Forced donors first: cap-limited, NOT budget-limited
+            picked_forced = picker.pick_forced(remaining_cap, allow_cooldown=True)
+            if picked_forced is not None:
+                miner, source_order_id = picked_forced
+                recorder.record_move(miner, source_order_id, receiver_id, MoveReason.HARD_DRAIN)
+                continue
+
+            # 2) Market donors: budget-limited AND cap-limited
+            remaining_market_budget = max(0.0, market_budget_total - market_used)
+            need_market = min(float(need_total), float(remaining_market_budget))
+            if need_market <= deadband:
+                break
+
+            selection_bound = float(need_market)
+            if not math.isinf(remaining_cap):
+                selection_bound = min(selection_bound, float(remaining_cap))
+
+            picked = picker.pick_idle(selection_bound)
             if picked is None:
-                picked = picker.pick_idle(remaining_cap)
-                source_kind = "idle"
-            if picked is None:
-                picked = picker.pick_soft(remaining_cap, allow_cooldown=False)
-                source_kind = "soft"
+                picked = picker.pick_soft(selection_bound, allow_cooldown=False)
 
             if picked is None:
                 break
 
             miner, source_order_id = picked
-            reason = (
-                MoveReason.HARD_DRAIN
-                if source_kind == "forced"
-                else MoveReason.MARKET_REBALANCE
-            )
-            recorder.record_move(miner, source_order_id, receiver_id, reason)
-            need -= float(miner.hashrate_eh_s)
+            recorder.record_move(miner, source_order_id, receiver_id, MoveReason.MARKET_REBALANCE)
+            market_used += float(miner.hashrate_eh_s)
 
 
 def _evacuate_forced(
@@ -724,15 +762,6 @@ def _evacuate_forced(
     Moves any remaining miners from hard-drain orders (ineligible, unhealthy)
     to the default/idle pool. These miners must be evacuated immediately
     regardless of cooldown, as their orders cannot receive hashrate.
-
-    Called after filling receivers to handle forced-drain miners that weren't
-    allocated to new orders. Continues until all forced miners are evacuated
-    or max_switches limit is reached.
-
-    Args:
-        max_switches: Maximum number of moves allowed this tick
-        picker: Miner picker for selecting forced-drain miners
-        recorder: Move recorder for tracking planned moves
     """
     while len(recorder.moves) < max_switches:
         picked = picker.pick_forced(float("inf"), allow_cooldown=True)
@@ -743,7 +772,7 @@ def _evacuate_forced(
 
 
 def _shed_excess(
-    ctx: PlanningContext,
+    ctx: PlanningInput,
     soft_donor_order_ids: list[str],
     targets: dict[str, float],
     current_allocation: dict[str, float],
@@ -761,44 +790,42 @@ def _shed_excess(
     Needed when order caps shrink or there are no undersupplied receivers to
     fill. Uses damped budgets to prevent sudden changes.
 
-    Uses smallest miners first (reversed pool order) to avoid overshooting the
-    excess amount.
-
-    Args:
-        ctx: Planning context for cooldown checks
-        soft_donor_order_ids: Oversupplied order IDs (lowest priority first)
-        targets: Target allocation per order
-        current_allocation: Current allocation per order
-        budget: Movement budget per order (damped)
-        donors: Donor pools containing miners to move
-        deadband: Minimum delta threshold
-        max_switches: Maximum number of moves allowed this tick
-        moved_ips: Set of worker IPs already moved (to avoid duplicates)
-        now: Current timestamp for cooldown checks
-        recorder: Move recorder for tracking planned moves
+    Budget discipline (B-fix):
+      - Only shed miner chunks that fit within remaining shed budget.
+      - Because we iterate smallest-first, if the smallest can't fit, stop.
     """
     for donor_order_id in soft_donor_order_ids:
         if len(recorder.moves) >= max_switches:
             break
+
         excess = current_allocation.get(donor_order_id, 0.0) - targets.get(
             donor_order_id, 0.0
         )
         if excess <= deadband:
             continue
-        shed = min(excess, budget.get(donor_order_id, 0.0))
-        if shed <= 0:
+
+        shed = min(float(excess), float(budget.get(donor_order_id, 0.0)))
+        if shed <= deadband:
             continue
+
         pool = donors.soft_by_order.get(donor_order_id, [])
         # Get smallest miners first (prevent overshooting excess)
         pool = list(reversed(pool))
+
         while pool and shed > deadband and len(recorder.moves) < max_switches:
             miner = pool.pop(0)
+
             if miner.worker_ip in moved_ips:
                 continue
             if ctx.runtime.miner_in_cooldown(
                 miner.worker_ip, now, ctx.config.miner_cooldown_seconds
             ):
                 continue
+
+            # STRICT budget fit: don't overshoot shed
+            if not _fits(miner, shed):
+                break
+
             recorder.record_move(
                 miner, donor_order_id, None, MoveReason.MARKET_REBALANCE
             )
@@ -809,7 +836,7 @@ def _shed_excess(
 
 
 def _build_diagnostics(
-    ctx: PlanningContext,
+    ctx: PlanningInput,
     now: datetime,
     supply_eh_s: float,
     ranked_orders: list,
@@ -818,30 +845,14 @@ def _build_diagnostics(
     current_allocation: dict[str, float],
     budget: dict[str, float],
     hard_drain_ids: set[str],
-    alpha: float,
+    damping_factor: float,
     moves: list[PlanMove],
 ) -> TickDiagnostics:
     """Build diagnostics and telemetry data for monitoring.
 
     Compiles comprehensive diagnostics including per-order statistics (target,
-    current, budget, eligibility) and tick-level summary (supply, moves, alpha).
+    current, budget, eligibility) and tick-level summary (supply, moves, damping_factor).
     Published to Redis for real-time monitoring and debugging.
-
-    Args:
-        ctx: Planning context with snapshot and events
-        now: Current tick timestamp
-        supply_eh_s: Total hashrate supply
-        ranked_orders: Eligible orders sorted by priority
-        eligible_orders: Set of eligible order IDs
-        targets: Target allocation per order
-        current_allocation: Current allocation per order
-        budget: Movement budget per order
-        hard_drain_ids: Orders that must be evacuated
-        alpha: Damping coefficient used this tick
-        moves: List of planned moves
-
-    Returns:
-        TickDiagnostics with per-order stats and tick summary
     """
     order_diagnostics: list[OrderDiagnostics] = []
     for order in ctx.snapshot.orders:
@@ -870,7 +881,7 @@ def _build_diagnostics(
         eligible_order_count=len(ranked_orders),
         hard_drain_order_count=len(hard_drain_ids),
         planned_switches=len(moves),
-        alpha=float(alpha),
+        damping_factor=float(damping_factor),
         orders=order_diagnostics,
         events=list(ctx.events),
     )
@@ -880,7 +891,7 @@ def _build_diagnostics(
 
 
 def plan_tick(
-    planning_context: PlanningContext,
+    planning_context: PlanningInput,
 ) -> tuple[AllocationPlan, TickDiagnostics]:
     """Plan one allocator tick - core allocation algorithm.
 
@@ -944,21 +955,24 @@ def plan_tick(
     targets = _apply_hard_drain(targets, hard_drain_ids)
 
     # Step 6: Movement Budgets
-    alpha = _compute_alpha(
+    damping_factor = _compute_alpha(
         planning_context.config.rebalance_rate,
         planning_context.tick_elapsed_clamped_seconds,
         float(planning_context.config.interval_seconds),
     )
     if planning_context.freeze_market_moves:
-        alpha = 0.0
+        damping_factor = 0.0
 
-    deadband = float(planning_context.config.rebalance_threshold_eh_s)
+    # Deadband (B-fix): make it consistent with miner chunk sizes
+    config_deadband = float(planning_context.config.rebalance_threshold_eh_s)
+    deadband = _compute_effective_deadband(config_deadband, planning_context.snapshot.miners)
+
     budget = _compute_budgets(
         ranked,
         targets,
         current_allocation,
         hard_drain_ids,
-        alpha,
+        damping_factor,
         deadband,
     )
 
@@ -1034,7 +1048,7 @@ def plan_tick(
         current_allocation,
         budget,
         hard_drain_ids,
-        alpha,
+        damping_factor,
         recorder.moves,
     )
 
