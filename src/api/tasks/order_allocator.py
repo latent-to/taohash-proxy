@@ -24,8 +24,8 @@ from typing import Optional
 from src.api.services.market_order_queries import get_orders
 from src.marketplace_allocator.executor import PlanExecutor
 from src.marketplace_allocator.planner import plan_tick
-from src.marketplace_allocator.rules import PlanningContext, default_rules
-from src.marketplace_allocator.runtime_state import AllocatorRuntimeState
+from src.marketplace_allocator.rules import PlanningInput, default_rules
+from src.marketplace_allocator.runtime_state import RuntimeStateStore
 from src.marketplace_allocator.telemetry import publish_last_tick
 from src.marketplace_allocator.pool_health import evaluate_pool_health
 from src.marketplace_allocator.types import (
@@ -64,7 +64,7 @@ async def _run_once(
     redis_client: RedisClient,
     redis_publisher: RedisPublisher,
     config: AllocatorConfig,
-    runtime_state: AllocatorRuntimeState,
+    runtime_state: RuntimeStateStore,
     executor: PlanExecutor,
 ) -> None:
     now = datetime.now(timezone.utc)
@@ -171,7 +171,7 @@ async def _run_once(
         decision = None
 
     # 5) Apply rules
-    planning_context = PlanningContext(
+    planning_context = PlanningInput(
         snapshot=snapshot, config=config, runtime=runtime_view
     )
     if decision is not None:
@@ -305,7 +305,7 @@ async def order_allocator_loop(
     )
 
     # Runtime state + executor
-    runtime_state = AllocatorRuntimeState(redis_client)
+    runtime_state = RuntimeStateStore(redis_client)
     executor = PlanExecutor(marketplace_db, redis_publisher, runtime_state)
 
     lock_key = _allocator_lock_key()
