@@ -17,7 +17,7 @@ from src.marketplace_allocator.types import (
     OrderSnapshot,
 )
 from src.marketplace_allocator.runtime_state import RuntimeStateView
-from src.marketplace_allocator.pool_health import OrderHealthRecord, PoolHealthState
+from src.marketplace_allocator.pool_health import PoolHealthRecord, PoolHealthState
 
 
 @dataclass
@@ -44,7 +44,7 @@ class PlanningContext:
     freeze_market_moves: bool = False
 
     # Pool health view (computed outside the rules pipeline).
-    order_health: dict[str, OrderHealthRecord] = field(default_factory=dict)
+    order_health: dict[str, PoolHealthRecord] = field(default_factory=dict)
 
     # Events for debugging and telemetry
     events: list[DecisionEvent] = field(default_factory=list)

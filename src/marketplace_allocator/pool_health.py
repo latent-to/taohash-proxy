@@ -101,7 +101,7 @@ def _ema_update(prev_ema: float, alpha: float, sample: float) -> float:
 
 
 def _compute_backoff_seconds(
-    record: "OrderHealthRecord", config: AllocatorConfig
+    record: "PoolHealthRecord", config: AllocatorConfig
 ) -> int:
     """Compute backoff duration using exponential backoff.
 
@@ -211,7 +211,7 @@ class MinerPoolShareStats:
 
 
 @dataclass
-class OrderHealthRecord:
+class PoolHealthRecord:
     """Persistent per-order health state for upstream pool monitoring.
 
     Tracks the health status and metrics of an upstream mining pool. Used by
@@ -257,14 +257,14 @@ class OrderHealthRecord:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict) -> "OrderHealthRecord":
+    def from_dict(cls, data: dict) -> "PoolHealthRecord":
         """Create a health record from a dictionary loaded from Redis.
 
         Args:
             data: Dictionary containing health record fields
 
         Returns:
-            OrderHealthRecord with values from the dictionary
+            PoolHealthRecord with values from the dictionary
         """
         status_raw = str(data.get("status") or PoolHealthState.HEALTHY.value)
         try:
@@ -336,12 +336,12 @@ class PoolHealthDecision:
     the next tick and by the rules pipeline.
 
     Attributes:
-        order_health: Updated health records per order (order_id -> OrderHealthRecord)
+        order_health: Updated health records per order (order_id -> PoolHealthRecord)
         miner_counters: Updated counter records per miner (worker_ip -> MinerPoolShareStats)
         events: List of diagnostic events (warnings/info) for telemetry
     """
 
-    order_health: dict[str, OrderHealthRecord]
+    order_health: dict[str, PoolHealthRecord]
     miner_counters: dict[str, MinerPoolShareStats]
     events: list[dict]
 
@@ -450,7 +450,7 @@ def _emit_event(
 
 def _apply_backoff(
     *,
-    record: OrderHealthRecord,
+    record: PoolHealthRecord,
     now_ts: float,
     backoff_s: int,
     reason: str,
@@ -482,7 +482,7 @@ def evaluate_pool_health(
     *,
     now: datetime,
     miners: list[MinerSnapshot],
-    prev_order_health: dict[str, OrderHealthRecord],
+    prev_order_health: dict[str, PoolHealthRecord],
     prev_miner_counters: dict[str, MinerPoolShareStats],
     config: AllocatorConfig,
 ) -> PoolHealthDecision:
@@ -537,13 +537,13 @@ def evaluate_pool_health(
     # ------------------------------------------------------------------
     # 2) Update per-order health records
     # ------------------------------------------------------------------
-    updated: dict[str, OrderHealthRecord] = dict(prev_order_health)
+    updated: dict[str, PoolHealthRecord] = dict(prev_order_health)
     events: list[dict] = []
 
     relevant_order_ids = set(updated.keys()) | set(per_order_tick.keys())
 
     for order_id in relevant_order_ids:
-        record = updated.get(order_id) or OrderHealthRecord()
+        record = updated.get(order_id) or PoolHealthRecord()
         tick = per_order_tick.get(order_id) or OrderHealthTick()
 
         # ---- Backoff handling ----

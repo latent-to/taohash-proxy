@@ -16,7 +16,7 @@ from typing import Optional
 import json
 import os
 
-from src.marketplace_allocator.pool_health import MinerPoolShareStats, OrderHealthRecord
+from src.marketplace_allocator.pool_health import MinerPoolShareStats, PoolHealthRecord
 from src.utils.logger import get_logger
 from src.utils.redis_client import RedisClient
 
@@ -67,7 +67,7 @@ class RuntimeStateView:
     last_tick_ts: Optional[datetime]
     miner_last_move_at: dict[str, datetime]
     miner_counters: dict[str, "MinerPoolShareStats"]
-    order_health: dict[str, "OrderHealthRecord"]
+    order_health: dict[str, "PoolHealthRecord"]
 
     def miner_in_cooldown(self, worker_ip: str, now: datetime, cooldown_s: int) -> bool:
         last = self.miner_last_move_at.get(worker_ip)
@@ -244,7 +244,7 @@ class AllocatorRuntimeState:
 
     async def _load_order_health(
         self, order_ids: Optional[list[str]]
-    ) -> dict[str, OrderHealthRecord]:
+    ) -> dict[str, PoolHealthRecord]:
         """Load order health status records from Redis.
 
         Retrieves persistent health state for each order from Redis hash. Contains
@@ -257,9 +257,9 @@ class AllocatorRuntimeState:
                     empty, returns empty dict.
 
         Returns:
-            Dictionary mapping order_id -> OrderHealthRecord.
+            Dictionary mapping order_id -> PoolHealthRecord.
         """
-        order_health: dict[str, OrderHealthRecord] = {}
+        order_health: dict[str, PoolHealthRecord] = {}
         if not order_ids:
             return order_health
 
@@ -269,7 +269,7 @@ class AllocatorRuntimeState:
                 continue
             try:
                 payload = json.loads(raw)
-                order_health[oid] = OrderHealthRecord.from_dict(payload)
+                order_health[oid] = PoolHealthRecord.from_dict(payload)
             except Exception:
                 continue
 
@@ -295,7 +295,7 @@ class AllocatorRuntimeState:
         except Exception as e:
             logger.error(f"Failed to persist miner counters: {e}")
 
-    async def persist_order_health(self, health: dict[str, OrderHealthRecord]) -> None:
+    async def persist_order_health(self, health: dict[str, PoolHealthRecord]) -> None:
         """Persist order health records to Redis.
 
         Writes health status (HEALTHY/WARMUP/DEGRADED/BACKOFF) with backoff timestamps
@@ -303,7 +303,7 @@ class AllocatorRuntimeState:
         updated health state that determines order eligibility in future ticks.
 
         Args:
-            health: Dictionary mapping order_id -> OrderHealthRecord to persist
+            health: Dictionary mapping order_id -> PoolHealthRecord to persist
         """
         if not self._redis or not health:
             return
