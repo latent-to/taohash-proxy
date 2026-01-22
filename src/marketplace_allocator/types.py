@@ -54,7 +54,7 @@ class AllocatorConfig:
     # If enabled, orders below hashprice are treated as ineligible.
     enforce_hashprice_floor: bool = False
 
-    # A small deadband to avoid micro-churn (in EH/s). If the delta is below
+    # A small threshold to avoid micro-churn (in EH/s). If the delta is below
     # this value, the allocator will not try to correct it.
     # TODO: Make the threshold dynamic based on the required hashrate
     rebalance_threshold_eh_s: float = 0.0

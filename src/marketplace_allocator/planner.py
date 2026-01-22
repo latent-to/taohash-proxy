@@ -64,10 +64,10 @@ class _AvailableMiners:
 # Utility functions
 
 
-def _compute_alpha(rate: float, dt_seconds: float, interval_seconds: float) -> float:
+def _compute_damping_factor(rate: float, dt_seconds: float, interval_seconds: float) -> float:
     """Compute exponential smoothing coefficient for movement damping.
 
-    Calculates the damping factor (damping_factor) used to limit how much hashrate can
+    Calculates the damping factor used to limit how much hashrate can
     move per tick, preventing thrashing. The formula ensures that over the
     specified interval, approximately 'rate' fraction of the delta will move.
 
@@ -156,26 +156,26 @@ def _fits(miner: MinerSnapshot, max_hashrate: float) -> bool:
     return float(miner.hashrate_eh_s) <= float(max_hashrate) + _FIT_EPS
 
 
-def _compute_effective_deadband(
-    config_deadband: float,
+def _compute_effective_rebalance_threshold(
+    config_rebalance_threshold: float,
     miners: list[MinerSnapshot],
 ) -> float:
-    """Compute a deadband consistent with miner chunk sizes.
+    """Compute a rebalance threshold consistent with miner chunk sizes.
 
     We move discrete miner chunks (groups). If the planner chases deltas smaller
     than realistic chunk sizes, it can get stuck retrying the same tiny residual
-    every tick. This adjusts the deadband upward based on the smallest positive
+    every tick. This adjusts the threshold upward based on the smallest positive
     miner chunk.
 
     Behavior:
-        effective_deadband = max(config_deadband, 0.5 * min_positive_chunk)
+        effective_threshold = max(config_rebalance_threshold, 0.5 * min_positive_chunk)
 
     Args:
-        config_deadband: configured rebalance threshold (EH/s)
+        config_rebalance_threshold: configured rebalance threshold (EH/s)
         miners: list of miner snapshots for this tick
 
     Returns:
-        effective deadband (EH/s)
+        effective rebalance threshold (EH/s)
     """
     min_chunk: Optional[float] = None
     for miner in miners:
@@ -188,9 +188,9 @@ def _compute_effective_deadband(
         min_chunk = hashrate if min_chunk is None else min(min_chunk, hashrate)
 
     if min_chunk is None:
-        return float(config_deadband)
+        return float(config_rebalance_threshold)
 
-    return max(float(config_deadband), 0.5 * float(min_chunk))
+    return max(float(config_rebalance_threshold), 0.5 * float(min_chunk))
 
 
 # Data computation functions
@@ -339,13 +339,13 @@ def _compute_budgets(
     current_allocation: dict[str, float],
     hard_drain_ids: set[str],
     damping_factor: float,
-    deadband: float,
+    rebalance_threshold: float,
 ) -> dict[str, float]:
     """Compute movement budgets to limit hashrate movement per tick.
 
     Limits how much hashrate can move per tick to avoid thrashing. Market
     moves use exponential damping (damping_factor * delta), while hard-drain moves
-    get full budget (must evacuate immediately). Movements below deadband
+    get full budget (must evacuate immediately). Movements below the rebalance
     threshold are ignored to prevent micro-adjustments.
 
     Args:
@@ -354,11 +354,11 @@ def _compute_budgets(
         current_allocation: Current allocation per order
         hard_drain_ids: Orders that must be evacuated (get full budget)
         damping_factor: Damping coefficient (0-1) from exponential smoothing
-        deadband: Minimum delta threshold to trigger movement (EH/s)
+        rebalance_threshold: Minimum delta threshold to trigger movement (EH/s)
 
     Returns:
         Dict mapping order_id -> movement budget (EH/s). Budget is 0.0 if
-        delta is below deadband, damping_factor * abs(delta) for eligible orders,
+        delta is below threshold, damping_factor * abs(delta) for eligible orders,
         or full current_allocation for hard-drain orders.
     """
     budget: dict[str, float] = {}
@@ -367,7 +367,7 @@ def _compute_budgets(
     for order in ranked_orders:
         order_id = order.order_id
         delta = targets.get(order_id, 0.0) - current_allocation.get(order_id, 0.0)
-        if abs(delta) <= deadband:
+        if abs(delta) <= rebalance_threshold:
             budget[order_id] = 0.0
         else:
             budget[order_id] = damping_factor * abs(delta)
@@ -388,7 +388,7 @@ def _build_donor_pools(
     eligible_orders: set[str],
     targets: dict[str, float],
     current_allocation: dict[str, float],
-    deadband: float,
+    rebalance_threshold: float,
 ) -> tuple[_AvailableMiners, list[str]]:
     """Build categorized donor pools for miner allocation.
 
@@ -410,7 +410,7 @@ def _build_donor_pools(
         eligible_orders: Set of eligible order IDs
         targets: Target allocation per order
         current_allocation: Current allocation per order
-        deadband: Threshold for considering orders oversupplied
+        rebalance_threshold: Threshold for considering orders oversupplied
 
     Returns:
         Tuple of:
@@ -432,7 +432,7 @@ def _build_donor_pools(
     soft_donor_order_ids = [
         order_id
         for order_id in eligible_orders
-        if current_allocation.get(order_id, 0.0) > targets.get(order_id, 0.0) + deadband
+        if current_allocation.get(order_id, 0.0) > targets.get(order_id, 0.0) + rebalance_threshold
     ]
     soft_donor_order_ids.sort(
         key=lambda order_id: rank_index.get(order_id, 10**9), reverse=True
@@ -455,19 +455,19 @@ def _identify_receivers(
     ranked_orders: list,
     targets: dict[str, float],
     current_allocation: dict[str, float],
-    deadband: float,
+    rebalance_threshold: float,
 ) -> list[str]:
     """Identify orders that need more hashrate (receivers).
 
     Finds orders where target allocation exceeds current allocation by more than
-    the deadband threshold. Returns them in priority order (highest price first)
+    the rebalance threshold. Returns them in priority order (highest price first)
     so that highest-paying orders receive miners before lower-paying ones.
 
     Args:
         ranked_orders: Orders sorted by priority (highest price first)
         targets: Target allocation per order
         current_allocation: Current allocation per order
-        deadband: Minimum delta threshold to consider an order undersupplied
+        rebalance_threshold: Minimum delta threshold to consider an order undersupplied
 
     Returns:
         List of order IDs that need hashrate, in priority order
@@ -476,7 +476,7 @@ def _identify_receivers(
     for order in ranked_orders:
         order_id = order.order_id
         need_total = targets.get(order_id, 0.0) - current_allocation.get(order_id, 0.0)
-        if need_total > deadband:
+        if need_total > rebalance_threshold:
             receivers.append(order_id)
     return receivers
 
@@ -677,7 +677,7 @@ def _fill_receivers(
     current_allocation: dict[str, float],
     budget: dict[str, float],
     effective_order_caps: dict[str, float],
-    deadband: float,
+    rebalance_threshold: float,
     max_switches: int,
     picker: MinerPicker,
     recorder: MoveRecorder,
@@ -695,7 +695,7 @@ def _fill_receivers(
         initial_need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
             receiver_id, 0.0
         )
-        if initial_need_total <= deadband:
+        if initial_need_total <= rebalance_threshold:
             continue
 
         market_budget_total = float(budget.get(receiver_id, 0.0))
@@ -706,7 +706,7 @@ def _fill_receivers(
             need_total = targets.get(receiver_id, 0.0) - current_allocation.get(
                 receiver_id, 0.0
             )
-            if need_total <= deadband:
+            if need_total <= rebalance_threshold:
                 break
 
             # Respect effective caps
@@ -717,7 +717,7 @@ def _fill_receivers(
                     float(remaining_cap)
                     - float(current_allocation.get(receiver_id, 0.0)),
                 )
-                if remaining_cap <= deadband:
+                if remaining_cap <= rebalance_threshold:
                     break
 
             # 1) Forced donors first: cap-limited, NOT budget-limited
@@ -732,7 +732,7 @@ def _fill_receivers(
             # 2) Market donors: budget-limited AND cap-limited
             remaining_market_budget = max(0.0, market_budget_total - market_used)
             need_market = min(float(need_total), float(remaining_market_budget))
-            if need_market <= deadband:
+            if need_market <= rebalance_threshold:
                 break
 
             selection_bound = float(need_market)
@@ -779,7 +779,7 @@ def _shed_excess(
     current_allocation: dict[str, float],
     budget: dict[str, float],
     donors: _AvailableMiners,
-    deadband: float,
+    rebalance_threshold: float,
     max_switches: int,
     moved_ids: set[str],
     now: datetime,
@@ -802,18 +802,18 @@ def _shed_excess(
         excess = current_allocation.get(donor_order_id, 0.0) - targets.get(
             donor_order_id, 0.0
         )
-        if excess <= deadband:
+        if excess <= rebalance_threshold:
             continue
 
         shed = min(float(excess), float(budget.get(donor_order_id, 0.0)))
-        if shed <= deadband:
+        if shed <= rebalance_threshold:
             continue
 
         pool = donors.soft_by_order.get(donor_order_id, [])
         # Get smallest miners first (prevent overshooting excess)
         pool = list(reversed(pool))
 
-        while pool and shed > deadband and len(recorder.moves) < max_switches:
+        while pool and shed > rebalance_threshold and len(recorder.moves) < max_switches:
             miner = pool.pop(0)
 
             if miner.miner_id in moved_ids:
@@ -956,7 +956,7 @@ def plan_tick(
     targets = _apply_hard_drain(targets, hard_drain_ids)
 
     # Step 6: Movement Budgets
-    damping_factor = _compute_alpha(
+    damping_factor = _compute_damping_factor(
         planning_context.config.rebalance_rate,
         planning_context.tick_elapsed_clamped_seconds,
         float(planning_context.config.interval_seconds),
@@ -964,9 +964,9 @@ def plan_tick(
     if planning_context.freeze_market_moves:
         damping_factor = 0.0
 
-    config_deadband = float(planning_context.config.rebalance_threshold_eh_s)
-    deadband = _compute_effective_deadband(
-        config_deadband, planning_context.snapshot.miners
+    rebalance_threshold = _compute_effective_rebalance_threshold(
+        float(planning_context.config.rebalance_threshold_eh_s),
+        planning_context.snapshot.miners,
     )
 
     budget = _compute_budgets(
@@ -975,7 +975,7 @@ def plan_tick(
         current_allocation,
         hard_drain_ids,
         damping_factor,
-        deadband,
+        rebalance_threshold,
     )
 
     # Step 7: Build Donor Pools
@@ -988,11 +988,11 @@ def plan_tick(
         eligible_orders,
         targets,
         current_allocation,
-        deadband,
+        rebalance_threshold,
     )
 
     # Step 8: Identify Receivers
-    receivers = _identify_receivers(ranked, targets, current_allocation, deadband)
+    receivers = _identify_receivers(ranked, targets, current_allocation, rebalance_threshold)
 
     # Step 9: Execute Moves
     moved_ids: set[str] = set()
@@ -1015,7 +1015,7 @@ def plan_tick(
         current_allocation,
         budget,
         effective_order_caps,
-        deadband,
+        rebalance_threshold,
         max_switches,
         picker,
         recorder,
@@ -1032,7 +1032,7 @@ def plan_tick(
         current_allocation,
         budget,
         donors,
-        deadband,
+        rebalance_threshold,
         max_switches,
         moved_ids,
         now,
