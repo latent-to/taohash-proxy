@@ -27,7 +27,7 @@ from typing import Optional
 from src.marketplace_allocator.types import AllocatorConfig, MinerSnapshot
 
 
-class OrderHealthStatus(str, Enum):
+class PoolHealthState(str, Enum):
     """Health status of an upstream mining pool.
 
     Used to determine whether an order can receive hashrate. Orders in BACKOFF
@@ -233,7 +233,7 @@ class OrderHealthRecord:
         last_update_ts: Unix timestamp of last health evaluation
     """
 
-    status: OrderHealthStatus = OrderHealthStatus.HEALTHY
+    status: PoolHealthState = PoolHealthState.HEALTHY
     reason: str = ""
 
     # Unix timestamps (seconds). 0 means unset.
@@ -266,11 +266,11 @@ class OrderHealthRecord:
         Returns:
             OrderHealthRecord with values from the dictionary
         """
-        status_raw = str(data.get("status") or OrderHealthStatus.HEALTHY.value)
+        status_raw = str(data.get("status") or PoolHealthState.HEALTHY.value)
         try:
-            status = OrderHealthStatus(status_raw)
+            status = PoolHealthState(status_raw)
         except Exception:
-            status = OrderHealthStatus.HEALTHY
+            status = PoolHealthState.HEALTHY
         return cls(
             status=status,
             reason=str(data.get("reason") or ""),
@@ -472,7 +472,7 @@ def _apply_backoff(
         repeated failures. Warmup is NOT cleared here (caller must clear if needed).
     """
     level = max(0, int(record.backoff_level))
-    record.status = OrderHealthStatus.BACKOFF
+    record.status = PoolHealthState.BACKOFF
     record.reason = str(reason)
     record.backoff_until_ts = now_ts + float(backoff_s)
     record.backoff_level = min(level + 1, 10)
@@ -547,14 +547,14 @@ def evaluate_pool_health(
         tick = per_order_tick.get(order_id) or OrderHealthTick()
 
         # ---- Backoff handling ----
-        if record.status == OrderHealthStatus.BACKOFF and record.backoff_until_ts > 0:
+        if record.status == PoolHealthState.BACKOFF and record.backoff_until_ts > 0:
             if now_ts < record.backoff_until_ts:
                 record.last_update_ts = now_ts
                 updated[order_id] = record
                 continue
 
             # Backoff expired; clear and allow allocation again.
-            record.status = OrderHealthStatus.HEALTHY
+            record.status = PoolHealthState.HEALTHY
             record.reason = ""
             record.backoff_until_ts = 0.0
             record.warmup_until_ts = 0.0
@@ -567,14 +567,14 @@ def evaluate_pool_health(
 
         # Start warmup when we first see activity and we don't already have a warmup window.
         if has_activity and record.warmup_until_ts <= 0:
-            record.status = OrderHealthStatus.WARMUP
+            record.status = PoolHealthState.WARMUP
             record.warmup_until_ts = now_ts + float(config.pool_health_warmup_seconds)
             record.reason = "warmup"
 
         # Warmup completion
-        if record.status == OrderHealthStatus.WARMUP:
+        if record.status == PoolHealthState.WARMUP:
             if record.warmup_until_ts > 0 and now_ts >= record.warmup_until_ts:
-                record.status = OrderHealthStatus.HEALTHY
+                record.status = PoolHealthState.HEALTHY
                 record.reason = ""
                 record.warmup_until_ts = 0.0
 
@@ -615,7 +615,7 @@ def evaluate_pool_health(
             continue
 
         # ---- Shares-based evaluation (skip during warmup) ----
-        if record.status != OrderHealthStatus.WARMUP and tick.delta_total >= int(
+        if record.status != PoolHealthState.WARMUP and tick.delta_total >= int(
             config.pool_health_min_samples
         ):
             reject_rate = float(tick.delta_rejected) / float(max(1, tick.delta_total))
@@ -661,8 +661,8 @@ def evaluate_pool_health(
 
             elif record.ema_reject_rate >= float(config.pool_health_reject_threshold):
                 # Degraded but not drained by default.
-                if record.status != OrderHealthStatus.DEGRADED:
-                    record.status = OrderHealthStatus.DEGRADED
+                if record.status != PoolHealthState.DEGRADED:
+                    record.status = PoolHealthState.DEGRADED
                     record.reason = "high_reject_rate"
 
                     _emit_event(
@@ -679,8 +679,8 @@ def evaluate_pool_health(
                     )
             else:
                 # Recovery
-                if record.status == OrderHealthStatus.DEGRADED:
-                    record.status = OrderHealthStatus.HEALTHY
+                if record.status == PoolHealthState.DEGRADED:
+                    record.status = PoolHealthState.HEALTHY
                     record.reason = ""
 
         record.last_update_ts = now_ts

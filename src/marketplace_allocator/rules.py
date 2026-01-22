@@ -17,7 +17,7 @@ from src.marketplace_allocator.types import (
     OrderSnapshot,
 )
 from src.marketplace_allocator.runtime_state import RuntimeStateView
-from src.marketplace_allocator.pool_health import OrderHealthRecord, OrderHealthStatus
+from src.marketplace_allocator.pool_health import OrderHealthRecord, PoolHealthState
 
 
 @dataclass
@@ -205,7 +205,7 @@ class PoolHealthRule:
                 continue
 
             if (
-                record.status == OrderHealthStatus.BACKOFF
+                record.status == PoolHealthState.BACKOFF
                 and record.backoff_until_ts > now_ts
             ):
                 forced.add(order.order_id)
