@@ -121,7 +121,7 @@ class RuntimeStateStore:
         to PlanningInput for use by the rules pipeline and planner.
 
         Args:
-            miner_ids: List of miner worker IPs to load cooldown timestamps and
+            miner_ids: List of miner identifiers to load cooldown timestamps and
                     counters for. Typically all currently connected miners.
             order_ids: Optional list of order IDs to load health status for.
                     If None, only loads state for miners. Typically includes
@@ -188,7 +188,7 @@ class RuntimeStateStore:
         frequently.
 
         Args:
-            miner_ids: List of miner worker IPs to load timestamps for
+            miner_ids: List of miner identifiers to load timestamps for
 
         Returns:
             Dictionary mapping miner_id -> last move datetime. Only includes
@@ -221,7 +221,7 @@ class RuntimeStateStore:
         health evaluation to compute deltas between ticks and detect pool issues.
 
         Args:
-            miner_ids: List of miner worker IPs to load counters for
+            miner_ids: List of miner identifiers to load counters for
 
         Returns:
             Dictionary mapping miner_id -> MinerPoolShareStats.
@@ -340,7 +340,7 @@ class RuntimeStateStore:
         (prevent moving the same miner too frequently).
 
         Args:
-            miner_ids: List of miner worker IPs that were moved this tick
+            miner_ids: List of miner identifiers that were moved this tick
             now: Timestamp to record as the move time
         """
         if not self._redis or not miner_ids:

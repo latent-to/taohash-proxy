@@ -487,7 +487,7 @@ class MinerPicker:
     Args:
         donors: Categorized donor pools (idle, forced, soft)
         ctx: Planning context for cooldown checks and label parsing
-        moved_ips: Set of worker IPs already moved this tick (to avoid duplicates)
+        moved_ids: Set of miner IDs already moved this tick (to avoid duplicates)
         now: Current timestamp for cooldown calculations
         soft_donor_order_ids: List of oversupplied order IDs (lowest priority first)
     """
@@ -496,13 +496,13 @@ class MinerPicker:
         self,
         donors: _AvailableMiners,
         ctx: PlanningInput,
-        moved_ips: set[str],
+        moved_ids: set[str],
         now: datetime,
         soft_donor_order_ids: list[str],
     ):
         self.donors = donors
         self.ctx = ctx
-        self.moved_ips = moved_ips
+        self.moved_ids = moved_ids
         self.now = now
         self.soft_donor_order_ids = soft_donor_order_ids
 
@@ -513,7 +513,7 @@ class MinerPicker:
         prevent thrashing. Cooldown period is configured in AllocatorConfig.
 
         Args:
-            miner_id: Miner worker IP to check
+            miner_id: Miner identifier to check
 
         Returns:
             True if miner was moved within the cooldown period, False otherwise
@@ -537,7 +537,7 @@ class MinerPicker:
             since idle miners aren't assigned to any order.
         """
         for idx, miner in enumerate(self.donors.idle):
-            if miner.miner_id in self.moved_ips:
+            if miner.miner_id in self.moved_ids:
                 continue
             if self._in_cooldown(miner.miner_id):
                 continue
@@ -564,7 +564,7 @@ class MinerPicker:
             Tuple of (miner, source_order_id) if found, None otherwise
         """
         for idx, miner in enumerate(self.donors.forced):
-            if miner.miner_id in self.moved_ips:
+            if miner.miner_id in self.moved_ids:
                 continue
             if (not allow_cooldown) and self._in_cooldown(miner.miner_id):
                 continue
@@ -597,7 +597,7 @@ class MinerPicker:
             if not pool:
                 continue
             for idx, miner in enumerate(pool):
-                if miner.miner_id in self.moved_ips:
+                if miner.miner_id in self.moved_ids:
                     continue
                 if (not allow_cooldown) and self._in_cooldown(miner.miner_id):
                     continue
@@ -616,16 +616,16 @@ class MoveRecorder:
 
     Args:
         current_allocation: Current allocation dict (will be updated as moves recorded)
-        moved_ips: Set of worker IPs already moved (will be updated as moves recorded)
+        moved_ids: Set of miner IDs already moved (will be updated as moves recorded)
     """
 
     def __init__(
         self,
         current_allocation: dict[str, float],
-        moved_ips: set[str],
+        moved_ids: set[str],
     ):
         self.current_allocation = current_allocation
-        self.moved_ips = moved_ips
+        self.moved_ids = moved_ids
         self.moves: list[PlanMove] = []
 
     def record_move(
@@ -647,7 +647,7 @@ class MoveRecorder:
             dest_order_id: Order miner is moving to (None if moving to idle/default)
             reason: Reason for the move (HARD_DRAIN or MARKET_REBALANCE)
         """
-        self.moved_ips.add(miner.miner_id)
+        self.moved_ids.add(miner.miner_id)
         self.moves.append(
             PlanMove(
                 miner_id=miner.miner_id,
@@ -781,7 +781,7 @@ def _shed_excess(
     donors: _AvailableMiners,
     deadband: float,
     max_switches: int,
-    moved_ips: set[str],
+    moved_ids: set[str],
     now: datetime,
     recorder: MoveRecorder,
 ) -> None:
@@ -816,7 +816,7 @@ def _shed_excess(
         while pool and shed > deadband and len(recorder.moves) < max_switches:
             miner = pool.pop(0)
 
-            if miner.miner_id in moved_ips:
+            if miner.miner_id in moved_ids:
                 continue
             if ctx.runtime.miner_in_cooldown(
                 miner.miner_id, now, ctx.config.miner_cooldown_seconds
@@ -995,12 +995,12 @@ def plan_tick(
     receivers = _identify_receivers(ranked, targets, current_allocation, deadband)
 
     # Step 9: Execute Moves
-    moved_ips: set[str] = set()
-    recorder = MoveRecorder(current_allocation, moved_ips)
+    moved_ids: set[str] = set()
+    recorder = MoveRecorder(current_allocation, moved_ids)
     picker = MinerPicker(
         donors,
         planning_context,
-        moved_ips,
+        moved_ids,
         now,
         soft_donor_order_ids,
     )
@@ -1034,7 +1034,7 @@ def plan_tick(
         donors,
         deadband,
         max_switches,
-        moved_ips,
+        moved_ids,
         now,
         recorder,
     )

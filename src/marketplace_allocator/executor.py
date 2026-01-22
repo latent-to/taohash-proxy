@@ -56,7 +56,7 @@ class PlanExecutor:
             return ExecutionResult(moved=0, failed=len(plan.moves))
 
         order_map = {o.order_id: o for o in snapshot.orders}
-        moved_ips: list[str] = []
+        moved_ids: list[str] = []
         result = ExecutionResult()
 
         for move in plan.moves:
@@ -66,7 +66,7 @@ class PlanExecutor:
                     await delete_assignment(self._db.pool, move.miner_id)
                     # Switch back to miner's main pool
                     await self._publisher.publish_switch_default(move.miner_id)
-                    moved_ips.append(move.miner_id)
+                    moved_ids.append(move.miner_id)
                     result.moved += 1
                     continue
 
@@ -103,7 +103,7 @@ class PlanExecutor:
                     "label": order.order_id,
                 }
                 await self._publisher.publish_switch_pool(move.miner_id, pool_config)
-                moved_ips.append(move.miner_id)
+                moved_ids.append(move.miner_id)
                 result.moved += 1
 
             except Exception as e:
@@ -114,7 +114,7 @@ class PlanExecutor:
 
         # Persist runtime state
         try:
-            await self._state.record_miner_moves(moved_ips, snapshot.now)
+            await self._state.record_miner_moves(moved_ids, snapshot.now)
             await self._state.set_last_tick(snapshot.now)
         except Exception as e:
             logger.error(f"Failed to persist allocator runtime state: {e}")
