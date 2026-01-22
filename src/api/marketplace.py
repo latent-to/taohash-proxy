@@ -123,7 +123,7 @@ async def create_order(
             price_btc_eh_day=order_request.price_btc_eh_day,
             amount_btc=order_request.amount_btc,
             limit_eh_s=order_request.limit_eh_s,
-            worker_ips=miners_to_assign,
+            miner_ids=miners_to_assign,
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -150,8 +150,8 @@ async def create_order(
         if not connected_miners:
             raise HTTPException(status_code=503, detail="No connected miners found")
 
-        for worker_ip in result["assigned"]:
-            if worker_ip in connected_miners:
+        for miner_id in result["assigned"]:
+            if miner_id in connected_miners:
                 pool_config = {
                     "host": order_request.host,
                     "port": order_request.port,
@@ -159,11 +159,11 @@ async def create_order(
                     "pass": order_request.password,
                     "label": order_request.order_id,
                 }
-                await redis_publisher.publish_switch_pool(worker_ip, pool_config)
-                assigned.append(worker_ip)
-                logger.info(f"Assigned {worker_ip} to order {order_request.order_id}")
+                await redis_publisher.publish_switch_pool(miner_id, pool_config)
+                assigned.append(miner_id)
+                logger.info(f"Assigned {miner_id} to order {order_request.order_id}")
             else:
-                not_found.append(worker_ip)
+                not_found.append(miner_id)
 
     response = {
         "status": "created",
@@ -218,7 +218,7 @@ async def list_orders(
     detailed_orders = []
     for order in orders:
         assignments = await get_order_assignments(marketplace_db.pool, order.order_id)
-        assigned_miners = [a["worker_ip"] for a in assignments]
+        assigned_miners = [a["miner_id"] for a in assignments]
 
         order_dict = order.to_api_dict()
         order_dict["assigned_miners"] = assigned_miners
@@ -248,7 +248,7 @@ async def get_order(
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
-    assigned_miners = [a["worker_ip"] for a in assignments]
+    assigned_miners = [a["miner_id"] for a in assignments]
 
     order_dict = order.to_api_dict()
     order_dict["assigned_miners"] = assigned_miners
@@ -288,7 +288,7 @@ async def pause_order(
 
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
     for assignment in assignments:
-        await redis_publisher.publish_switch_default(assignment["worker_ip"])
+        await redis_publisher.publish_switch_default(assignment["miner_id"])
 
     await clear_order_assignments(marketplace_db.pool, order_id, status="completed")
     await update_order_status(marketplace_db.pool, order_id, "paused")
@@ -379,7 +379,7 @@ async def update_order(
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
-    assigned_miners = [a["worker_ip"] for a in assignments]
+    assigned_miners = [a["miner_id"] for a in assignments]
 
     order_dict = order.to_api_dict()
     order_dict["assigned_miners"] = assigned_miners
@@ -413,7 +413,7 @@ async def cancel_order(
 
     # Switch all assigned miners back to default pool
     for assignment in assignments:
-        await redis_publisher.publish_switch_default(assignment["worker_ip"])
+        await redis_publisher.publish_switch_default(assignment["miner_id"])
 
     # Mark all assignments as cancelled
     await clear_order_assignments(marketplace_db.pool, order_id, status="cancelled")
@@ -462,7 +462,7 @@ async def assign_miners(
         result = await assign_miners_atomic(
             pool=marketplace_db.pool,
             order_id=order_id,
-            worker_ips=assign_request.miners,
+            miner_ids=assign_request.miners,
         )
     except ValueError as e:
         if "not found" in str(e):
@@ -490,8 +490,8 @@ async def assign_miners(
 
         order = await fetch_order(marketplace_db.pool, order_id)
 
-        for worker_ip in result["assigned"]:
-            if worker_ip in connected_set:
+        for miner_id in result["assigned"]:
+            if miner_id in connected_set:
                 pool_config = {
                     "host": order.host,
                     "port": order.port,
@@ -499,11 +499,11 @@ async def assign_miners(
                     "pass": order.password,
                     "label": order_id,
                 }
-                await redis_publisher.publish_switch_pool(worker_ip, pool_config)
-                assigned.append(worker_ip)
-                logger.info(f"Assigned {worker_ip} to order {order_id}")
+                await redis_publisher.publish_switch_pool(miner_id, pool_config)
+                assigned.append(miner_id)
+                logger.info(f"Assigned {miner_id} to order {order_id}")
             else:
-                not_found.append(worker_ip)
+                not_found.append(miner_id)
 
     all_assignments = await get_order_assignments(marketplace_db.pool, order_id)
 
@@ -522,17 +522,17 @@ async def assign_miners(
     return response
 
 
-@router.delete("/orders/{order_id}/miners/{worker_ip:path}")
+@router.delete("/orders/{order_id}/miners/{miner_id:path}")
 @limiter.limit("30/minute")
 async def remove_miner(
     request: Request,
     order_id: str,
-    worker_ip: str,
+    miner_id: str,
 ) -> dict[str, Any]:
     """
     Remove a miner from an order and switch back to default pool.
 
-    The worker_ip path parameter should be URL-encoded (e.g., worker1%3A192.168.1.100).
+    The miner_id path parameter should be URL-encoded (e.g., worker1%3A192.168.1.100).
 
     Returns:
         Removal status
@@ -547,23 +547,23 @@ async def remove_miner(
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    assignment = await get_miner_assignment(marketplace_db.pool, worker_ip)
+    assignment = await get_miner_assignment(marketplace_db.pool, miner_id)
     if not assignment or assignment["order_id"] != order_id:
         raise HTTPException(
             status_code=404,
-            detail=f"Miner {worker_ip} not assigned to order {order_id}",
+            detail=f"Miner {miner_id} not assigned to order {order_id}",
         )
 
-    await delete_assignment(marketplace_db.pool, worker_ip)
+    await delete_assignment(marketplace_db.pool, miner_id)
 
-    await redis_publisher.publish_switch_default(worker_ip)
+    await redis_publisher.publish_switch_default(miner_id)
 
-    logger.info(f"Removed {worker_ip} from order {order_id}")
+    logger.info(f"Removed {miner_id} from order {order_id}")
 
     return {
         "status": "removed",
         "order_id": order_id,
-        "worker_ip": worker_ip,
+        "miner_id": miner_id,
         "message": "Miner switched back to default pool",
     }
 
@@ -590,15 +590,15 @@ async def list_miners(
     connected_miners = await redis_client.get_connected_miners()
 
     miners = []
-    for worker_ip in connected_miners:
+    for miner_id in connected_miners:
         assignment = (
-            await get_miner_assignment(marketplace_db.pool, worker_ip)
+            await get_miner_assignment(marketplace_db.pool, miner_id)
             if marketplace_db and marketplace_db.pool
             else None
         )
         miners.append(
             {
-                "worker_ip": worker_ip,
+                "miner_id": miner_id,
                 "order_id": assignment["order_id"] if assignment else None,
             }
         )
@@ -633,7 +633,7 @@ async def get_miners_stats(
     total_hashrate = 0
     available_hashrate = 0
 
-    for worker_ip, miner_stats in sorted_miners:
+    for miner_id, miner_stats in sorted_miners:
         hashrate_gh = miner_stats.get("hashrate_gh", 0)
         pool_label = miner_stats.get("pool_label", "unknown")
         is_available = pool_label in ("normal", "high_diff")
@@ -644,7 +644,7 @@ async def get_miners_stats(
 
         miners.append(
             {
-                "worker_ip": worker_ip,
+                "miner_id": miner_id,
                 "hashrate": miner_stats.get("hashrate", 0),
                 "hashrate_gh": hashrate_gh,
                 "difficulty": miner_stats.get("difficulty", 0),

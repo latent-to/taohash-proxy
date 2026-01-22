@@ -707,5 +707,5 @@ class OrderResponse(BaseModel):
 
 
 class MinerResponse(BaseModel):
-    worker_ip: str
+    miner_id: str
     order_id: Optional[str] = None

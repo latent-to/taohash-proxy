@@ -19,7 +19,7 @@ class ConflictError(Exception):
 
 async def create_assignment(
     pool: asyncpg.Pool,
-    worker_ip: str,
+    miner_id: str,
     order_id: str,
 ) -> Optional[str]:
     """
@@ -30,7 +30,7 @@ async def create_assignment(
 
     Args:
         pool: asyncpg connection pool
-        worker_ip: Miner identifier (worker:ip format)
+        miner_id: Miner identifier (worker:ip format)
         order_id: Order identifier
 
     Returns:
@@ -41,35 +41,35 @@ async def create_assignment(
         async with pool.acquire() as conn:
             assignment_id = await conn.fetchval(
                 """
-                INSERT INTO miner_assignments (worker_ip, order_id)
+                INSERT INTO miner_assignments (miner_id, order_id)
                 VALUES ($1, $2)
                 RETURNING assignment_id
                 """,
-                worker_ip,
+                miner_id,
                 order_id,
             )
         logger.info(
-            f"Assigned miner {worker_ip} to order {order_id} (assignment_id={assignment_id})"
+            f"Assigned miner {miner_id} to order {order_id} (assignment_id={assignment_id})"
         )
         return str(assignment_id)
     except asyncpg.UniqueViolationError:
-        logger.warning(f"Worker {worker_ip} already has an active assignment")
+        logger.warning(f"Worker {miner_id} already has an active assignment")
         return None
     except Exception as e:
-        logger.error(f"Failed to create assignment for {worker_ip}: {e}")
+        logger.error(f"Failed to create assignment for {miner_id}: {e}")
         return None
 
 
 async def get_miner_assignment(
     pool: asyncpg.Pool,
-    worker_ip: str,
+    miner_id: str,
 ) -> Optional[dict]:
     """
     Get the current active assignment for a miner.
 
     Args:
         pool: asyncpg connection pool
-        worker_ip: Miner identifier (worker:ip format)
+        miner_id: Miner identifier (worker:ip format)
 
     Returns:
         Assignment dict or None if not assigned
@@ -78,23 +78,23 @@ async def get_miner_assignment(
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 """
-                SELECT assignment_id, worker_ip, order_id, status, assigned_at
-                FROM miner_assignments WHERE worker_ip = $1 AND status = 'active'
+                SELECT assignment_id, miner_id, order_id, status, assigned_at
+                FROM miner_assignments WHERE miner_id = $1 AND status = 'active'
                 """,
-                worker_ip,
+                miner_id,
             )
 
             if row:
                 return {
                     "assignment_id": str(row["assignment_id"]),
-                    "worker_ip": row["worker_ip"],
+                    "miner_id": row["miner_id"],
                     "order_id": row["order_id"],
                     "status": row["status"],
                     "assigned_at": row["assigned_at"],
                 }
             return None
     except Exception as e:
-        logger.error(f"Failed to get assignment for {worker_ip}: {e}")
+        logger.error(f"Failed to get assignment for {miner_id}: {e}")
         return None
 
 
@@ -116,7 +116,7 @@ async def get_order_assignments(
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT assignment_id, worker_ip, order_id, status, assigned_at, unassigned_at
+                SELECT assignment_id, miner_id, order_id, status, assigned_at, unassigned_at
                 FROM miner_assignments WHERE order_id = $1 AND status = 'active'
                 """,
                 order_id,
@@ -127,7 +127,7 @@ async def get_order_assignments(
                 assignments.append(
                     {
                         "assignment_id": str(row["assignment_id"]),
-                        "worker_ip": row["worker_ip"],
+                        "miner_id": row["miner_id"],
                         "order_id": row["order_id"],
                         "status": row["status"],
                         "assigned_at": row["assigned_at"],
@@ -140,7 +140,7 @@ async def get_order_assignments(
         return []
 
 
-async def delete_assignment(pool: asyncpg.Pool, worker_ip: str) -> bool:
+async def delete_assignment(pool: asyncpg.Pool, miner_id: str) -> bool:
     """
     Mark a miner's active assignment as completed.
 
@@ -148,7 +148,7 @@ async def delete_assignment(pool: asyncpg.Pool, worker_ip: str) -> bool:
 
     Args:
         pool: asyncpg connection pool
-        worker_ip: Miner identifier (worker:ip format)
+        miner_id: Miner identifier (worker:ip format)
 
     Returns:
         True if an assignment was completed, False otherwise
@@ -159,16 +159,16 @@ async def delete_assignment(pool: asyncpg.Pool, worker_ip: str) -> bool:
                 """
                 UPDATE miner_assignments
                 SET status = 'completed', unassigned_at = NOW(), updated_at = NOW()
-                WHERE worker_ip = $1 AND status = 'active'
+                WHERE miner_id = $1 AND status = 'active'
                 """,
-                worker_ip,
+                miner_id,
             )
             updated = result != "UPDATE 0"
             if updated:
-                logger.info(f"Completed assignment for miner {worker_ip}")
+                logger.info(f"Completed assignment for miner {miner_id}")
             return updated
     except Exception as e:
-        logger.error(f"Failed to delete assignment for {worker_ip}: {e}")
+        logger.error(f"Failed to delete assignment for {miner_id}: {e}")
         return False
 
 
@@ -211,16 +211,16 @@ async def clear_order_assignments(
         return 0
 
 
-async def get_worker_assignment_history(
+async def get_miner_assignment_history(
     pool: asyncpg.Pool,
-    worker_ip: str,
+    miner_id: str,
 ) -> list[dict]:
     """
-    Get all assignments (active and completed) for a worker.
+    Get all assignments (active and completed) for a miner.
 
     Args:
         pool: asyncpg connection pool
-        worker_ip: Miner identifier (worker:ip format)
+        miner_id: Miner identifier (worker:ip format)
 
     Returns:
         List of assignment dicts, ordered by assigned_at DESC (newest first)
@@ -229,13 +229,13 @@ async def get_worker_assignment_history(
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT assignment_id, worker_ip, order_id, status,
+                SELECT assignment_id, miner_id, order_id, status,
                        assigned_at, unassigned_at, updated_at
                 FROM miner_assignments
-                WHERE worker_ip = $1
+                WHERE miner_id = $1
                 ORDER BY assigned_at DESC
                 """,
-                worker_ip,
+                miner_id,
             )
 
             assignments = []
@@ -243,7 +243,7 @@ async def get_worker_assignment_history(
                 assignments.append(
                     {
                         "assignment_id": str(row["assignment_id"]),
-                        "worker_ip": row["worker_ip"],
+                        "miner_id": row["miner_id"],
                         "order_id": row["order_id"],
                         "status": row["status"],
                         "assigned_at": row["assigned_at"],
@@ -253,14 +253,14 @@ async def get_worker_assignment_history(
                 )
             return assignments
     except Exception as e:
-        logger.error(f"Failed to get assignment history for {worker_ip}: {e}")
+        logger.error(f"Failed to get assignment history for {miner_id}: {e}")
         return []
 
 
 async def assign_miners_atomic(
     pool: asyncpg.Pool,
     order_id: str,
-    worker_ips: list[str],
+    miner_ids: list[str],
 ) -> dict:
     """
     Atomically assign miners to an existing order.
@@ -271,7 +271,7 @@ async def assign_miners_atomic(
     Args:
         pool: asyncpg connection pool
         order_id: Order identifier
-        worker_ips: List of miner identifiers to assign
+        miner_ids: List of miner identifiers to assign
 
     Returns:
         {"assigned": [...], "skipped": [...]} on success
@@ -280,7 +280,7 @@ async def assign_miners_atomic(
         ValueError: If order doesn't exist, is not active, or has no remaining balance
         ConflictError: If any miners are assigned to different orders
     """
-    worker_ips = list(dict.fromkeys(worker_ips))
+    miner_ids = list(dict.fromkeys(miner_ids))
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -303,32 +303,32 @@ async def assign_miners_atomic(
             if order["balance_btc"] <= 0:
                 raise ValueError(f"Order {order_id} has no remaining balance")
 
-            if not worker_ips:
+            if not miner_ids:
                 return {"assigned": [], "skipped": []}
 
             # Lock and check existing assignments
             existing = await conn.fetch(
                 """
-                SELECT worker_ip, order_id
+                SELECT miner_id, order_id
                 FROM miner_assignments
-                WHERE worker_ip = ANY($1) AND status = 'active'
+                WHERE miner_id = ANY($1) AND status = 'active'
                 FOR UPDATE
                 """,
-                worker_ips,
+                miner_ids,
             )
 
             conflicts, skipped, assigned_set = [], [], set()
             for row in existing:
                 if row["order_id"] == order_id:
-                    skipped.append(row["worker_ip"])
+                    skipped.append(row["miner_id"])
                 else:
                     conflicts.append(
                         {
-                            "worker_ip": row["worker_ip"],
+                            "miner_id": row["miner_id"],
                             "current_order": row["order_id"],
                         }
                     )
-                assigned_set.add(row["worker_ip"])
+                assigned_set.add(row["miner_id"])
 
             if conflicts:
                 raise ConflictError(
@@ -336,11 +336,11 @@ async def assign_miners_atomic(
                     conflicts=conflicts,
                 )
 
-            to_assign = [w for w in worker_ips if w not in assigned_set]
+            to_assign = [w for w in miner_ids if w not in assigned_set]
 
             if to_assign:
                 await conn.executemany(
-                    "INSERT INTO miner_assignments (worker_ip, order_id) VALUES ($1, $2)",
+                    "INSERT INTO miner_assignments (miner_id, order_id) VALUES ($1, $2)",
                     [(w, order_id) for w in to_assign],
                 )
 
