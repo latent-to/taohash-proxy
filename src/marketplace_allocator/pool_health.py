@@ -212,7 +212,26 @@ class MinerCounterRecord:
 
 @dataclass
 class OrderHealthRecord:
-    """Persistent per-order health state."""
+    """Persistent per-order health state for upstream pool monitoring.
+    
+    Tracks the health status and metrics of an upstream mining pool. Used by
+    the allocator to determine whether an order can receive hashrate. Orders
+    in BACKOFF are temporarily excluded from allocation until backoff expires.
+    
+    Stored in Redis and persisted across allocator restarts. Health state
+    transitions through: HEALTHY -> WARMUP -> HEALTHY/DEGRADED/BACKOFF.
+    
+    Attributes:
+        status: Current health status (HEALTHY/WARMUP/DEGRADED/BACKOFF)
+        reason: Human-readable reason for the current status
+        warmup_until_ts: Unix timestamp when warmup period ends (0 = no warmup)
+        backoff_until_ts: Unix timestamp when backoff period expires (0 = no backoff)
+        backoff_level: Exponential backoff level (0-10, increments on repeated failures)
+        ema_reject_rate: Smoothed reject rate (0-1) via exponential moving average
+        ema_other_reject_rate: Smoothed unknown/other reject rate (0-1)
+        ema_job_gap_s: Smoothed job gap in seconds (time since last job notification)
+        last_update_ts: Unix timestamp of last health evaluation
+    """
 
     status: OrderHealthStatus = OrderHealthStatus.HEALTHY
     reason: str = ""
@@ -239,6 +258,14 @@ class OrderHealthRecord:
 
     @classmethod
     def from_dict(cls, data: dict) -> "OrderHealthRecord":
+        """Create a health record from a dictionary loaded from Redis.
+
+        Args:
+            data: Dictionary containing health record fields
+        
+        Returns:
+            OrderHealthRecord with values from the dictionary
+        """
         status_raw = str(data.get("status") or OrderHealthStatus.HEALTHY.value)
         try:
             status = OrderHealthStatus(status_raw)
@@ -259,18 +286,39 @@ class OrderHealthRecord:
 
 @dataclass
 class OrderHealthTick:
-    """One-tick aggregated deltas for an order."""
+    """One-tick aggregated share deltas for an order.
+    
+    Aggregates share statistics across all miners on an order for a single
+    tick. Used to compute reject rates and detect pool health issues.
+    
+    Attributes:
+        delta_accepted: Accepted shares this tick (delta from previous counters)
+        delta_rejected: Rejected shares this tick (delta from previous counters)
+        delta_other_rejected: Unknown/other rejected shares this tick
+        delta_total: Total shares this tick (accepted + rejected)
+        min_last_notify_age_s: Smallest last_notify_age_s across miners on the order.
+                              None if no miners have this metric. Used to detect
+                              pools that stop sending jobs.
+    """
 
     delta_accepted: int = 0
     delta_rejected: int = 0
     delta_other_rejected: int = 0
     delta_total: int = 0
 
-    # Smallest last_notify_age_s across miners on the order.
-    # None means not available.
     min_last_notify_age_s: Optional[float] = None
 
     def observe_notify_age(self, age: Optional[float]) -> None:
+        """Update the minimum job notification age for this order.
+    
+        Tracks the smallest last_notify_age_s across all miners on the order.
+        Used to detect when a pool stops sending jobs (all miners have high
+        notify age).
+        
+        Args:
+            age: Time since last job notification (seconds), or None if unavailable.
+                If None, the minimum is unchanged.
+        """
         if age is None:
             return
         if self.min_last_notify_age_s is None:
@@ -281,6 +329,17 @@ class OrderHealthTick:
 
 @dataclass
 class PoolHealthDecision:
+    """Result of pool health evaluation for a single tick.
+    
+    Contains updated health records, miner counters, and diagnostic events.
+    Returned by evaluate_pool_health() and persisted to Redis for use in
+    the next tick and by the rules pipeline.
+    
+    Attributes:
+        order_health: Updated health records per order (order_id -> OrderHealthRecord)
+        miner_counters: Updated counter records per miner (worker_ip -> MinerCounterRecord)
+        events: List of diagnostic events (warnings/info) for telemetry
+    """
     order_health: dict[str, OrderHealthRecord]
     miner_counters: dict[str, MinerCounterRecord]
     events: list[dict]
@@ -292,13 +351,26 @@ def _aggregate_per_order_ticks(
     prev_miner_counters: dict[str, MinerCounterRecord],
     default_labels: set[str],
 ) -> tuple[dict[str, OrderHealthTick], dict[str, MinerCounterRecord]]:
-    """
-    Build per-order aggregated deltas from miner cumulative counters.
-
-    Behavior preserved:
-      - If miner has no history OR moved pools since last tick: do NOT attribute deltas.
-      - If counters decreased (reset/restart): do NOT attribute deltas.
-      - Always track min_last_notify_age_s for the order if we saw a miner on it.
+    """Aggregate per-order share deltas from miner counters.
+    
+    Computes share deltas (accepted/rejected) for each order by comparing
+    current miner counters with previous counters. Only attributes deltas
+    when miners have consistent history (same pool, no counter resets).
+    
+    Behavior:
+        - Skips deltas if miner has no history or moved pools since last tick
+        - Skips deltas if counters decreased (proxy restart or miner reconnect)
+        - Always tracks min_last_notify_age_s for orders (even without deltas)
+    
+    Args:
+        miners: Current miner snapshots with share counts
+        prev_miner_counters: Previous tick's counter records (from Redis)
+        default_labels: Labels that are not marketplace orders (e.g., "normal")
+    
+    Returns:
+        Tuple of:
+            - per_order: Dict mapping order_id -> OrderHealthTick with aggregated deltas
+            - miner_counters: Dict mapping worker_ip -> MinerCounterRecord (current counters)
     """
     per_order: dict[str, OrderHealthTick] = {}
     miner_counters: dict[str, MinerCounterRecord] = {}
@@ -350,7 +422,20 @@ def _emit_event(
     message: str,
     data: dict,
 ) -> None:
-    # Keep schema identical to your original events.
+    """Emit a diagnostic event for telemetry.
+    
+    Adds an event to the events list for monitoring and debugging. Events
+    are included in TickDiagnostics and published to Redis for real-time
+    monitoring.
+    
+    Args:
+        events: List of events to append to
+        level: Event severity ("info", "warning", "error")
+        code: Event code (e.g., "POOL_NO_JOBS", "POOL_DEGRADED")
+        order_id: Order ID this event relates to
+        message: Human-readable message
+        data: Additional event data (metrics, thresholds, etc.)
+    """
     events.append(
         {
             "level": level,
@@ -369,10 +454,21 @@ def _apply_backoff(
     backoff_s: int,
     reason: str,
 ) -> None:
-    """
-    Place order in BACKOFF. Behavior preserved:
-      - backoff_level increments (capped to 10)
-      - warmup cleared ONLY in the 'no jobs' path in original code (caller decides)
+    """Place an order in BACKOFF state due to pool health issues.
+    
+    Sets the order status to BACKOFF and increments the backoff level for
+    exponential backoff. The order will be excluded from allocation until
+    backoff_until_ts expires.
+    
+    Args:
+        record: Health record to update (modified in place)
+        now_ts: Current Unix timestamp
+        backoff_s: Backoff duration in seconds (computed via _compute_backoff_seconds)
+        reason: Human-readable reason for the backoff
+    
+    Note:
+        Backoff level increments (capped at 10) to increase wait time after
+        repeated failures. Warmup is NOT cleared here (caller must clear if needed).
     """
     level = max(0, int(record.backoff_level))
     record.status = OrderHealthStatus.BACKOFF
@@ -389,7 +485,31 @@ def evaluate_pool_health(
     prev_miner_counters: dict[str, MinerCounterRecord],
     config: AllocatorConfig,
 ) -> PoolHealthDecision:
-    """Evaluate order pool health and compute an updated state."""
+    """Evaluate upstream pool health and update health records.
+    
+    Analyzes miner share statistics to detect pool health issues. Uses
+    exponential moving averages (EMA) to smooth metrics and prevent false
+    positives. Applies warmup windows and exponential backoff for hysteresis.
+    
+    Health evaluation steps:
+        1. Aggregate per-order share deltas from miner counters
+        2. Update health records with state transitions:
+           - BACKOFF: Check if expired, clear if so
+           - WARMUP: Start warmup on first activity, complete after window
+           - Job gap: Update EMA, trigger backoff if no jobs for too long
+           - Reject rates: Update EMAs, trigger DEGRADED/BACKOFF if thresholds exceeded
+    
+    Args:
+        now: Current timestamp for health evaluation
+        miners: Current miner snapshots with share counts and pool assignments
+        prev_order_health: Previous tick's health records (from Redis)
+        prev_miner_counters: Previous tick's miner counters (from Redis)
+        config: Allocator configuration with health thresholds and settings
+    
+    Returns:
+        PoolHealthDecision with updated health records, miner counters, and events.
+        If pool health is disabled, returns previous health unchanged.
+    """
     if not config.enable_pool_health:
         miner_counters = {
             m.worker_ip: MinerCounterRecord.from_snapshot(m) for m in miners
@@ -418,7 +538,7 @@ def evaluate_pool_health(
     # ------------------------------------------------------------------
     updated: dict[str, OrderHealthRecord] = dict(
         prev_order_health
-    )  # shallow copy (preserve behavior)
+    ) 
     events: list[dict] = []
 
     relevant_order_ids = set(updated.keys()) | set(per_order_tick.keys())
@@ -476,7 +596,6 @@ def evaluate_pool_health(
                 backoff_s=backoff_s,
                 reason=f"no_jobs_for_{int(tick.min_last_notify_age_s)}s",
             )
-            # Original code clears warmup here:
             record.warmup_until_ts = 0.0
 
             record.last_update_ts = now_ts
@@ -542,7 +661,7 @@ def evaluate_pool_health(
                 )
 
             elif record.ema_reject_rate >= float(config.pool_health_reject_threshold):
-                # Degraded but not drained by default. Useful for dashboards.
+                # Degraded but not drained by default.
                 if record.status != OrderHealthStatus.DEGRADED:
                     record.status = OrderHealthStatus.DEGRADED
                     record.reason = "high_reject_rate"
