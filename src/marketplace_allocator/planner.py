@@ -232,37 +232,39 @@ def _compute_targets(
         overshoot_pct: Percentage allowance for cap overshoot (e.g., 0.15 = 15%)
 
     Returns:
-        Tuple of (targets, effective_caps):
+        Tuple of (targets, effective_order_caps):
             - targets: Dict mapping order_id -> target hashrate allocation
-            - effective_caps: Dict mapping order_id -> effective cap (with overshoot)
+            - effective_order_caps: Dict mapping order_id -> effective cap (with overshoot)
     """
-    targets: dict[str, float] = {}
-    effective_caps: dict[str, float] = {}
-    remaining = supply_eh_s
+    all_target_allocations: dict[str, float] = {}
+    effective_order_caps: dict[str, float] = {}
+    remaining_supply = supply_eh_s
 
     for order in ranked_orders:
-        cap = float("inf")
-        if order.limit_eh_s is not None:
-            try:
-                cap = float(order.limit_eh_s)
-            except Exception:
-                cap = float("inf")
-            cap = cap * (1.0 + float(overshoot_pct))
-
-        effective_caps[order.order_id] = cap
-
-        if remaining <= 0:
-            targets[order.order_id] = 0.0
+        if remaining_supply <= 0.0:
+            all_target_allocations[order.order_id] = 0.0
             continue
 
-        target = min(cap, remaining)
-        if target < 0:
-            target = 0.0
+        max_order_cap = float("inf")
+        if order.limit_eh_s is not None:
+            try:
+                max_order_cap = float(order.limit_eh_s)
+            except Exception:
+                max_order_cap = float("inf")
 
-        targets[order.order_id] = target
-        remaining -= target
+            # Allow the order to exceed its limit by the overshoot percentage
+            max_order_cap = max_order_cap * (1.0 + float(overshoot_pct))
 
-    return targets, effective_caps
+        effective_order_caps[order.order_id] = max_order_cap
+
+        target_allocation = min(max_order_cap, remaining_supply)
+        if target_allocation < 0:
+            target_allocation = 0.0
+
+        all_target_allocations[order.order_id] = target_allocation
+        remaining_supply -= target_allocation
+
+    return all_target_allocations, effective_order_caps
 
 
 def _compute_current_allocation(
@@ -674,7 +676,7 @@ def _fill_receivers(
     targets: dict[str, float],
     current_allocation: dict[str, float],
     budget: dict[str, float],
-    effective_caps: dict[str, float],
+    effective_order_caps: dict[str, float],
     deadband: float,
     max_switches: int,
     picker: MinerPicker,
@@ -684,11 +686,6 @@ def _fill_receivers(
 
     Allocates miners to orders that need more hashrate (receivers) by drawing
     from donor pools in priority order: forced -> idle -> soft.
-
-    Budget discipline (B-fix):
-      - Forced-drain moves are NOT budget-limited (still cap-limited).
-      - Market moves (idle/soft) are budget-limited, and selection is bounded by:
-            min(remaining_cap, remaining_need, remaining_market_budget)
     """
     for receiver_id in receivers:
         if len(recorder.moves) >= max_switches:
@@ -713,7 +710,7 @@ def _fill_receivers(
                 break
 
             # Respect effective caps
-            remaining_cap = effective_caps.get(receiver_id, float("inf"))
+            remaining_cap = effective_order_caps.get(receiver_id, float("inf"))
             if not math.isinf(remaining_cap):
                 remaining_cap = max(
                     0.0,
@@ -727,7 +724,9 @@ def _fill_receivers(
             picked_forced = picker.pick_forced(remaining_cap, allow_cooldown=True)
             if picked_forced is not None:
                 miner, source_order_id = picked_forced
-                recorder.record_move(miner, source_order_id, receiver_id, MoveReason.HARD_DRAIN)
+                recorder.record_move(
+                    miner, source_order_id, receiver_id, MoveReason.HARD_DRAIN
+                )
                 continue
 
             # 2) Market donors: budget-limited AND cap-limited
@@ -748,7 +747,9 @@ def _fill_receivers(
                 break
 
             miner, source_order_id = picked
-            recorder.record_move(miner, source_order_id, receiver_id, MoveReason.MARKET_REBALANCE)
+            recorder.record_move(
+                miner, source_order_id, receiver_id, MoveReason.MARKET_REBALANCE
+            )
             market_used += float(miner.hashrate_eh_s)
 
 
@@ -938,7 +939,7 @@ def plan_tick(
     supply_eh_s = _compute_supply(planning_context.snapshot.miners)
 
     # Step 3: Compute Ideal Targets (Greedy Fill)
-    targets, effective_caps = _compute_targets(
+    targets, effective_order_caps = _compute_targets(
         ranked, supply_eh_s, planning_context.config.overshoot_pct
     )
 
@@ -963,9 +964,10 @@ def plan_tick(
     if planning_context.freeze_market_moves:
         damping_factor = 0.0
 
-    # Deadband (B-fix): make it consistent with miner chunk sizes
     config_deadband = float(planning_context.config.rebalance_threshold_eh_s)
-    deadband = _compute_effective_deadband(config_deadband, planning_context.snapshot.miners)
+    deadband = _compute_effective_deadband(
+        config_deadband, planning_context.snapshot.miners
+    )
 
     budget = _compute_budgets(
         ranked,
@@ -1012,7 +1014,7 @@ def plan_tick(
         targets,
         current_allocation,
         budget,
-        effective_caps,
+        effective_order_caps,
         deadband,
         max_switches,
         picker,

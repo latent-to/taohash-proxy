@@ -217,10 +217,19 @@ async def order_allocator_loop(
     redis_publisher: RedisPublisher,
     poll_seconds: int,
 ) -> None:
-    """Main allocator loop.
+    """Run the marketplace allocator control loop.
 
-    Enabled by env var:
-      ENABLE_MARKETPLACE_ALLOCATOR=true
+    Continuously allocates miners to marketplace orders based on defined rules and 
+    constraints. Runs every `poll_seconds` and hot reloads config on each iteration.
+
+    Args:
+        marketplace_db: Database connection for orders and assignments.
+        redis_client: Redis client for miner state and runtime persistence.
+        redis_publisher: Redis publisher for proxy switch commands.
+        poll_seconds: Polling interval.
+
+    Environment variables:
+        See `marketplace_allocator.config.load_config` for full list.
     """
 
     if not env_bool("ENABLE_MARKETPLACE_ALLOCATOR", default=False):
@@ -253,7 +262,6 @@ async def order_allocator_loop(
 
     prev_config: Optional[AllocatorConfig] = None
 
-    # Leader lock: only one allocator should be active
     while True:
         try:
             async with marketplace_db.pool.acquire() as conn:
