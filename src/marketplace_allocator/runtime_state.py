@@ -16,7 +16,7 @@ from typing import Optional
 import json
 import os
 
-from src.marketplace_allocator.pool_health import MinerCounterRecord, OrderHealthRecord
+from src.marketplace_allocator.pool_health import MinerPoolShareStats, OrderHealthRecord
 from src.utils.logger import get_logger
 from src.utils.redis_client import RedisClient
 
@@ -66,7 +66,7 @@ class RuntimeStateView:
 
     last_tick_ts: Optional[datetime]
     miner_last_move_at: dict[str, datetime]
-    miner_counters: dict[str, "MinerCounterRecord"]
+    miner_counters: dict[str, "MinerPoolShareStats"]
     order_health: dict[str, "OrderHealthRecord"]
 
     def miner_in_cooldown(self, worker_ip: str, now: datetime, cooldown_s: int) -> bool:
@@ -143,7 +143,7 @@ class AllocatorRuntimeState:
         try:
             last_tick_ts = await self._load_last_tick_ts()
             miner_last_move_at = await self._load_miner_last_move_at(worker_ips)
-            miner_counters = await self._load_miner_counters(worker_ips)
+            miner_counters = await self._load_miner_share_stats(worker_ips)
             order_health = await self._load_order_health(order_ids)
 
             return RuntimeStateView(
@@ -211,9 +211,9 @@ class AllocatorRuntimeState:
 
         return miner_last_move_at
 
-    async def _load_miner_counters(
+    async def _load_miner_share_stats(
         self, worker_ips: list[str]
-    ) -> dict[str, MinerCounterRecord]:
+    ) -> dict[str, MinerPoolShareStats]:
         """Load cumulative miner share statistics from Redis.
 
         Retrieves persistent counter records (accepted/rejected share counts) for
@@ -224,9 +224,9 @@ class AllocatorRuntimeState:
             worker_ips: List of miner worker IPs to load counters for
 
         Returns:
-            Dictionary mapping worker_ip -> MinerCounterRecord.
+            Dictionary mapping worker_ip -> MinerPoolShareStats.
         """
-        miner_counters: dict[str, MinerCounterRecord] = {}
+        miner_counters: dict[str, MinerPoolShareStats] = {}
         if not worker_ips:
             return miner_counters
 
@@ -236,7 +236,7 @@ class AllocatorRuntimeState:
                 continue
             try:
                 payload = json.loads(raw)
-                miner_counters[worker_ip] = MinerCounterRecord.from_dict(payload)
+                miner_counters[worker_ip] = MinerPoolShareStats.from_dict(payload)
             except Exception:
                 continue
 
@@ -276,7 +276,7 @@ class AllocatorRuntimeState:
         return order_health
 
     async def persist_miner_counters(
-        self, counters: dict[str, MinerCounterRecord]
+        self, counters: dict[str, MinerPoolShareStats]
     ) -> None:
         """Persist miner counter records to Redis.
 
@@ -285,7 +285,7 @@ class AllocatorRuntimeState:
         counters that will be used to compute deltas in the next tick.
 
         Args:
-            counters: Dictionary mapping worker_ip -> MinerCounterRecord to persist
+            counters: Dictionary mapping worker_ip -> MinerPoolShareStats to persist
         """
         if not self._redis or not counters:
             return
