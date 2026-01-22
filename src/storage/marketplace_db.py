@@ -105,7 +105,7 @@ class MarketplaceDB:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS miner_assignments (
                     assignment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    worker_ip TEXT NOT NULL,
+                    miner_id TEXT NOT NULL,
                     order_id TEXT NOT NULL REFERENCES marketplace_orders(order_id) ON DELETE CASCADE,
                     status TEXT NOT NULL CHECK (status IN ('active','completed','cancelled')) DEFAULT 'active',
                     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -118,17 +118,17 @@ class MarketplaceDB:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_orders_status_balance ON marketplace_orders(status, balance_btc)"
             )
-            # Partial unique index: only one active assignment per worker
+            # Partial unique index: only one active assignment per miner
             await conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_assignment_worker ON miner_assignments(worker_ip) WHERE status = 'active'"
+                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_assignment_miner ON miner_assignments(miner_id) WHERE status = 'active'"
             )
             # Composite index for order + status lookups
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_assignments_order_status ON miner_assignments(order_id, status)"
             )
-            # Index for worker assignment history queries
+            # Index for miner assignment history queries
             await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_assignments_worker_assigned ON miner_assignments(worker_ip, assigned_at DESC)"
+                "CREATE INDEX IF NOT EXISTS idx_assignments_miner_assigned ON miner_assignments(miner_id, assigned_at DESC)"
             )
 
             logger.info("Marketplace tables created/verified")

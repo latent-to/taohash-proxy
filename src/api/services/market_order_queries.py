@@ -398,7 +398,7 @@ async def create_order_with_assignments(
     price_btc_eh_day: Decimal,
     amount_btc: Decimal,
     limit_eh_s: Optional[Decimal],
-    worker_ips: list[str],
+    miner_ids: list[str],
 ) -> dict:
     """
     Atomically create order and assign miners in a single transaction.
@@ -415,7 +415,7 @@ async def create_order_with_assignments(
         price_btc_eh_day: Price in BTC per Exahash per Day
         amount_btc: Total budget in BTC (initial balance)
         limit_eh_s: Optional hashrate speed cap in EH/s
-        worker_ips: List of miner identifiers to assign
+        miner_ids: List of miner identifiers to assign
 
     Returns:
         {"assigned": [...], "skipped": [...]} on success
@@ -426,7 +426,7 @@ async def create_order_with_assignments(
     """
     from src.api.services.market_assignment_queries import ConflictError
 
-    worker_ips = list(dict.fromkeys(worker_ips))
+    miner_ids = list(dict.fromkeys(miner_ids))
 
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -456,21 +456,21 @@ async def create_order_with_assignments(
                 limit_eh_s,
             )
 
-            if not worker_ips:
+            if not miner_ids:
                 return {"assigned": [], "skipped": []}
 
             existing_assignments = await conn.fetch(
                 """
-                SELECT worker_ip, order_id
+                SELECT miner_id, order_id
                 FROM miner_assignments
-                WHERE worker_ip = ANY($1) AND status = 'active'
+                WHERE miner_id = ANY($1) AND status = 'active'
                 FOR UPDATE
                 """,
-                worker_ips,
+                miner_ids,
             )
 
             conflicts = [
-                {"worker_ip": row["worker_ip"], "current_order": row["order_id"]}
+                {"miner_id": row["miner_id"], "current_order": row["order_id"]}
                 for row in existing_assignments
             ]
 
@@ -481,9 +481,9 @@ async def create_order_with_assignments(
                 )
 
             await conn.executemany(
-                "INSERT INTO miner_assignments (worker_ip, order_id) VALUES ($1, $2)",
-                [(w, order_id) for w in worker_ips],
+                "INSERT INTO miner_assignments (miner_id, order_id) VALUES ($1, $2)",
+                [(w, order_id) for w in miner_ids],
             )
 
-            logger.info(f"Created order {order_id} with {len(worker_ips)} miners")
-            return {"assigned": worker_ips, "skipped": []}
+            logger.info(f"Created order {order_id} with {len(miner_ids)} miners")
+            return {"assigned": miner_ids, "skipped": []}
