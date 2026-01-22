@@ -805,15 +805,15 @@ def _shed_excess(
         if excess <= rebalance_threshold:
             continue
 
-        shed = min(float(excess), float(budget.get(donor_order_id, 0.0)))
-        if shed <= rebalance_threshold:
+        shed_budget = min(float(excess), float(budget.get(donor_order_id, 0.0)))
+        if shed_budget <= rebalance_threshold:
             continue
 
         pool = donors.soft_by_order.get(donor_order_id, [])
         # Get smallest miners first (prevent overshooting excess)
         pool = list(reversed(pool))
 
-        while pool and shed > rebalance_threshold and len(recorder.moves) < max_switches:
+        while pool and shed_budget > rebalance_threshold and len(recorder.moves) < max_switches:
             miner = pool.pop(0)
 
             if miner.miner_id in moved_ids:
@@ -823,14 +823,14 @@ def _shed_excess(
             ):
                 continue
 
-            # STRICT budget fit: don't overshoot shed
-            if not _fits(miner, shed):
+            # STRICT budget fit: don't overshoot shed_budget
+            if not _fits(miner, shed_budget):
                 break
 
             recorder.record_move(
                 miner, donor_order_id, None, MoveReason.MARKET_REBALANCE
             )
-            shed -= float(miner.hashrate_eh_s)
+            shed_budget -= float(miner.hashrate_eh_s)
 
 
 # Diagnostics
@@ -892,7 +892,7 @@ def _build_diagnostics(
 
 
 def plan_tick(
-    planning_context: PlanningInput,
+    planning_input: PlanningInput,
 ) -> tuple[AllocationPlan, TickDiagnostics]:
     """Plan one allocator tick - core allocation algorithm.
 
@@ -919,7 +919,7 @@ def plan_tick(
         10. Build diagnostics for telemetry
 
     Args:
-        planning_context: PlanningContext with eligibility/health rules already
+        planning_input: PlanningContext with eligibility/health rules already
                           applied by the rules pipeline
 
     Returns:
@@ -931,16 +931,16 @@ def plan_tick(
         This function is pure and deterministic. All side effects (DB/Redis writes)
         happen in the executor.
     """
-    now = planning_context.snapshot.now
-    ranked = _rank_orders(planning_context)
-    eligible_orders = {order.order_id for order in ranked}
+    now = planning_input.snapshot.now
+    ranked_orders = _rank_orders(planning_input)
+    eligible_orders = {order.order_id for order in ranked_orders}
 
     # Step 1-2: Total Supply
-    supply_eh_s = _compute_supply(planning_context.snapshot.miners)
+    supply_eh_s = _compute_supply(planning_input.snapshot.miners)
 
     # Step 3: Compute Ideal Targets (Greedy Fill)
     targets, effective_order_caps = _compute_targets(
-        ranked, supply_eh_s, planning_context.config.overshoot_pct
+        ranked_orders, supply_eh_s, planning_input.config.overshoot_pct
     )
 
     # Step 4: Compute Current Allocation
@@ -949,28 +949,28 @@ def plan_tick(
         miners_by_order,
         idle_miners,
         currently_mined,
-    ) = _compute_current_allocation(planning_context, planning_context.snapshot.miners)
+    ) = _compute_current_allocation(planning_input, planning_input.snapshot.miners)
 
     # Step 5: Hard Drain Orders
-    hard_drain_ids = set(planning_context.hard_drain_ids)
+    hard_drain_ids = set(planning_input.hard_drain_ids)
     targets = _apply_hard_drain(targets, hard_drain_ids)
 
     # Step 6: Movement Budgets
     damping_factor = _compute_damping_factor(
-        planning_context.config.rebalance_rate,
-        planning_context.tick_elapsed_clamped_seconds,
-        float(planning_context.config.interval_seconds),
+        planning_input.config.rebalance_rate,
+        planning_input.tick_elapsed_clamped_seconds,
+        float(planning_input.config.interval_seconds),
     )
-    if planning_context.freeze_market_moves:
+    if planning_input.freeze_market_moves:
         damping_factor = 0.0
 
     rebalance_threshold = _compute_effective_rebalance_threshold(
-        float(planning_context.config.rebalance_threshold_eh_s),
-        planning_context.snapshot.miners,
+        float(planning_input.config.rebalance_threshold_eh_s),
+        planning_input.snapshot.miners,
     )
 
     budget = _compute_budgets(
-        ranked,
+        ranked_orders,
         targets,
         current_allocation,
         hard_drain_ids,
@@ -980,11 +980,11 @@ def plan_tick(
 
     # Step 7: Build Donor Pools
     donors, soft_donor_order_ids = _build_donor_pools(
-        planning_context,
+        planning_input,
         idle_miners,
         miners_by_order,
         hard_drain_ids,
-        ranked,
+        ranked_orders,
         eligible_orders,
         targets,
         current_allocation,
@@ -992,24 +992,24 @@ def plan_tick(
     )
 
     # Step 8: Identify Receivers
-    receivers = _identify_receivers(ranked, targets, current_allocation, rebalance_threshold)
+    receivers = _identify_receivers(ranked_orders, targets, current_allocation, rebalance_threshold)
 
     # Step 9: Execute Moves
     moved_ids: set[str] = set()
     recorder = MoveRecorder(current_allocation, moved_ids)
     picker = MinerPicker(
         donors,
-        planning_context,
+        planning_input,
         moved_ids,
         now,
         soft_donor_order_ids,
     )
 
-    max_switches = int(planning_context.config.max_switches_per_tick)
+    max_switches = int(planning_input.config.max_switches_per_tick)
 
     # Phase 1: Fill receivers
     _fill_receivers(
-        planning_context,
+        planning_input,
         receivers,
         targets,
         current_allocation,
@@ -1026,7 +1026,7 @@ def plan_tick(
 
     # Phase 3: Shed excess
     _shed_excess(
-        planning_context,
+        planning_input,
         soft_donor_order_ids,
         targets,
         current_allocation,
@@ -1041,10 +1041,10 @@ def plan_tick(
 
     # Step 10: Build Diagnostics
     diagnostics = _build_diagnostics(
-        planning_context,
+        planning_input,
         now,
         supply_eh_s,
-        ranked,
+        ranked_orders,
         eligible_orders,
         targets,
         current_allocation,

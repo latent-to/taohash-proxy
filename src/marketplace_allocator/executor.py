@@ -55,7 +55,7 @@ class PlanExecutor:
             logger.warning("Allocator executor disabled: Redis publisher unavailable")
             return ExecutionResult(moved=0, failed=len(plan.moves))
 
-        order_map = {o.order_id: o for o in snapshot.orders}
+        order_map = {order.order_id: order for order in snapshot.orders}
         moved_ids: list[str] = []
         result = ExecutionResult()
 
@@ -126,8 +126,8 @@ class PlanExecutor:
 
         if not self._db or not self._db.pool:
             return
-        for oid in order_ids:
+        for order_id in order_ids:
             try:
-                await update_order_status(self._db.pool, oid, "paused")
+                await update_order_status(self._db.pool, order_id, "paused")
             except Exception:
                 continue
