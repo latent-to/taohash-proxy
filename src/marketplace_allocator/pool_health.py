@@ -48,13 +48,13 @@ class OrderHealthStatus(str, Enum):
 
 def _utc_now_ts(now: datetime) -> float:
     """Convert datetime to Unix timestamp (UTC).
-    
+
     Ensures the datetime has UTC timezone before converting. Used for storing
     timestamps in health records (warmup_until_ts, backoff_until_ts).
-    
+
     Args:
         now: Datetime to convert (assumed UTC if no timezone)
-    
+
     Returns:
         Unix timestamp in seconds (float)
     """
@@ -65,13 +65,13 @@ def _utc_now_ts(now: datetime) -> float:
 
 def _clamp01(x: float) -> float:
     """Convert datetime to Unix timestamp (UTC).
-    
+
     Ensures the datetime has UTC timezone before converting. Used for storing
     timestamps in health records (warmup_until_ts, backoff_until_ts).
-    
+
     Args:
         now: Datetime to convert (assumed UTC if no timezone)
-    
+
     Returns:
         Unix timestamp in seconds (float)
     """
@@ -80,18 +80,18 @@ def _clamp01(x: float) -> float:
 
 def _ema_update(prev_ema: float, alpha: float, sample: float) -> float:
     """Update exponential moving average (EMA) with a new sample.
-    
+
     Computes the next EMA value using the formula:
     EMA_new = (1 - alpha) * EMA_prev + alpha * sample
-    
+
     Used to smooth reject rates and job gaps over time, preventing false
     positives from temporary spikes.
-    
+
     Args:
         prev_ema: Previous EMA value (0.0 if first sample)
         alpha: Smoothing factor (0-1), higher = more responsive to changes
         sample: New sample value
-    
+
     Returns:
         Updated EMA value. Returns the sample if prev_ema <= 0 (first sample).
     """
@@ -104,15 +104,15 @@ def _compute_backoff_seconds(
     record: "OrderHealthRecord", config: AllocatorConfig
 ) -> int:
     """Compute backoff duration using exponential backoff.
-    
+
     Calculates backoff duration based on the order's backoff level. Uses
     exponential backoff (base * 2^level) to increase wait time after
     repeated failures. Prevents rapid retries on persistently failing pools.
-    
+
     Args:
         record: Order health record containing backoff_level
         config: Allocator config with backoff base and max settings
-    
+
     Returns:
         Backoff duration in seconds. Capped at config.pool_health_backoff_max_seconds.
         Formula: min(max_seconds, base_seconds * 2^backoff_level)
@@ -124,16 +124,16 @@ def _compute_backoff_seconds(
 
 
 @dataclass
-class MinerCounterRecord:
+class MinerPoolShareStats:
     """Persistent per-miner cumulative share statistics.
-    
+
     Tracks cumulative share counts (accepted/rejected) for each miner across
     ticks. Used to compute deltas between ticks to detect pool health issues.
-    
+
     Stored in Redis and persisted across allocator restarts. Counters are
     cumulative (monotonically increasing) until the proxy restarts or the
     miner reconnects.
-    
+
     Attributes:
         accepted: Total accepted shares (cumulative)
         rejected: Total rejected shares (cumulative)
@@ -153,18 +153,18 @@ class MinerCounterRecord:
     pool_label: str = "unknown"
 
     @classmethod
-    def from_snapshot(cls, miner_snapshot: MinerSnapshot) -> "MinerCounterRecord":
+    def from_snapshot(cls, miner_snapshot: MinerSnapshot) -> "MinerPoolShareStats":
         """Create a counter record from a miner snapshot.
-    
+
         Extracts share statistics from a miner snapshot for use in pool health
         evaluation. Used to build current counters that will be compared with
         previous counters to compute deltas.
-        
+
         Args:
             miner_snapshot: Miner snapshot with current share counts
-        
+
         Returns:
-            MinerCounterRecord with counters from the snapshot
+            MinerPoolShareStats with counters from the snapshot
         """
         return cls(
             accepted=int(miner_snapshot.accepted or 0),
@@ -178,26 +178,26 @@ class MinerCounterRecord:
 
     def as_dict(self) -> dict:
         """Convert counter record to a dictionary.
-    
+
         Used for serialization to Redis. All fields are included as-is.
-        
+
         Returns:
             Dictionary representation of the counter record
         """
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MinerCounterRecord":
+    def from_dict(cls, data: dict) -> "MinerPoolShareStats":
         """Create a counter record from a dictionary.
-    
+
         Used for deserialization from Redis. Handles missing fields by defaulting
         to 0 or "unknown".
-        
+
         Args:
             data: Dictionary containing counter record fields
-        
+
         Returns:
-            MinerCounterRecord with values from the dictionary
+            MinerPoolShareStats with values from the dictionary
         """
         return cls(
             accepted=int(data.get("accepted") or 0),
@@ -213,14 +213,14 @@ class MinerCounterRecord:
 @dataclass
 class OrderHealthRecord:
     """Persistent per-order health state for upstream pool monitoring.
-    
+
     Tracks the health status and metrics of an upstream mining pool. Used by
     the allocator to determine whether an order can receive hashrate. Orders
     in BACKOFF are temporarily excluded from allocation until backoff expires.
-    
+
     Stored in Redis and persisted across allocator restarts. Health state
     transitions through: HEALTHY -> WARMUP -> HEALTHY/DEGRADED/BACKOFF.
-    
+
     Attributes:
         status: Current health status (HEALTHY/WARMUP/DEGRADED/BACKOFF)
         reason: Human-readable reason for the current status
@@ -262,7 +262,7 @@ class OrderHealthRecord:
 
         Args:
             data: Dictionary containing health record fields
-        
+
         Returns:
             OrderHealthRecord with values from the dictionary
         """
@@ -287,10 +287,10 @@ class OrderHealthRecord:
 @dataclass
 class OrderHealthTick:
     """One-tick aggregated share deltas for an order.
-    
+
     Aggregates share statistics across all miners on an order for a single
     tick. Used to compute reject rates and detect pool health issues.
-    
+
     Attributes:
         delta_accepted: Accepted shares this tick (delta from previous counters)
         delta_rejected: Rejected shares this tick (delta from previous counters)
@@ -310,11 +310,11 @@ class OrderHealthTick:
 
     def observe_notify_age(self, age: Optional[float]) -> None:
         """Update the minimum job notification age for this order.
-    
+
         Tracks the smallest last_notify_age_s across all miners on the order.
         Used to detect when a pool stops sending jobs (all miners have high
         notify age).
-        
+
         Args:
             age: Time since last job notification (seconds), or None if unavailable.
                 If None, the minimum is unchanged.
@@ -330,54 +330,55 @@ class OrderHealthTick:
 @dataclass
 class PoolHealthDecision:
     """Result of pool health evaluation for a single tick.
-    
+
     Contains updated health records, miner counters, and diagnostic events.
     Returned by evaluate_pool_health() and persisted to Redis for use in
     the next tick and by the rules pipeline.
-    
+
     Attributes:
         order_health: Updated health records per order (order_id -> OrderHealthRecord)
-        miner_counters: Updated counter records per miner (worker_ip -> MinerCounterRecord)
+        miner_counters: Updated counter records per miner (worker_ip -> MinerPoolShareStats)
         events: List of diagnostic events (warnings/info) for telemetry
     """
+
     order_health: dict[str, OrderHealthRecord]
-    miner_counters: dict[str, MinerCounterRecord]
+    miner_counters: dict[str, MinerPoolShareStats]
     events: list[dict]
 
 
 def _aggregate_per_order_ticks(
     *,
     miners: list[MinerSnapshot],
-    prev_miner_counters: dict[str, MinerCounterRecord],
+    prev_miner_counters: dict[str, MinerPoolShareStats],
     default_labels: set[str],
-) -> tuple[dict[str, OrderHealthTick], dict[str, MinerCounterRecord]]:
+) -> tuple[dict[str, OrderHealthTick], dict[str, MinerPoolShareStats]]:
     """Aggregate per-order share deltas from miner counters.
-    
+
     Computes share deltas (accepted/rejected) for each order by comparing
     current miner counters with previous counters. Only attributes deltas
     when miners have consistent history (same pool, no counter resets).
-    
+
     Behavior:
         - Skips deltas if miner has no history or moved pools since last tick
         - Skips deltas if counters decreased (proxy restart or miner reconnect)
         - Always tracks min_last_notify_age_s for orders (even without deltas)
-    
+
     Args:
         miners: Current miner snapshots with share counts
         prev_miner_counters: Previous tick's counter records (from Redis)
         default_labels: Labels that are not marketplace orders (e.g., "normal")
-    
+
     Returns:
         Tuple of:
             - per_order: Dict mapping order_id -> OrderHealthTick with aggregated deltas
-            - miner_counters: Dict mapping worker_ip -> MinerCounterRecord (current counters)
+            - miner_counters: Dict mapping worker_ip -> MinerPoolShareStats (current counters)
     """
     per_order: dict[str, OrderHealthTick] = {}
-    miner_counters: dict[str, MinerCounterRecord] = {}
+    miner_counters: dict[str, MinerPoolShareStats] = {}
 
     for miner in miners:
         worker_ip = str(miner.worker_ip)
-        current = MinerCounterRecord.from_snapshot(miner)
+        current = MinerPoolShareStats.from_snapshot(miner)
         miner_counters[worker_ip] = current
 
         label = str(miner.pool_label or "unknown")
@@ -423,11 +424,11 @@ def _emit_event(
     data: dict,
 ) -> None:
     """Emit a diagnostic event for telemetry.
-    
+
     Adds an event to the events list for monitoring and debugging. Events
     are included in TickDiagnostics and published to Redis for real-time
     monitoring.
-    
+
     Args:
         events: List of events to append to
         level: Event severity ("info", "warning", "error")
@@ -455,17 +456,17 @@ def _apply_backoff(
     reason: str,
 ) -> None:
     """Place an order in BACKOFF state due to pool health issues.
-    
+
     Sets the order status to BACKOFF and increments the backoff level for
     exponential backoff. The order will be excluded from allocation until
     backoff_until_ts expires.
-    
+
     Args:
         record: Health record to update (modified in place)
         now_ts: Current Unix timestamp
         backoff_s: Backoff duration in seconds (computed via _compute_backoff_seconds)
         reason: Human-readable reason for the backoff
-    
+
     Note:
         Backoff level increments (capped at 10) to increase wait time after
         repeated failures. Warmup is NOT cleared here (caller must clear if needed).
@@ -482,15 +483,15 @@ def evaluate_pool_health(
     now: datetime,
     miners: list[MinerSnapshot],
     prev_order_health: dict[str, OrderHealthRecord],
-    prev_miner_counters: dict[str, MinerCounterRecord],
+    prev_miner_counters: dict[str, MinerPoolShareStats],
     config: AllocatorConfig,
 ) -> PoolHealthDecision:
     """Evaluate upstream pool health and update health records.
-    
+
     Analyzes miner share statistics to detect pool health issues. Uses
     exponential moving averages (EMA) to smooth metrics and prevent false
     positives. Applies warmup windows and exponential backoff for hysteresis.
-    
+
     Health evaluation steps:
         1. Aggregate per-order share deltas from miner counters
         2. Update health records with state transitions:
@@ -498,21 +499,21 @@ def evaluate_pool_health(
            - WARMUP: Start warmup on first activity, complete after window
            - Job gap: Update EMA, trigger backoff if no jobs for too long
            - Reject rates: Update EMAs, trigger DEGRADED/BACKOFF if thresholds exceeded
-    
+
     Args:
         now: Current timestamp for health evaluation
         miners: Current miner snapshots with share counts and pool assignments
         prev_order_health: Previous tick's health records (from Redis)
         prev_miner_counters: Previous tick's miner counters (from Redis)
         config: Allocator configuration with health thresholds and settings
-    
+
     Returns:
         PoolHealthDecision with updated health records, miner counters, and events.
         If pool health is disabled, returns previous health unchanged.
     """
     if not config.enable_pool_health:
         miner_counters = {
-            m.worker_ip: MinerCounterRecord.from_snapshot(m) for m in miners
+            m.worker_ip: MinerPoolShareStats.from_snapshot(m) for m in miners
         }
         return PoolHealthDecision(
             order_health=dict(prev_order_health),
@@ -536,9 +537,7 @@ def evaluate_pool_health(
     # ------------------------------------------------------------------
     # 2) Update per-order health records
     # ------------------------------------------------------------------
-    updated: dict[str, OrderHealthRecord] = dict(
-        prev_order_health
-    ) 
+    updated: dict[str, OrderHealthRecord] = dict(prev_order_health)
     events: list[dict] = []
 
     relevant_order_ids = set(updated.keys()) | set(per_order_tick.keys())
