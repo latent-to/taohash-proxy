@@ -27,7 +27,6 @@ from src.marketplace_allocator.types import (
     AllocatorConfig,
     MinerSnapshot,
     OrderSnapshot,
-    gh_to_eh,
 )
 from src.storage.marketplace_db import MarketplaceDB
 from src.utils.env import env_bool
@@ -63,47 +62,24 @@ async def _run_once(
 ) -> None:
     now = datetime.now(timezone.utc)
 
-    # 1) Snapshot orders
     marketplace_orders = await get_orders(marketplace_db.pool, status="active")
-    orders: list[OrderSnapshot] = []
+    active_orders: list[OrderSnapshot] = []
     for order in marketplace_orders:
         try:
-            orders.append(order.to_snapshot())
-        except Exception:
+            active_orders.append(order.to_snapshot())
+        except Exception as e:
+            logger.error(f"Failed to convert order to snapshot: {e}")
             continue
 
-    # 2) Snapshot miners (from Redis heartbeats)
     miners_stats = await redis_client.get_all_miners_with_stats()
-    # TODO: Add data structures for get_all_miners_with_stats and use them internally and for api calls
-    miners: list[MinerSnapshot] = []
+    active_miners: list[MinerSnapshot] = []
     for worker_ip, stats in miners_stats.items():
         try:
-            hashrate_gh = float(stats.get("hashrate_gh") or 0.0)
-            rejected_breakdown = stats.get("rejected_breakdown") or {}
-            miners.append(
-                MinerSnapshot(
-                    worker_ip=worker_ip,
-                    hashrate_eh_s=gh_to_eh(hashrate_gh),
-                    pool_label=str(stats.get("pool_label") or "unknown"),
-                    accepted=int(stats.get("accepted") or 0),
-                    rejected=int(stats.get("rejected") or 0),
-                    rejected_stale=int(rejected_breakdown.get("stale") or 0),
-                    rejected_duplicate=int(rejected_breakdown.get("duplicate") or 0),
-                    rejected_low_diff=int(rejected_breakdown.get("low_diff") or 0),
-                    rejected_other=int(rejected_breakdown.get("other") or 0),
-                    last_notify_age_s=(
-                        float(stats.get("last_notify_age_s"))
-                        if stats.get("last_notify_age_s") is not None
-                        else None
-                    ),
-                    worker_name=str(stats.get("worker_name") or ""),
-                )
-            )
+            active_miners.append(MinerSnapshot.from_redis_stats(worker_ip, stats))
         except Exception as e:
             logger.error(f"Failed to parse miner snapshot: {e}")
             continue
 
-    # 3) Hashprice
     hashprice_btc_eh_day: Optional[Decimal] = None
     if config.enforce_hashprice_floor:
         hashprice_payload = await redis_client.get_hashprice_cache()
@@ -116,18 +92,18 @@ async def _run_once(
                 logger.error(f"Failed to parse hashprice: {e}")
                 hashprice_btc_eh_day = None
 
-    snapshot = AllocationSnapshot(
+    current_snapshot = AllocationSnapshot(
         now=now,
-        orders=orders,
-        miners=miners,
+        orders=active_orders,
+        miners=active_miners,
         hashprice_btc_eh_day=hashprice_btc_eh_day,
     )
 
     # 4) Load runtime state (cooldowns, last_tick, pool health state)
-    worker_ips = [m.worker_ip for m in miners]
-    order_ids: set[str] = {o.order_id for o in orders}
+    worker_ips = [m.worker_ip for m in active_miners]
+    order_ids: set[str] = {o.order_id for o in active_orders}
     # Include any currently mined non-default labels so backoff/warmup state is stable
-    for miner in miners:
+    for miner in active_miners:
         if miner.pool_label not in config.default_labels:
             order_ids.add(str(miner.pool_label))
 
@@ -139,7 +115,7 @@ async def _run_once(
     try:
         decision = evaluate_pool_health(
             now=now,
-            miners=miners,
+            miners=active_miners,
             prev_order_health=runtime_view.order_health,
             prev_miner_counters=runtime_view.miner_counters,
             config=config,
@@ -152,7 +128,7 @@ async def _run_once(
 
     # 5) Apply rules
     planning_context = PlanningInput(
-        snapshot=snapshot, config=config, runtime=runtime_view
+        snapshot=current_snapshot, config=config, runtime=runtime_view
     )
     if decision is not None:
         planning_context.order_health = decision.order_health
@@ -179,7 +155,7 @@ async def _run_once(
     plan, diag = plan_tick(planning_context)
 
     # 7) Execute (DB + Redis) and persist runtime state
-    await executor.apply(snapshot, plan)
+    await executor.apply(current_snapshot, plan)
 
     # 8) Telemetry
     await publish_last_tick(redis_client, diag)
@@ -205,7 +181,7 @@ async def order_allocator_loop(
 ) -> None:
     """Run the marketplace allocator control loop.
 
-    Continuously allocates miners to marketplace orders based on defined rules and 
+    Continuously allocates miners to marketplace orders based on defined rules and
     constraints. Runs every `poll_seconds` and hot reloads config on each iteration.
 
     Args:

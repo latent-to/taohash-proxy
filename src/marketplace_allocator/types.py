@@ -235,6 +235,29 @@ class MinerSnapshot:
     last_notify_age_s: Optional[float] = None
     worker_name: str = ""
 
+    @classmethod
+    def from_redis_stats(cls, worker_ip: str, stats: dict) -> "MinerSnapshot":
+        """Create from Redis aggregated stats dict."""
+        hashrate_gh = float(stats.get("hashrate_gh") or 0.0)
+        rejected_breakdown = stats.get("rejected_breakdown") or {}
+        return cls(
+            worker_ip=worker_ip,
+            hashrate_eh_s=gh_to_eh(hashrate_gh),
+            pool_label=str(stats.get("pool_label") or "unknown"),
+            accepted=int(stats.get("accepted") or 0),
+            rejected=int(stats.get("rejected") or 0),
+            rejected_stale=int(rejected_breakdown.get("stale") or 0),
+            rejected_duplicate=int(rejected_breakdown.get("duplicate") or 0),
+            rejected_low_diff=int(rejected_breakdown.get("low_diff") or 0),
+            rejected_other=int(rejected_breakdown.get("other") or 0),
+            last_notify_age_s=(
+                float(stats.get("last_notify_age_s"))
+                if stats.get("last_notify_age_s") is not None
+                else None
+            ),
+            worker_name=str(stats.get("worker_name") or ""),
+        )
+
 
 @dataclass(frozen=True)
 class AllocationSnapshot:
