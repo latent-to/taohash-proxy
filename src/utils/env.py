@@ -25,3 +25,43 @@ def env_bool(name: str, default: bool = False) -> bool:
     if normalized in _FALSY:
         return False
     return default
+
+
+def env_int(name: str, default: int) -> int:
+    """Return environment variable ``name`` parsed as an integer.
+
+    If the environment variable is not set, returns the default.
+    If the value cannot be parsed as an integer, logs a warning and returns the default.
+    """
+    raw: Optional[str] = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        from src.utils.logger import get_logger
+
+        get_logger(__name__).warning(
+            f"Invalid int for {name}={raw!r}, using default={default}"
+        )
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """Return environment variable ``name`` parsed as a float.
+
+    If the environment variable is not set, returns the default.
+    If the value cannot be parsed as a float, logs a warning and returns the default.
+    """
+    raw: Optional[str] = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        from src.utils.logger import get_logger
+
+        get_logger(__name__).warning(
+            f"Invalid float for {name}={raw!r}, using default={default}"
+        )
+        return default
