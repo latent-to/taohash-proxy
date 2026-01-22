@@ -285,7 +285,7 @@ class PoolHealthRecord:
 
 
 @dataclass
-class OrderHealthTick:
+class PoolHealthDelta:
     """One-tick aggregated share deltas for an order.
 
     Aggregates share statistics across all miners on an order for a single
@@ -351,7 +351,7 @@ def _aggregate_per_order_ticks(
     miners: list[MinerSnapshot],
     prev_miner_counters: dict[str, MinerPoolShareStats],
     default_labels: set[str],
-) -> tuple[dict[str, OrderHealthTick], dict[str, MinerPoolShareStats]]:
+) -> tuple[dict[str, PoolHealthDelta], dict[str, MinerPoolShareStats]]:
     """Aggregate per-order share deltas from miner counters.
 
     Computes share deltas (accepted/rejected) for each order by comparing
@@ -370,10 +370,10 @@ def _aggregate_per_order_ticks(
 
     Returns:
         Tuple of:
-            - per_order: Dict mapping order_id -> OrderHealthTick with aggregated deltas
+            - per_order: Dict mapping order_id -> PoolHealthDelta with aggregated deltas
             - miner_counters: Dict mapping worker_ip -> MinerPoolShareStats (current counters)
     """
-    per_order: dict[str, OrderHealthTick] = {}
+    per_order: dict[str, PoolHealthDelta] = {}
     miner_counters: dict[str, MinerPoolShareStats] = {}
 
     for miner in miners:
@@ -385,7 +385,7 @@ def _aggregate_per_order_ticks(
         if label in default_labels:
             continue
 
-        tick = per_order.setdefault(label, OrderHealthTick())
+        tick = per_order.setdefault(label, PoolHealthDelta())
         tick.observe_notify_age(miner.last_notify_age_s)
 
         prev = prev_miner_counters.get(worker_ip)
@@ -544,7 +544,7 @@ def evaluate_pool_health(
 
     for order_id in relevant_order_ids:
         record = updated.get(order_id) or PoolHealthRecord()
-        tick = per_order_tick.get(order_id) or OrderHealthTick()
+        tick = per_order_tick.get(order_id) or PoolHealthDelta()
 
         # ---- Backoff handling ----
         if record.status == PoolHealthState.BACKOFF and record.backoff_until_ts > 0:
