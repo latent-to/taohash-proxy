@@ -5,6 +5,7 @@ from typing import Optional
 
 import asyncpg
 
+from src.marketplace_allocator.types import MarketplaceOrder
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -64,7 +65,7 @@ async def create_order(
         return False
 
 
-async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
+async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[MarketplaceOrder]:
     """
     Get a marketplace order by ID.
 
@@ -73,7 +74,7 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
         order_id: Order identifier
 
     Returns:
-        Order dict or None if not found
+        MarketplaceOrder or None if not found
     """
     try:
         async with pool.acquire() as conn:
@@ -90,35 +91,16 @@ async def get_order(pool: asyncpg.Pool, order_id: str) -> Optional[dict]:
             )
 
             if row:
-                return {
-                    "order_id": row["order_id"],
-                    "host": row["host"],
-                    "port": row["port"],
-                    "user": row["username"],
-                    "password": row["password"],
-                    "price_btc_eh_day": row["price_btc_eh_day"],
-                    "amount_btc": row["amount_btc"],
-                    "balance_btc": row["balance_btc"],
-                    "limit_eh_s": row["limit_eh_s"],
-                    "created_at": row["created_at"],
-                    "updated_at": row["updated_at"],
-                    "queue_position_time": row["queue_position_time"],
-                    "status": row["status"],
-                    "fulfilled_at": row["fulfilled_at"],
-                    "paused_at": row["paused_at"],
-                    "cancelled_at": row["cancelled_at"],
-                    "last_rebalance_at": row["last_rebalance_at"],
-                    "total_shares_credited": row["total_shares_credited"],
-                    "total_share_value_credited": row["total_share_value_credited"],
-                    "last_share_credited_at": row["last_share_credited_at"],
-                }
+                return MarketplaceOrder.from_db_row(row)
             return None
     except Exception as e:
         logger.error(f"Failed to get order {order_id}: {e}")
         return None
 
 
-async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[dict]:
+async def get_orders(
+    pool: asyncpg.Pool, status: Optional[str] = None
+) -> list[MarketplaceOrder]:
     """
     Get all marketplace orders, optionally filtered by status.
 
@@ -127,7 +109,7 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
         status: Optional filter by status ('active', 'paused', 'fulfilled', 'cancelled')
 
     Returns:
-        List of order dicts
+        List of MarketplaceOrder objects
     """
     try:
         async with pool.acquire() as conn:
@@ -147,33 +129,7 @@ async def get_orders(pool: asyncpg.Pool, status: Optional[str] = None) -> list[d
             else:
                 rows = await conn.fetch(base_query + " ORDER BY created_at DESC")
 
-            orders = []
-            for row in rows:
-                orders.append(
-                    {
-                        "order_id": row["order_id"],
-                        "host": row["host"],
-                        "port": row["port"],
-                        "user": row["username"],
-                        "password": row["password"],
-                        "price_btc_eh_day": row["price_btc_eh_day"],
-                        "amount_btc": row["amount_btc"],
-                        "balance_btc": row["balance_btc"],
-                        "limit_eh_s": row["limit_eh_s"],
-                        "created_at": row["created_at"],
-                        "updated_at": row["updated_at"],
-                        "queue_position_time": row["queue_position_time"],
-                        "status": row["status"],
-                        "fulfilled_at": row["fulfilled_at"],
-                        "paused_at": row["paused_at"],
-                        "cancelled_at": row["cancelled_at"],
-                        "last_rebalance_at": row["last_rebalance_at"],
-                        "total_shares_credited": row["total_shares_credited"],
-                        "total_share_value_credited": row["total_share_value_credited"],
-                        "last_share_credited_at": row["last_share_credited_at"],
-                    }
-                )
-            return orders
+            return [MarketplaceOrder.from_db_row(row) for row in rows]
     except Exception as e:
         logger.error(f"Failed to get orders: {e}")
         return []
@@ -361,7 +317,7 @@ async def update_order_fields(
         return False
 
 
-async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
+async def get_active_orders(pool: asyncpg.Pool) -> list[MarketplaceOrder]:
     """
     Get all orders with 'active' status for balance processing.
 
@@ -369,7 +325,7 @@ async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
         pool: asyncpg connection pool
 
     Returns:
-        List of active order dicts
+        List of active MarketplaceOrder objects
     """
     try:
         async with pool.acquire() as conn:
@@ -386,33 +342,7 @@ async def get_active_orders(pool: asyncpg.Pool) -> list[dict]:
                 """
             )
 
-            orders = []
-            for row in rows:
-                orders.append(
-                    {
-                        "order_id": row["order_id"],
-                        "host": row["host"],
-                        "port": row["port"],
-                        "user": row["username"],
-                        "password": row["password"],
-                        "price_btc_eh_day": row["price_btc_eh_day"],
-                        "amount_btc": row["amount_btc"],
-                        "balance_btc": row["balance_btc"],
-                        "limit_eh_s": row["limit_eh_s"],
-                        "created_at": row["created_at"],
-                        "updated_at": row["updated_at"],
-                        "queue_position_time": row["queue_position_time"],
-                        "status": row["status"],
-                        "fulfilled_at": row["fulfilled_at"],
-                        "paused_at": row["paused_at"],
-                        "cancelled_at": row["cancelled_at"],
-                        "last_rebalance_at": row["last_rebalance_at"],
-                        "total_shares_credited": row["total_shares_credited"],
-                        "total_share_value_credited": row["total_share_value_credited"],
-                        "last_share_credited_at": row["last_share_credited_at"],
-                    }
-                )
-            return orders
+            return [MarketplaceOrder.from_db_row(row) for row in rows]
     except Exception as e:
         logger.error(f"Failed to get active orders: {e}")
         return []

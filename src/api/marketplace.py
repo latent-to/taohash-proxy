@@ -217,44 +217,13 @@ async def list_orders(
 
     detailed_orders = []
     for order in orders:
-        assignments = await get_order_assignments(
-            marketplace_db.pool, order["order_id"]
-        )
+        assignments = await get_order_assignments(marketplace_db.pool, order.order_id)
         assigned_miners = [a["worker_ip"] for a in assignments]
 
-        detailed_orders.append(
-            {
-                "order_id": order["order_id"],
-                "host": order["host"],
-                "port": order["port"],
-                "user": order["user"],
-                "status": order["status"],
-                "created_at": order["created_at"].isoformat()
-                if order["created_at"]
-                else None,
-                # Share-based pricing
-                "price_btc_eh_day": str(order["price_btc_eh_day"]),
-                "amount_btc": str(order["amount_btc"]),
-                "balance_btc": str(order["balance_btc"]),
-                "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
-                # Completion tracking
-                "fulfilled_at": order["fulfilled_at"].isoformat()
-                if order["fulfilled_at"]
-                else None,
-                "paused_at": order["paused_at"].isoformat()
-                if order["paused_at"]
-                else None,
-                "cancelled_at": order["cancelled_at"].isoformat()
-                if order["cancelled_at"]
-                else None,
-                # Share tracking
-                "total_shares_credited": order["total_shares_credited"],
-                "total_share_value_credited": str(order["total_share_value_credited"]),
-                # Miners
-                "assigned_miners": assigned_miners,
-                "miner_count": len(assigned_miners),
-            }
-        )
+        order_dict = order.to_api_dict()
+        order_dict["assigned_miners"] = assigned_miners
+        order_dict["miner_count"] = len(assigned_miners)
+        detailed_orders.append(order_dict)
 
     return {"orders": detailed_orders, "total": len(detailed_orders)}
 
@@ -281,33 +250,10 @@ async def get_order(
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
     assigned_miners = [a["worker_ip"] for a in assignments]
 
-    return {
-        "order_id": order["order_id"],
-        "host": order["host"],
-        "port": order["port"],
-        "user": order["user"],
-        "status": order["status"],
-        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
-        # Share-based pricing
-        "price_btc_eh_day": str(order["price_btc_eh_day"]),
-        "amount_btc": str(order["amount_btc"]),
-        "balance_btc": str(order["balance_btc"]),
-        "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
-        # Completion tracking
-        "fulfilled_at": order["fulfilled_at"].isoformat()
-        if order["fulfilled_at"]
-        else None,
-        "paused_at": order["paused_at"].isoformat() if order["paused_at"] else None,
-        "cancelled_at": order["cancelled_at"].isoformat()
-        if order["cancelled_at"]
-        else None,
-        # Share tracking
-        "total_shares_credited": order["total_shares_credited"],
-        "total_share_value_credited": str(order["total_share_value_credited"]),
-        # Miners
-        "assigned_miners": assigned_miners,
-        "miner_count": len(assigned_miners),
-    }
+    order_dict = order.to_api_dict()
+    order_dict["assigned_miners"] = assigned_miners
+    order_dict["miner_count"] = len(assigned_miners)
+    return order_dict
 
 
 @router.post("/orders/{order_id}/pause")
@@ -329,10 +275,10 @@ async def pause_order(
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    if order["status"] == "cancelled":
+    if order.status == "cancelled":
         raise HTTPException(status_code=409, detail="Order is cancelled")
 
-    if order["status"] == "paused":
+    if order.status == "paused":
         return {
             "status": "paused",
             "order_id": order_id,
@@ -371,17 +317,17 @@ async def resume_order(
     if not order:
         raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
 
-    if order["status"] == "cancelled":
+    if order.status == "cancelled":
         raise HTTPException(status_code=409, detail="Order is cancelled")
 
-    if order["status"] == "active":
+    if order.status == "active":
         return {
             "status": "active",
             "order_id": order_id,
             "message": "Order already active",
         }
 
-    if order["balance_btc"] <= 0:
+    if order.balance_btc <= 0:
         raise HTTPException(status_code=409, detail="Order has no remaining balance")
 
     await update_order_status(marketplace_db.pool, order_id, "active")
@@ -435,29 +381,10 @@ async def update_order(
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
     assigned_miners = [a["worker_ip"] for a in assignments]
 
-    return {
-        "order_id": order["order_id"],
-        "host": order["host"],
-        "port": order["port"],
-        "user": order["user"],
-        "status": order["status"],
-        "created_at": order["created_at"].isoformat() if order["created_at"] else None,
-        "price_btc_eh_day": str(order["price_btc_eh_day"]),
-        "amount_btc": str(order["amount_btc"]),
-        "balance_btc": str(order["balance_btc"]),
-        "limit_eh_s": str(order["limit_eh_s"]) if order["limit_eh_s"] else None,
-        "fulfilled_at": order["fulfilled_at"].isoformat()
-        if order["fulfilled_at"]
-        else None,
-        "paused_at": order["paused_at"].isoformat() if order["paused_at"] else None,
-        "cancelled_at": order["cancelled_at"].isoformat()
-        if order["cancelled_at"]
-        else None,
-        "total_shares_credited": order["total_shares_credited"],
-        "total_share_value_credited": str(order["total_share_value_credited"]),
-        "assigned_miners": assigned_miners,
-        "miner_count": len(assigned_miners),
-    }
+    order_dict = order.to_api_dict()
+    order_dict["assigned_miners"] = assigned_miners
+    order_dict["miner_count"] = len(assigned_miners)
+    return order_dict
 
 
 @router.delete("/orders/{order_id}")
@@ -566,10 +493,10 @@ async def assign_miners(
         for worker_ip in result["assigned"]:
             if worker_ip in connected_set:
                 pool_config = {
-                    "host": order["host"],
-                    "port": order["port"],
-                    "user": order["user"],
-                    "pass": order["password"],
+                    "host": order.host,
+                    "port": order.port,
+                    "user": order.user,
+                    "pass": order.password,
                     "label": order_id,
                 }
                 await redis_publisher.publish_switch_pool(worker_ip, pool_config)
