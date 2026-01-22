@@ -133,13 +133,13 @@ class CommandListener:
         Handle a single command from Redis.
 
         Args:
-            data: Command data dict with type, worker_ip, and command-specific fields
+            data: Command data dict with type, miner_id, and command-specific fields
         """
-        worker_ip = data.get("worker_ip")
+        miner_id = data.get("miner_id")
         session_id = data.get("session_id")
         cmd_type = data.get("type")
 
-        if not worker_ip or not cmd_type:
+        if not miner_id or not cmd_type:
             logger.warning(f"Invalid command format: {data}")
             return
 
@@ -150,13 +150,13 @@ class CommandListener:
                 session = self.miner_sessions_by_id.get(str(session_id))
                 if session:
                     registry_key = session.get_registry_key() or ""
-                    if registry_key and registry_key != str(worker_ip):
+                    if registry_key and registry_key != str(miner_id):
                         logger.warning(
-                            f"Command session_id={session_id} resolves to registry_key={registry_key} (command worker_ip={worker_ip})"
+                            f"Command session_id={session_id} resolves to registry_key={registry_key} (command miner_id={miner_id})"
                         )
                     targets = [session]
             else:
-                registry_key = self.miner_registry.get(str(worker_ip))
+                registry_key = self.miner_registry.get(str(miner_id))
                 if registry_key:
                     targets = list(registry_key.values())
 
@@ -164,7 +164,7 @@ class CommandListener:
             return
 
         logger.info(
-            f"Received {cmd_type} command for {worker_ip} (sessions={len(targets)})",
+            f"Received {cmd_type} command for {miner_id} (sessions={len(targets)})",
         )
 
         if cmd_type == "switch_pool":

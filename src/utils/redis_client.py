@@ -64,7 +64,7 @@ class RedisPublisher:
 
     async def publish_switch_pool(
         self,
-        worker_ip: str,
+        miner_id: str,
         pool_config: dict,
         session_id: str | None = None,
     ) -> bool:
@@ -72,7 +72,7 @@ class RedisPublisher:
         Publish command to switch a miner to a specific pool.
 
         Args:
-            worker_ip: Miner identifier (worker:ip format)
+            miner_id: Miner identifier (worker_name:ip format)
             pool_config: Pool configuration dict with host, port, user, pass, label
 
         Returns:
@@ -86,20 +86,20 @@ class RedisPublisher:
             message = json.dumps(
                 {
                     "type": "switch_pool",
-                    "worker_ip": worker_ip,
+                    "miner_id": miner_id,
                     **({"session_id": session_id} if session_id else {}),
                     "pool_config": pool_config,
                 }
             )
             await self.redis.publish(self.channel, message)
-            logger.info(f"Published switch_pool command for {worker_ip}")
+            logger.info(f"Published switch_pool command for {miner_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to publish switch_pool: {e}")
             return False
 
     async def publish_switch_default(
-        self, worker_ip: str, session_id: str | None = None
+        self, miner_id: str, session_id: str | None = None
     ) -> bool:
         """
         Publish command to switch a miner back to their default pool.
@@ -107,7 +107,7 @@ class RedisPublisher:
         The proxy determines the default pool from MinerSession.main_pool.
 
         Args:
-            worker_ip: Miner identifier (worker:ip format)
+            miner_id: Miner identifier (worker_name:ip format)
 
         Returns:
             True if published successfully, False otherwise
@@ -120,12 +120,12 @@ class RedisPublisher:
             message = json.dumps(
                 {
                     "type": "switch_default",
-                    "worker_ip": worker_ip,
+                    "miner_id": miner_id,
                     **({"session_id": session_id} if session_id else {}),
                 }
             )
             await self.redis.publish(self.channel, message)
-            logger.info(f"Published switch_default command for {worker_ip}")
+            logger.info(f"Published switch_default command for {miner_id}")
             return True
         except Exception as e:
             logger.error(f"Failed to publish switch_default: {e}")
@@ -347,7 +347,7 @@ class RedisClient:
         Reads from Redis maintained by each proxy's heartbeat loop.
 
         Returns:
-            List of worker_ip identifiers
+            List of miner_id identifiers
         """
         if not self.redis:
             return []
@@ -375,7 +375,7 @@ class RedisClient:
 
         Args:
             proxy_id: Unique identifier for this proxy instance
-            miners: Dict mapping worker_ip to stats dict
+            miners: Dict mapping miner_id to stats dict
             ttl_seconds: Time-to-live for the key (default 30s)
 
         Returns:
@@ -401,7 +401,7 @@ class RedisClient:
         Get all miners with stats across all proxy instances.
 
         Returns:
-            Dict mapping worker_ip to stats dict
+            Dict mapping miner_id to stats dict
         """
         if not self.redis:
             return {}
@@ -432,13 +432,13 @@ class RedisClient:
 
                 miners_by_proxy.append((proxy_id, miners))
 
-            # Aggregate stats per worker_ip
+            # Aggregate stats per miner_id
             aggregators: dict[str, MinerGroupStats] = {}
             worker_names: dict[str, list[str]] = {}
             miner_agents: dict[str, list[str]] = {}
 
             for proxy_id, miners in miners_by_proxy:
-                for worker_ip, stats in miners.items():
+                for miner_id, stats in miners.items():
                     if not isinstance(stats, dict):
                         continue
 
@@ -451,25 +451,25 @@ class RedisClient:
                                 _sessions.append(session_dict)
                         stats["sessions"] = _sessions
 
-                    if worker_ip not in aggregators:
-                        aggregators[worker_ip] = MinerGroupStats()
-                        worker_names[worker_ip] = []
-                        miner_agents[worker_ip] = []
+                    if miner_id not in aggregators:
+                        aggregators[miner_id] = MinerGroupStats()
+                        worker_names[miner_id] = []
+                        miner_agents[miner_id] = []
 
-                    aggregators[worker_ip].merge_from_dict(
+                    aggregators[miner_id].merge_from_dict(
                         stats,
-                        worker_name_out=worker_names[worker_ip],
-                        miner_agent_out=miner_agents[worker_ip],
+                        worker_name_out=worker_names[miner_id],
+                        miner_agent_out=miner_agents[miner_id],
                     )
 
             all_miners: dict[str, dict] = {}
-            for worker_ip, agg in aggregators.items():
-                all_miners[worker_ip] = agg.to_merged_dict(
-                    worker_name=worker_names[worker_ip][0]
-                    if worker_names[worker_ip]
+            for miner_id, agg in aggregators.items():
+                all_miners[miner_id] = agg.to_merged_dict(
+                    worker_name=worker_names[miner_id][0]
+                    if worker_names[miner_id]
                     else "",
-                    miner_agent=miner_agents[worker_ip][0]
-                    if miner_agents[worker_ip]
+                    miner_agent=miner_agents[miner_id][0]
+                    if miner_agents[miner_id]
                     else "",
                 )
 

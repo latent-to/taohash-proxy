@@ -2,7 +2,7 @@
 This module provides an aggregation interface for stats across multiple
 miner sessions into a single logical miner group for Redis heartbeat publishing.
 
-Also handles cross-proxy merging when the same worker_ip appears on multiple
+Also handles cross-proxy merging when the same miner_id appears on multiple
 proxy instances.
 """
 
@@ -186,7 +186,7 @@ class MinerGroupStats:
     ) -> None:
         """Merge stats from a dict representation into this instance.
 
-        Used for cross-proxy aggregation when the same worker_ip appears on
+        Used for cross-proxy aggregation when the same miner_id appears on
         multiple proxies.
 
         Args:
