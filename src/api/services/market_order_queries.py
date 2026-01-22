@@ -381,6 +381,10 @@ async def apply_share_credit(
                 order_id,
             )
         if row:
+            logger.info(
+                f"Applied share credit to {order_id}: {cost_btc} BTC for {share_count} shares. "
+                f"Balance: {row['balance_btc']} BTC"
+            )
             return {"balance_btc": row["balance_btc"], "status": row["status"]}
         return None
     except Exception as e:

@@ -1,5 +1,5 @@
 """
-Background worker to process order share events from Redis Streams.
+Module to process order share events from Redis Streams.
 
 Consumes accepted share events, aggregates difficulty per order, converts
 to BTC cost, applies debits in Postgres, and fulfills orders when balance
@@ -49,6 +49,109 @@ async def _fulfill_order(
     )
 
 
+def _validate_and_aggregate_messages(
+    messages: list[tuple[str, dict]],
+) -> tuple[dict[str, Decimal], dict[str, int], dict[str, list[str]], list[str]]:
+    """
+    Validate and aggregate share difficulty by order.
+
+    Returns:
+        difficulty_by_order: Sum of share difficulty per order_id
+        share_count_by_order: Number of valid shares per order_id
+        message_ids_by_order: Stream message IDs grouped by order_id
+        invalid_ack_ids: Message IDs to ack without processing (invalid/reserved)
+    """
+    difficulty_by_order: dict[str, Decimal] = {}
+    share_count_by_order: dict[str, int] = {}
+    message_ids_by_order: dict[str, list[str]] = {}
+    invalid_ack_ids: list[str] = []
+
+    for message_id, data in messages:
+        order_id = data.get("order_id")
+        if not order_id or order_id in RESERVED_LABELS:
+            invalid_ack_ids.append(message_id)
+            continue
+
+        difficulty_raw = data.get("difficulty")
+        try:
+            difficulty = Decimal(str(difficulty_raw))
+        except (InvalidOperation, TypeError):
+            invalid_ack_ids.append(message_id)
+            continue
+
+        if difficulty <= 0:
+            invalid_ack_ids.append(message_id)
+            continue
+
+        difficulty_by_order[order_id] = (
+            difficulty_by_order.get(order_id, Decimal("0")) + difficulty
+        )
+        share_count_by_order[order_id] = share_count_by_order.get(order_id, 0) + 1
+        message_ids_by_order.setdefault(order_id, []).append(message_id)
+
+    return (
+        difficulty_by_order,
+        share_count_by_order,
+        message_ids_by_order,
+        invalid_ack_ids,
+    )
+
+
+async def _process_order_debits(
+    difficulty_by_order: dict[str, Decimal],
+    share_count_by_order: dict[str, int],
+    message_ids_by_order: dict[str, list[str]],
+    marketplace_db: MarketplaceDB,
+    redis_publisher: RedisPublisher,
+) -> list[str]:
+    """
+    Apply share credits to orders and fulfill if balance depleted.
+
+    Returns: message IDs to acknowledge
+    """
+    ack_ids: list[str] = []
+
+    for order_id, total_difficulty in difficulty_by_order.items():
+        message_ids = message_ids_by_order.get(order_id, [])
+        try:
+            order = await get_order(marketplace_db.pool, order_id)
+            if not order:
+                logger.warning(f"Order {order_id} not found")
+                ack_ids.extend(message_ids)
+                continue
+
+            if order.status == "cancelled":
+                ack_ids.extend(message_ids)
+                continue
+
+            price = order.price_btc_eh_day
+            if not price:
+                ack_ids.extend(message_ids)
+                continue
+
+            cost_btc = price * total_difficulty * DIFF_TO_BTC_FACTOR
+            updated = await apply_share_credit(
+                marketplace_db.pool,
+                order_id,
+                share_count_by_order.get(order_id, 0),
+                cost_btc,
+            )
+            if not updated:
+                latest = await get_order(marketplace_db.pool, order_id)
+                if not latest or latest.status == "cancelled":
+                    ack_ids.extend(message_ids)
+                continue
+
+            if updated["balance_btc"] <= 0 and updated["status"] != "fulfilled":
+                await _fulfill_order(marketplace_db, redis_publisher, order_id)
+
+            ack_ids.extend(message_ids)
+        except Exception as e:
+            logger.error(f"Order share processing failed for {order_id}: {e}")
+
+    return ack_ids
+
+
 async def order_share_processing_loop(
     marketplace_db: MarketplaceDB,
     redis_client: RedisClient,
@@ -83,98 +186,52 @@ async def order_share_processing_loop(
     )
 
     try:
-
-        async def process_messages(messages: list[tuple[str, dict]]) -> None:
-            """Validate, aggregate, debit, and ack a batch of stream messages."""
-            if not messages:
-                return
-
-            totals: dict[str, Decimal] = {}
-            counts: dict[str, int] = {}
-            order_message_ids: dict[str, list[str]] = {}
-            ack_ids: list[str] = []
-
-            for message_id, data in messages:
-                # Filter out invalid or reserved order labels and bad difficulty.
-                order_id = data.get("order_id")
-                if not order_id or order_id in RESERVED_LABELS:
-                    ack_ids.append(message_id)
-                    continue
-
-                difficulty_raw = data.get("difficulty")
-                try:
-                    difficulty = Decimal(str(difficulty_raw))
-                except (InvalidOperation, TypeError):
-                    ack_ids.append(message_id)
-                    continue
-
-                if difficulty <= 0:
-                    ack_ids.append(message_id)
-                    continue
-
-                totals[order_id] = totals.get(order_id, Decimal("0")) + difficulty
-                counts[order_id] = counts.get(order_id, 0) + 1
-                order_message_ids.setdefault(order_id, []).append(message_id)
-
-            for order_id, diff_sum in totals.items():
-                # Fetch order, apply debit, and fulfill if balance is depleted.
-                message_ids = order_message_ids.get(order_id, [])
-                try:
-                    order = await get_order(marketplace_db.pool, order_id)
-                    if not order:
-                        logger.warning(f"Order {order_id} not found")
-                        ack_ids.extend(message_ids)
-                        continue
-
-                    if order.status == "cancelled":
-                        ack_ids.extend(message_ids)
-                        continue
-
-                    price = order.price_btc_eh_day
-                    if not price:
-                        ack_ids.extend(message_ids)
-                        continue
-
-                    cost_btc = price * diff_sum * DIFF_TO_BTC_FACTOR
-                    updated = await apply_share_credit(
-                        marketplace_db.pool,
-                        order_id,
-                        counts.get(order_id, 0),
-                        cost_btc,
-                    )
-                    if not updated:
-                        # If the order was cancelled mid-flight, ack and drop.
-                        latest = await get_order(marketplace_db.pool, order_id)
-                        if not latest or latest.status == "cancelled":
-                            ack_ids.extend(message_ids)
-                        continue
-
-                    if updated["balance_btc"] <= 0 and updated["status"] != "fulfilled":
-                        await _fulfill_order(marketplace_db, redis_publisher, order_id)
-
-                    ack_ids.extend(message_ids)
-                except Exception as e:
-                    logger.error(f"Order share processing failed for {order_id}: {e}")
-
-            if ack_ids:
-                await redis_client.ack_order_shares(ack_ids)
-
         while True:
-            # Drain pending entries first; if none, block for new ones.
             pending = await redis_client.read_order_share_batch(
                 ORDER_BILLING_BATCH_SIZE,
                 1,
                 read_id="0",
             )
             if pending:
-                await process_messages(pending)
+                (
+                    difficulty_by_order,
+                    share_count_by_order,
+                    message_ids_by_order,
+                    ack_ids,
+                ) = _validate_and_aggregate_messages(pending)
+                order_ack_ids = await _process_order_debits(
+                    difficulty_by_order,
+                    share_count_by_order,
+                    message_ids_by_order,
+                    marketplace_db,
+                    redis_publisher,
+                )
+                ack_ids.extend(order_ack_ids)
+                if ack_ids:
+                    await redis_client.ack_order_shares(ack_ids)
                 continue
 
             messages = await redis_client.read_order_share_batch(
                 ORDER_BILLING_BATCH_SIZE,
                 block_ms,
             )
-            await process_messages(messages)
+            if messages:
+                (
+                    difficulty_by_order,
+                    share_count_by_order,
+                    message_ids_by_order,
+                    ack_ids,
+                ) = _validate_and_aggregate_messages(messages)
+                order_ack_ids = await _process_order_debits(
+                    difficulty_by_order,
+                    share_count_by_order,
+                    message_ids_by_order,
+                    marketplace_db,
+                    redis_publisher,
+                )
+                ack_ids.extend(order_ack_ids)
+                if ack_ids:
+                    await redis_client.ack_order_shares(ack_ids)
 
     except asyncio.CancelledError:
         logger.info("Order share worker stopped")
