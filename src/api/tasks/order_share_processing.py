@@ -126,11 +126,11 @@ async def order_share_processing_loop(
                         ack_ids.extend(message_ids)
                         continue
 
-                    if order["status"] == "cancelled":
+                    if order.status == "cancelled":
                         ack_ids.extend(message_ids)
                         continue
 
-                    price = order["price_btc_eh_day"]
+                    price = order.price_btc_eh_day
                     if not price:
                         ack_ids.extend(message_ids)
                         continue
@@ -145,7 +145,7 @@ async def order_share_processing_loop(
                     if not updated:
                         # If the order was cancelled mid-flight, ack and drop.
                         latest = await get_order(marketplace_db.pool, order_id)
-                        if not latest or latest["status"] == "cancelled":
+                        if not latest or latest.status == "cancelled":
                             ack_ids.extend(message_ids)
                         continue
 

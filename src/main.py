@@ -78,13 +78,13 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
             await delete_assignment(state.marketplace_db.pool, registry_key)
             return
 
-        if order["status"] != "active":
+        if order.status != "active":
             logger.info(
-                f"⏰ Order {order_id} for miner {registry_key} is not active (status: {order['status']})"
+                f"⏰ Order {order_id} for miner {registry_key} is not active (status: {order.status})"
             )
             return
 
-        if order["balance_btc"] <= 0:
+        if order.balance_btc <= 0:
             logger.info(
                 f"⏰ Order {order_id} for miner {registry_key} has no remaining balance"
             )
@@ -95,10 +95,10 @@ async def on_miner_authorized(session: MinerSession, state: AppState) -> None:
         )
 
         pool_config = PoolConfig(
-            host=order["host"],
-            port=order["port"],
-            user=order["user"],
-            password=order["password"],
+            host=order.host,
+            port=order.port,
+            user=order.user,
+            password=order.password,
             label=order_id,
         )
         task = await session.request_pool_switch(pool_config)
