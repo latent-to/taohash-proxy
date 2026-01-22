@@ -56,6 +56,7 @@ class AllocatorConfig:
 
     # A small deadband to avoid micro-churn (in EH/s). If the delta is below
     # this value, the allocator will not try to correct it.
+    # TODO: Make the threshold dynamic based on the required hashrate
     rebalance_threshold_eh_s: float = 0.0
 
     # Labels considered "default" (non-market) destinations.
@@ -103,6 +104,114 @@ class OrderSnapshot:
     limit_eh_s: Optional[Decimal]
     queue_position_time: datetime
     status: str
+
+
+@dataclass
+class MarketplaceOrder:
+    """
+    Used as the primary typed representation of orders throughout.
+    Can be converted to OrderSnapshot for allocator use or to dict for API responses.
+    """
+
+    order_id: str
+    host: str
+    port: int
+    user: str
+    password: str
+    price_btc_eh_day: Decimal
+    amount_btc: Decimal
+    balance_btc: Decimal
+    limit_eh_s: Optional[Decimal]
+    status: str
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
+    queue_position_time: Optional[datetime]
+    fulfilled_at: Optional[datetime]
+    paused_at: Optional[datetime]
+    cancelled_at: Optional[datetime]
+    last_rebalance_at: Optional[datetime]
+    total_shares_credited: int
+    total_share_value_credited: Decimal
+    last_share_credited_at: Optional[datetime]
+
+    @classmethod
+    def from_db_row(cls, row) -> "MarketplaceOrder":
+        """Create from database row."""
+        return cls(
+            order_id=row["order_id"],
+            host=row["host"],
+            port=int(row["port"]),
+            user=row["username"],
+            password=row["password"],
+            price_btc_eh_day=row["price_btc_eh_day"],
+            amount_btc=row["amount_btc"],
+            balance_btc=row["balance_btc"],
+            limit_eh_s=row["limit_eh_s"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            queue_position_time=row["queue_position_time"],
+            fulfilled_at=row["fulfilled_at"],
+            paused_at=row["paused_at"],
+            cancelled_at=row["cancelled_at"],
+            last_rebalance_at=row["last_rebalance_at"],
+            total_shares_credited=row["total_shares_credited"] or 0,
+            total_share_value_credited=row["total_share_value_credited"] or Decimal(0),
+            last_share_credited_at=row["last_share_credited_at"],
+        )
+
+    def to_snapshot(self) -> OrderSnapshot:
+        """Convert to allocator snapshot."""
+        return OrderSnapshot(
+            order_id=self.order_id,
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            price_btc_eh_day=self.price_btc_eh_day,
+            balance_btc=self.balance_btc,
+            limit_eh_s=self.limit_eh_s,
+            queue_position_time=self.queue_position_time,
+            status=self.status,
+        )
+
+    def to_api_dict(self) -> dict:
+        """Convert to API response format (Decimals as strings, ISO dates)."""
+        return {
+            "order_id": self.order_id,
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "status": self.status,
+            "price_btc_eh_day": str(self.price_btc_eh_day),
+            "amount_btc": str(self.amount_btc),
+            "balance_btc": str(self.balance_btc),
+            "limit_eh_s": str(self.limit_eh_s) if self.limit_eh_s else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "queue_position_time": (
+                self.queue_position_time.isoformat()
+                if self.queue_position_time
+                else None
+            ),
+            "fulfilled_at": (
+                self.fulfilled_at.isoformat() if self.fulfilled_at else None
+            ),
+            "paused_at": self.paused_at.isoformat() if self.paused_at else None,
+            "cancelled_at": (
+                self.cancelled_at.isoformat() if self.cancelled_at else None
+            ),
+            "last_rebalance_at": (
+                self.last_rebalance_at.isoformat() if self.last_rebalance_at else None
+            ),
+            "total_shares_credited": self.total_shares_credited,
+            "total_share_value_credited": str(self.total_share_value_credited),
+            "last_share_credited_at": (
+                self.last_share_credited_at.isoformat()
+                if self.last_share_credited_at
+                else None
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -191,6 +300,6 @@ class TickDiagnostics:
     eligible_order_count: int
     hard_drain_order_count: int
     planned_switches: int
-    alpha: float
+    damping_factor: float
     orders: list[OrderDiagnostics] = field(default_factory=list)
     events: list[DecisionEvent] = field(default_factory=list)
