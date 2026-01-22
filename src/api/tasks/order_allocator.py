@@ -64,25 +64,11 @@ async def _run_once(
     now = datetime.now(timezone.utc)
 
     # 1) Snapshot orders
-    # TODO: Add data structures for get_orders and use them internally and for api calls
-    order_rows = await get_orders(marketplace_db.pool, status="active")
+    marketplace_orders = await get_orders(marketplace_db.pool, status="active")
     orders: list[OrderSnapshot] = []
-    for row in order_rows:
+    for order in marketplace_orders:
         try:
-            orders.append(
-                OrderSnapshot(
-                    order_id=row["order_id"],
-                    host=row["host"],
-                    port=int(row["port"]),
-                    user=row["user"],
-                    password=row["password"],
-                    price_btc_eh_day=row["price_btc_eh_day"],
-                    balance_btc=row["balance_btc"],
-                    limit_eh_s=row.get("limit_eh_s"),
-                    queue_position_time=row["queue_position_time"],
-                    status=row["status"],
-                )
-            )
+            orders.append(order.to_snapshot())
         except Exception:
             continue
 
