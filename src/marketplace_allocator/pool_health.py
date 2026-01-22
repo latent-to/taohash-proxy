@@ -78,18 +78,18 @@ def _clamp01(x: float) -> float:
     return max(0.0, min(1.0, float(x)))
 
 
-def _ema_update(prev_ema: float, alpha: float, sample: float) -> float:
+def _ema_update(prev_ema: float, damping_factor: float, sample: float) -> float:
     """Update exponential moving average (EMA) with a new sample.
 
     Computes the next EMA value using the formula:
-    EMA_new = (1 - alpha) * EMA_prev + alpha * sample
+    EMA_new = (1 - damping_factor) * EMA_prev + damping_factor * sample
 
     Used to smooth reject rates and job gaps over time, preventing false
     positives from temporary spikes.
 
     Args:
         prev_ema: Previous EMA value (0.0 if first sample)
-        alpha: Smoothing factor (0-1), higher = more responsive to changes
+        damping_factor: Smoothing factor (0-1), higher = more responsive to changes
         sample: New sample value
 
     Returns:
@@ -97,7 +97,7 @@ def _ema_update(prev_ema: float, alpha: float, sample: float) -> float:
     """
     if prev_ema <= 0:
         return float(sample)
-    return (1.0 - float(alpha)) * float(prev_ema) + float(alpha) * float(sample)
+    return (1.0 - float(damping_factor)) * float(prev_ema) + float(damping_factor) * float(sample)
 
 
 def _compute_backoff_seconds(
@@ -522,7 +522,7 @@ def evaluate_pool_health(
         )
 
     now_ts = _utc_now_ts(now)
-    alpha = _clamp01(float(config.pool_health_ema_alpha))
+    damping_factor = _clamp01(float(config.pool_health_ema_alpha))
     default_labels = set(config.default_labels)
 
     # ------------------------------------------------------------------
@@ -581,7 +581,7 @@ def evaluate_pool_health(
         # ---- Job-gap EMA (always updated when we have notify ages) ----
         if tick.min_last_notify_age_s is not None:
             record.ema_job_gap_s = _ema_update(
-                record.ema_job_gap_s, alpha, float(tick.min_last_notify_age_s)
+                record.ema_job_gap_s, damping_factor, float(tick.min_last_notify_age_s)
             )
 
         # ---- Hard unhealthy signal: no jobs for too long ----
@@ -624,10 +624,10 @@ def evaluate_pool_health(
             )
 
             record.ema_reject_rate = _ema_update(
-                record.ema_reject_rate, alpha, reject_rate
+                record.ema_reject_rate, damping_factor, reject_rate
             )
             record.ema_other_reject_rate = _ema_update(
-                record.ema_other_reject_rate, alpha, other_rate
+                record.ema_other_reject_rate, damping_factor, other_rate
             )
 
             # If unknown/other rejects are consistently high, treat as unhealthy.

@@ -16,7 +16,7 @@ from src.api.services.market_assignment_queries import (
     delete_assignment,
 )
 from src.api.services.market_order_queries import update_order_status
-from src.marketplace_allocator.runtime_state import AllocatorRuntimeState
+from src.marketplace_allocator.runtime_state import RuntimeStateStore
 from src.marketplace_allocator.types import AllocationPlan, AllocationSnapshot
 from src.storage.marketplace_db import MarketplaceDB
 from src.utils.logger import get_logger
@@ -38,7 +38,7 @@ class PlanExecutor:
         self,
         marketplace_db: MarketplaceDB,
         redis_publisher: RedisPublisher,
-        runtime_state: AllocatorRuntimeState,
+        runtime_state: RuntimeStateStore,
     ) -> None:
         self._db = marketplace_db
         self._publisher = redis_publisher
