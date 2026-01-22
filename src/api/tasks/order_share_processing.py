@@ -39,9 +39,9 @@ async def _fulfill_order(
     assignments = await get_order_assignments(marketplace_db.pool, order_id)
 
     for assignment in assignments:
-        worker_ip = assignment["worker_ip"]
-        await redis_publisher.publish_switch_default(worker_ip)
-        await delete_assignment(marketplace_db.pool, worker_ip)
+        miner_id = assignment["miner_id"]
+        await redis_publisher.publish_switch_default(miner_id)
+        await delete_assignment(marketplace_db.pool, miner_id)
 
     await update_order_status(marketplace_db.pool, order_id, "fulfilled")
     logger.info(

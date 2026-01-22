@@ -73,9 +73,9 @@ async def _run_once(
 
     miners_stats = await redis_client.get_all_miners_with_stats()
     active_miners: list[MinerSnapshot] = []
-    for worker_ip, stats in miners_stats.items():
+    for miner_id, stats in miners_stats.items():
         try:
-            active_miners.append(MinerSnapshot.from_redis_stats(worker_ip, stats))
+            active_miners.append(MinerSnapshot.from_redis_stats(miner_id, stats))
         except Exception as e:
             logger.error(f"Failed to parse miner snapshot: {e}")
             continue
@@ -100,7 +100,7 @@ async def _run_once(
     )
 
     # 4) Load runtime state (cooldowns, last_tick, pool health state)
-    worker_ips = [m.worker_ip for m in active_miners]
+    miner_ids = [m.miner_id for m in active_miners]
     order_ids: set[str] = {o.order_id for o in active_orders}
     # Include any currently mined non-default labels so backoff/warmup state is stable
     for miner in active_miners:
@@ -108,7 +108,7 @@ async def _run_once(
             order_ids.add(str(miner.pool_label))
 
     runtime_view = await runtime_state.load_view(
-        worker_ips, order_ids=sorted(order_ids)
+        miner_ids, order_ids=sorted(order_ids)
     )
 
     # 4b) Evaluate pool health and persist it (best effort).

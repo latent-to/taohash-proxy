@@ -506,20 +506,20 @@ class MinerPicker:
         self.now = now
         self.soft_donor_order_ids = soft_donor_order_ids
 
-    def _in_cooldown(self, worker_ip: str) -> bool:
+    def _in_cooldown(self, miner_id: str) -> bool:
         """Check if a miner is in cooldown period.
 
         Miners that were recently moved should not be moved again immediately to
         prevent thrashing. Cooldown period is configured in AllocatorConfig.
 
         Args:
-            worker_ip: Miner worker IP to check
+            miner_id: Miner worker IP to check
 
         Returns:
             True if miner was moved within the cooldown period, False otherwise
         """
         return self.ctx.runtime.miner_in_cooldown(
-            worker_ip, self.now, self.ctx.config.miner_cooldown_seconds
+            miner_id, self.now, self.ctx.config.miner_cooldown_seconds
         )
 
     def pick_idle(self, max_hashrate: float) -> Optional[tuple[MinerSnapshot, None]]:
@@ -537,9 +537,9 @@ class MinerPicker:
             since idle miners aren't assigned to any order.
         """
         for idx, miner in enumerate(self.donors.idle):
-            if miner.worker_ip in self.moved_ips:
+            if miner.miner_id in self.moved_ips:
                 continue
-            if self._in_cooldown(miner.worker_ip):
+            if self._in_cooldown(miner.miner_id):
                 continue
             if not _fits(miner, max_hashrate):
                 continue
@@ -564,9 +564,9 @@ class MinerPicker:
             Tuple of (miner, source_order_id) if found, None otherwise
         """
         for idx, miner in enumerate(self.donors.forced):
-            if miner.worker_ip in self.moved_ips:
+            if miner.miner_id in self.moved_ips:
                 continue
-            if (not allow_cooldown) and self._in_cooldown(miner.worker_ip):
+            if (not allow_cooldown) and self._in_cooldown(miner.miner_id):
                 continue
             if not _fits(miner, max_hashrate):
                 continue
@@ -597,9 +597,9 @@ class MinerPicker:
             if not pool:
                 continue
             for idx, miner in enumerate(pool):
-                if miner.worker_ip in self.moved_ips:
+                if miner.miner_id in self.moved_ips:
                     continue
-                if (not allow_cooldown) and self._in_cooldown(miner.worker_ip):
+                if (not allow_cooldown) and self._in_cooldown(miner.miner_id):
                     continue
                 if not _fits(miner, max_hashrate):
                     continue
@@ -647,10 +647,10 @@ class MoveRecorder:
             dest_order_id: Order miner is moving to (None if moving to idle/default)
             reason: Reason for the move (HARD_DRAIN or MARKET_REBALANCE)
         """
-        self.moved_ips.add(miner.worker_ip)
+        self.moved_ips.add(miner.miner_id)
         self.moves.append(
             PlanMove(
-                worker_ip=miner.worker_ip,
+                miner_id=miner.miner_id,
                 from_label=miner.pool_label,
                 to_order_id=dest_order_id,
                 reason=reason,
@@ -816,10 +816,10 @@ def _shed_excess(
         while pool and shed > deadband and len(recorder.moves) < max_switches:
             miner = pool.pop(0)
 
-            if miner.worker_ip in moved_ips:
+            if miner.miner_id in moved_ips:
                 continue
             if ctx.runtime.miner_in_cooldown(
-                miner.worker_ip, now, ctx.config.miner_cooldown_seconds
+                miner.miner_id, now, ctx.config.miner_cooldown_seconds
             ):
                 continue
 
