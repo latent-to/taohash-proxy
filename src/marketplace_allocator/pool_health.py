@@ -64,16 +64,15 @@ def _utc_now_ts(now: datetime) -> float:
 
 
 def _clamp01(x: float) -> float:
-    """Convert datetime to Unix timestamp (UTC).
+    """Clamp a float value to the range [0, 1].
 
-    Ensures the datetime has UTC timezone before converting. Used for storing
-    timestamps in health records (warmup_until_ts, backoff_until_ts).
+    Used to ensure EMA damping factors and rate values stay within valid bounds.
 
     Args:
-        now: Datetime to convert (assumed UTC if no timezone)
+        x: Float value to clamp
 
     Returns:
-        Unix timestamp in seconds (float)
+        Value clamped to [0.0, 1.0]
     """
     return max(0.0, min(1.0, float(x)))
 
@@ -117,10 +116,10 @@ def _compute_backoff_seconds(
         Backoff duration in seconds. Capped at config.pool_health_backoff_max_seconds.
         Formula: min(max_seconds, base_seconds * 2^backoff_level)
     """
-    base = int(config.pool_health_backoff_base_seconds)
-    max_b = int(config.pool_health_backoff_max_seconds)
+    base_backoff_seconds = int(config.pool_health_backoff_base_seconds)
+    max_backoff_seconds = int(config.pool_health_backoff_max_seconds)
     level = max(0, int(record.backoff_level))
-    return int(min(max_b, base * (2**level)))
+    return int(min(max_backoff_seconds, base_backoff_seconds * (2**level)))
 
 
 @dataclass
@@ -452,7 +451,7 @@ def _apply_backoff(
     *,
     record: PoolHealthRecord,
     now_ts: float,
-    backoff_s: int,
+    backoff_seconds: int,
     reason: str,
 ) -> None:
     """Place an order in BACKOFF state due to pool health issues.
@@ -464,7 +463,7 @@ def _apply_backoff(
     Args:
         record: Health record to update (modified in place)
         now_ts: Current Unix timestamp
-        backoff_s: Backoff duration in seconds (computed via _compute_backoff_seconds)
+        backoff_seconds: Backoff duration in seconds (computed via _compute_backoff_seconds)
         reason: Human-readable reason for the backoff
 
     Note:
@@ -474,7 +473,7 @@ def _apply_backoff(
     level = max(0, int(record.backoff_level))
     record.status = PoolHealthState.BACKOFF
     record.reason = str(reason)
-    record.backoff_until_ts = now_ts + float(backoff_s)
+    record.backoff_until_ts = now_ts + float(backoff_seconds)
     record.backoff_level = min(level + 1, 10)
 
 
@@ -612,11 +611,11 @@ def evaluate_pool_health(
         if tick.min_last_notify_age_s is not None and float(
             tick.min_last_notify_age_s
         ) >= float(config.pool_health_no_notify_seconds):
-            backoff_s = _compute_backoff_seconds(record, config)
+            backoff_seconds = _compute_backoff_seconds(record, config)
             _apply_backoff(
                 record=record,
                 now_ts=now_ts,
-                backoff_s=backoff_s,
+                backoff_seconds=backoff_seconds,
                 reason=f"no_jobs_for_{int(tick.min_last_notify_age_s)}s",
             )
             record.warmup_until_ts = 0.0
@@ -632,7 +631,7 @@ def evaluate_pool_health(
                 message="Pool appears to be not sending jobs; placing order in backoff",
                 data={
                     "min_last_notify_age_s": tick.min_last_notify_age_s,
-                    "backoff_seconds": backoff_s,
+                    "backoff_seconds": backoff_seconds,
                     "backoff_level": record.backoff_level,
                 },
             )
@@ -658,11 +657,11 @@ def evaluate_pool_health(
             if record.ema_other_reject_rate >= float(
                 config.pool_health_other_reject_threshold
             ):
-                backoff_s = _compute_backoff_seconds(record, config)
+                backoff_seconds = _compute_backoff_seconds(record, config)
                 _apply_backoff(
                     record=record,
                     now_ts=now_ts,
-                    backoff_s=backoff_s,
+                    backoff_seconds=backoff_seconds,
                     reason="high_unknown_rejects",
                 )
 
@@ -678,7 +677,7 @@ def evaluate_pool_health(
                         "delta_other_rejected": tick.delta_other_rejected,
                         "ema_other_reject_rate": record.ema_other_reject_rate,
                         "threshold": config.pool_health_other_reject_threshold,
-                        "backoff_seconds": backoff_s,
+                        "backoff_seconds": backoff_seconds,
                         "backoff_level": record.backoff_level,
                     },
                 )
