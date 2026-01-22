@@ -69,8 +69,8 @@ class RuntimeStateSnapshot:
     miner_counters: dict[str, "MinerPoolShareStats"]
     order_health: dict[str, "PoolHealthRecord"]
 
-    def miner_in_cooldown(self, worker_ip: str, now: datetime, cooldown_s: int) -> bool:
-        last = self.miner_last_move_at.get(worker_ip)
+    def miner_in_cooldown(self, miner_id: str, now: datetime, cooldown_s: int) -> bool:
+        last = self.miner_last_move_at.get(miner_id)
         if not last:
             return False
         elapsed = (now - last).total_seconds()
@@ -111,7 +111,7 @@ class RuntimeStateStore:
 
     async def load_view(
         self,
-        worker_ips: list[str],
+        miner_ids: list[str],
         order_ids: Optional[list[str]] = None,
     ) -> RuntimeStateSnapshot:
         """Load runtime state from Redis for the current allocator tick.
@@ -121,7 +121,7 @@ class RuntimeStateStore:
         to PlanningInput for use by the rules pipeline and planner.
 
         Args:
-            worker_ips: List of miner worker IPs to load cooldown timestamps and
+            miner_ids: List of miner worker IPs to load cooldown timestamps and
                     counters for. Typically all currently connected miners.
             order_ids: Optional list of order IDs to load health status for.
                     If None, only loads state for miners. Typically includes
@@ -142,8 +142,8 @@ class RuntimeStateStore:
 
         try:
             last_tick_ts = await self._load_last_tick_ts()
-            miner_last_move_at = await self._load_miner_last_move_at(worker_ips)
-            miner_counters = await self._load_miner_share_stats(worker_ips)
+            miner_last_move_at = await self._load_miner_last_move_at(miner_ids)
+            miner_counters = await self._load_miner_share_stats(miner_ids)
             order_health = await self._load_order_health(order_ids)
 
             return RuntimeStateSnapshot(
@@ -178,41 +178,41 @@ class RuntimeStateStore:
         return _from_unix_seconds(float(last_tick_raw)) if last_tick_raw else None
 
     async def _load_miner_last_move_at(
-        self, worker_ips: list[str]
+        self, miner_ids: list[str]
     ) -> dict[str, datetime]:
         """Load miner cooldown timestamps from Redis.
 
-        Retrieves the last move timestamp for each worker_ip from Redis keys
-        (market:allocator:state:miner_last_move:{worker_ip}). Used to enforce
+        Retrieves the last move timestamp for each miner_id from Redis keys
+        (market:allocator:state:miner_last_move:{miner_id}). Used to enforce
         cooldown periods and prevent thrashing by moving the same miner too
         frequently.
 
         Args:
-            worker_ips: List of miner worker IPs to load timestamps for
+            miner_ids: List of miner worker IPs to load timestamps for
 
         Returns:
-            Dictionary mapping worker_ip -> last move datetime. Only includes
+            Dictionary mapping miner_id -> last move datetime. Only includes
             entries that were successfully loaded (skips missing/invalid data).
         """
         miner_last_move_at: dict[str, datetime] = {}
-        if not worker_ips:
+        if not miner_ids:
             return miner_last_move_at
 
-        keys = [self._miner_last_move_key(w) for w in worker_ips]
+        keys = [self._miner_last_move_key(w) for w in miner_ids]
         raw_values = await self._redis.mget(keys)
 
-        for worker_ip, raw in zip(worker_ips, raw_values):
+        for miner_id, raw in zip(miner_ids, raw_values):
             if raw is None:
                 continue
             try:
-                miner_last_move_at[worker_ip] = _from_unix_seconds(float(raw))
+                miner_last_move_at[miner_id] = _from_unix_seconds(float(raw))
             except (TypeError, ValueError):
                 continue
 
         return miner_last_move_at
 
     async def _load_miner_share_stats(
-        self, worker_ips: list[str]
+        self, miner_ids: list[str]
     ) -> dict[str, MinerPoolShareStats]:
         """Load cumulative miner share statistics from Redis.
 
@@ -221,22 +221,22 @@ class RuntimeStateStore:
         health evaluation to compute deltas between ticks and detect pool issues.
 
         Args:
-            worker_ips: List of miner worker IPs to load counters for
+            miner_ids: List of miner worker IPs to load counters for
 
         Returns:
-            Dictionary mapping worker_ip -> MinerPoolShareStats.
+            Dictionary mapping miner_id -> MinerPoolShareStats.
         """
         miner_counters: dict[str, MinerPoolShareStats] = {}
-        if not worker_ips:
+        if not miner_ids:
             return miner_counters
 
-        raw_values = await self._redis.hmget(_HASH_MINER_COUNTERS, worker_ips)
-        for worker_ip, raw in zip(worker_ips, raw_values):
+        raw_values = await self._redis.hmget(_HASH_MINER_COUNTERS, miner_ids)
+        for miner_id, raw in zip(miner_ids, raw_values):
             if not raw:
                 continue
             try:
                 payload = json.loads(raw)
-                miner_counters[worker_ip] = MinerPoolShareStats.from_dict(payload)
+                miner_counters[miner_id] = MinerPoolShareStats.from_dict(payload)
             except Exception:
                 continue
 
@@ -285,7 +285,7 @@ class RuntimeStateStore:
         counters that will be used to compute deltas in the next tick.
 
         Args:
-            counters: Dictionary mapping worker_ip -> MinerPoolShareStats to persist
+            counters: Dictionary mapping miner_id -> MinerPoolShareStats to persist
         """
         if not self._redis or not counters:
             return
@@ -332,7 +332,7 @@ class RuntimeStateStore:
         except Exception as e:
             logger.error(f"Failed to persist allocator last_tick_ts: {e}")
 
-    async def record_miner_moves(self, worker_ips: list[str], now: datetime) -> None:
+    async def record_miner_moves(self, miner_ids: list[str], now: datetime) -> None:
         """Persist cooldown timestamps for miners that were moved.
 
         Records the current timestamp for each moved miner in Redis with TTL.
@@ -340,18 +340,18 @@ class RuntimeStateStore:
         (prevent moving the same miner too frequently).
 
         Args:
-            worker_ips: List of miner worker IPs that were moved this tick
+            miner_ids: List of miner worker IPs that were moved this tick
             now: Timestamp to record as the move time
         """
-        if not self._redis or not worker_ips:
+        if not self._redis or not miner_ids:
             return
 
         timestamp = str(_to_unix_seconds(now))
         ttl = self._miner_last_move_ttl_seconds
         try:
             pipe = self._redis.pipeline()
-            for worker_ip in worker_ips:
-                pipe.set(self._miner_last_move_key(worker_ip), timestamp, ex=ttl)
+            for miner_id in miner_ids:
+                pipe.set(self._miner_last_move_key(miner_id), timestamp, ex=ttl)
             await pipe.execute()
         except Exception as e:
             logger.error(f"Failed to persist miner cooldown timestamps: {e}")
@@ -378,5 +378,5 @@ class RuntimeStateStore:
         ttl = int(_MINER_LAST_MOVE_TTL_SECONDS_DEFAULT)
         return max(60, ttl, cooldown_env * 2)
 
-    def _miner_last_move_key(self, worker_ip: str) -> str:
-        return f"{_KEY_MINER_LAST_MOVE_PREFIX}{worker_ip}"
+    def _miner_last_move_key(self, miner_id: str) -> str:
+        return f"{_KEY_MINER_LAST_MOVE_PREFIX}{miner_id}"

@@ -63,10 +63,10 @@ class PlanExecutor:
             try:
                 if move.to_order_id is None:
                     # No active assignment
-                    await delete_assignment(self._db.pool, move.worker_ip)
+                    await delete_assignment(self._db.pool, move.miner_id)
                     # Switch back to miner's main pool
-                    await self._publisher.publish_switch_default(move.worker_ip)
-                    moved_ips.append(move.worker_ip)
+                    await self._publisher.publish_switch_default(move.miner_id)
+                    moved_ips.append(move.miner_id)
                     result.moved += 1
                     continue
 
@@ -76,22 +76,22 @@ class PlanExecutor:
                     logger.warning(
                         "Allocator planned move to unknown order_id=%s for miner %s",
                         move.to_order_id,
-                        move.worker_ip,
+                        move.miner_id,
                     )
                     result.failed += 1
                     continue
 
                 # Ensure assignment points to this order
-                await delete_assignment(self._db.pool, move.worker_ip)
+                await delete_assignment(self._db.pool, move.miner_id)
                 created = await create_assignment(
-                    self._db.pool, move.worker_ip, order.order_id
+                    self._db.pool, move.miner_id, order.order_id
                 )
                 if created is None:
                     # Best effort fallback: keep miner on default to avoid ghost mining
                     logger.warning(
-                        f"Allocator failed to create assignment for miner {move.worker_ip} -> order {order.order_id}",
+                        f"Allocator failed to create assignment for miner {move.miner_id} -> order {order.order_id}",
                     )
-                    await self._publisher.publish_switch_default(move.worker_ip)
+                    await self._publisher.publish_switch_default(move.miner_id)
                     result.failed += 1
                     continue
 
@@ -102,13 +102,13 @@ class PlanExecutor:
                     "pass": order.password,
                     "label": order.order_id,
                 }
-                await self._publisher.publish_switch_pool(move.worker_ip, pool_config)
-                moved_ips.append(move.worker_ip)
+                await self._publisher.publish_switch_pool(move.miner_id, pool_config)
+                moved_ips.append(move.miner_id)
                 result.moved += 1
 
             except Exception as e:
                 logger.error(
-                    f"Allocator executor error for miner {move.worker_ip}: {e}"
+                    f"Allocator executor error for miner {move.miner_id}: {e}"
                 )
                 result.failed += 1
 

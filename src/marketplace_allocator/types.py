@@ -218,7 +218,7 @@ class MarketplaceOrder:
 class MinerSnapshot:
     """Miner state as seen by the API from Redis heartbeats."""
 
-    worker_ip: str
+    miner_id: str
     hashrate_eh_s: float
     pool_label: str
 
@@ -236,12 +236,12 @@ class MinerSnapshot:
     worker_name: str = ""
 
     @classmethod
-    def from_redis_stats(cls, worker_ip: str, stats: dict) -> "MinerSnapshot":
+    def from_redis_stats(cls, miner_id: str, stats: dict) -> "MinerSnapshot":
         """Create from Redis aggregated stats dict."""
         hashrate_gh = float(stats.get("hashrate_gh") or 0.0)
         rejected_breakdown = stats.get("rejected_breakdown") or {}
         return cls(
-            worker_ip=worker_ip,
+            miner_id=miner_id,
             hashrate_eh_s=gh_to_eh(hashrate_gh),
             pool_label=str(stats.get("pool_label") or "unknown"),
             accepted=int(stats.get("accepted") or 0),
@@ -273,7 +273,7 @@ class AllocationSnapshot:
 class PlanMove:
     """A single miner routing decision."""
 
-    worker_ip: str
+    miner_id: str  # Format: "worker_name:ip_address"
     from_label: str
     to_order_id: Optional[str]  # None means switch to default
     reason: MoveReason
