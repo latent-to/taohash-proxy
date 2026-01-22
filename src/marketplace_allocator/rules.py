@@ -16,17 +16,17 @@ from src.marketplace_allocator.types import (
     DecisionEvent,
     OrderSnapshot,
 )
-from src.marketplace_allocator.runtime_state import RuntimeStateView
+from src.marketplace_allocator.runtime_state import RuntimeStateSnapshot
 from src.marketplace_allocator.pool_health import PoolHealthRecord, PoolHealthState
 
 
 @dataclass
-class PlanningContext:
+class PlanningInput:
     """Mutable context produced by rules and consumed by the planner."""
 
     snapshot: AllocationSnapshot
     config: AllocatorConfig
-    runtime: RuntimeStateView
+    runtime: RuntimeStateSnapshot
 
     # Timing
     tick_elapsed_seconds: float = 0.0
@@ -62,11 +62,11 @@ class PlanningContext:
 
 
 class Rule(Protocol):
-    """A small rule that mutates PlanningContext."""
+    """A small rule that mutates PlanningInput."""
 
     name: str
 
-    def apply(self, ctx: PlanningContext) -> None: ...
+    def apply(self, ctx: PlanningInput) -> None: ...
 
 
 class TickTimingRule:
@@ -84,13 +84,13 @@ class TickTimingRule:
 
     Writes:
         ctx.tick_elapsed_seconds - actual elapsed time since last tick
-        ctx.tick_elapsed_clamped_seconds - clamped elapsed (used for alpha)
+        ctx.tick_elapsed_clamped_seconds - clamped elapsed (used for damping_factor)
         ctx.events - logs ELAPSED_CLAMPED if clamping occurred
     """
 
     name = "tick_timing"
 
-    def apply(self, ctx: PlanningContext) -> None:
+    def apply(self, ctx: PlanningInput) -> None:
         now = ctx.snapshot.now
         last = ctx.runtime.last_tick_ts
 
@@ -135,7 +135,7 @@ class EligibilityRule:
 
     name = "eligibility"
 
-    def apply(self, ctx: PlanningContext) -> None:
+    def apply(self, ctx: PlanningInput) -> None:
         eligible: list[OrderSnapshot] = []
 
         floor: Decimal | None = ctx.snapshot.hashprice_btc_eh_day
@@ -189,7 +189,7 @@ class PoolHealthRule:
 
     name = "pool_health"
 
-    def apply(self, ctx: PlanningContext) -> None:
+    def apply(self, ctx: PlanningInput) -> None:
         if not ctx.config.enable_pool_health:
             return
 
@@ -255,7 +255,7 @@ class HardDrainRule:
 
     name = "hard_drain"
 
-    def apply(self, ctx: PlanningContext) -> None:
+    def apply(self, ctx: PlanningInput) -> None:
         eligible_ids = {o.order_id for o in ctx.eligible_orders}
         currently_mined: set[str] = set()
 
