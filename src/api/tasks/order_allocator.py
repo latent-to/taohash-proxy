@@ -107,9 +107,7 @@ async def _run_once(
         if miner.pool_label not in config.default_labels:
             order_ids.add(str(miner.pool_label))
 
-    runtime_view = await runtime_state.load_view(
-        miner_ids, order_ids=sorted(order_ids)
-    )
+    runtime_view = await runtime_state.load_view(miner_ids, order_ids=sorted(order_ids))
 
     # 4b) Evaluate pool health and persist it (best effort).
     try:
@@ -117,10 +115,10 @@ async def _run_once(
             now=now,
             miners=active_miners,
             prev_order_health=runtime_view.order_health,
-            prev_miner_counters=runtime_view.miner_counters,
+            prev_miner_share_stats=runtime_view.miner_share_stats,
             config=config,
         )
-        await runtime_state.persist_miner_counters(decision.miner_counters)
+        await runtime_state.persist_miner_share_stats(decision.miner_share_stats)
         await runtime_state.persist_order_health(decision.order_health)
     except Exception as e:
         logger.error(f"Pool health evaluation failed: {e}")

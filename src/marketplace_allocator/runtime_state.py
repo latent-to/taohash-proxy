@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 # Redis keys / schema
 _PREFIX = "market:allocator:state"
 _HASH_META = f"{_PREFIX}:meta"
-_HASH_MINER_COUNTERS = f"{_PREFIX}:miner_counters"
+_HASH_MINER_COUNTERS = f"{_PREFIX}:miner_share_stats"
 _HASH_ORDER_HEALTH = f"{_PREFIX}:order_health"
 
 _KEY_MINER_LAST_MOVE_PREFIX = f"{_PREFIX}:miner_last_move:"
@@ -58,7 +58,7 @@ class RuntimeStateSnapshot:
     Provides:
         - last_tick_ts: Previous tick timestamp (for computing dt/damping_factor damping)
         - miner_last_move_at: Cooldown timestamps (prevents thrashing)
-        - miner_counters: Cumulative share stats (for pool health evaluation)
+        - miner_share_stats: Cumulative share stats (for pool health evaluation)
         - order_health: Health status per order (HEALTHY/WARMUP/DEGRADED/BACKOFF)
 
     Frozen to ensure deterministic planning decisions within a single tick.
@@ -66,15 +66,15 @@ class RuntimeStateSnapshot:
 
     last_tick_ts: Optional[datetime]
     miner_last_move_at: dict[str, datetime]
-    miner_counters: dict[str, "MinerPoolShareStats"]
+    miner_share_stats: dict[str, "MinerPoolShareStats"]
     order_health: dict[str, "PoolHealthRecord"]
 
-    def miner_in_cooldown(self, miner_id: str, now: datetime, cooldown_s: int) -> bool:
+    def miner_in_cooldown(self, miner_id: str, now: datetime, cooldown_seconds: int) -> bool:
         last = self.miner_last_move_at.get(miner_id)
         if not last:
             return False
         elapsed = (now - last).total_seconds()
-        return elapsed < cooldown_s
+        return elapsed < cooldown_seconds
 
 
 # Redis-backed persistence implementation
@@ -131,7 +131,7 @@ class RuntimeStateStore:
             RuntimeStateSnapshot: Immutable snapshot containing:
                 - last_tick_ts: Previous tick timestamp (for dt/damping_factor damping)
                 - miner_last_move_at: Cooldown timestamps per miner
-                - miner_counters: Cumulative share stats per miner
+                - miner_share_stats: Cumulative share stats per miner
                 - order_health: Health status per order
 
         Note:
@@ -143,13 +143,13 @@ class RuntimeStateStore:
         try:
             last_tick_ts = await self._load_last_tick_ts()
             miner_last_move_at = await self._load_miner_last_move_at(miner_ids)
-            miner_counters = await self._load_miner_share_stats(miner_ids)
+            miner_share_stats = await self._load_miner_share_stats(miner_ids)
             order_health = await self._load_order_health(order_ids)
 
             return RuntimeStateSnapshot(
                 last_tick_ts=last_tick_ts,
                 miner_last_move_at=miner_last_move_at,
-                miner_counters=miner_counters,
+                miner_share_stats=miner_share_stats,
                 order_health=order_health,
             )
         except Exception as e:
@@ -160,7 +160,7 @@ class RuntimeStateStore:
         return RuntimeStateSnapshot(
             last_tick_ts=None,
             miner_last_move_at={},
-            miner_counters={},
+            miner_share_stats={},
             order_health={},
         )
 
@@ -198,7 +198,7 @@ class RuntimeStateStore:
         if not miner_ids:
             return miner_last_move_at
 
-        keys = [self._miner_last_move_key(w) for w in miner_ids]
+        keys = [self._miner_last_move_key(miner_id) for miner_id in miner_ids]
         raw_values = await self._redis.mget(keys)
 
         for miner_id, raw in zip(miner_ids, raw_values):
@@ -226,9 +226,9 @@ class RuntimeStateStore:
         Returns:
             Dictionary mapping miner_id -> MinerPoolShareStats.
         """
-        miner_counters: dict[str, MinerPoolShareStats] = {}
+        miner_share_stats: dict[str, MinerPoolShareStats] = {}
         if not miner_ids:
-            return miner_counters
+            return miner_share_stats
 
         raw_values = await self._redis.hmget(_HASH_MINER_COUNTERS, miner_ids)
         for miner_id, raw in zip(miner_ids, raw_values):
@@ -236,11 +236,11 @@ class RuntimeStateStore:
                 continue
             try:
                 payload = json.loads(raw)
-                miner_counters[miner_id] = MinerPoolShareStats.from_dict(payload)
+                miner_share_stats[miner_id] = MinerPoolShareStats.from_dict(payload)
             except Exception:
                 continue
 
-        return miner_counters
+        return miner_share_stats
 
     async def _load_order_health(
         self, order_ids: Optional[list[str]]
@@ -275,7 +275,7 @@ class RuntimeStateStore:
 
         return order_health
 
-    async def persist_miner_counters(
+    async def persist_miner_share_stats(
         self, counters: dict[str, MinerPoolShareStats]
     ) -> None:
         """Persist miner counter records to Redis.

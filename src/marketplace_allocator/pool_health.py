@@ -337,19 +337,19 @@ class PoolHealthDecision:
 
     Attributes:
         order_health: Updated health records per order (order_id -> PoolHealthRecord)
-        miner_counters: Updated counter records per miner (worker_ip -> MinerPoolShareStats)
+        miner_share_stats: Updated counter records per miner (miner_id -> MinerPoolShareStats)
         events: List of diagnostic events (warnings/info) for telemetry
     """
 
     order_health: dict[str, PoolHealthRecord]
-    miner_counters: dict[str, MinerPoolShareStats]
+    miner_share_stats: dict[str, MinerPoolShareStats]
     events: list[dict]
 
 
 def _aggregate_per_order_ticks(
     *,
     miners: list[MinerSnapshot],
-    prev_miner_counters: dict[str, MinerPoolShareStats],
+    prev_miner_share_stats: dict[str, MinerPoolShareStats],
     default_labels: set[str],
 ) -> tuple[dict[str, PoolHealthDelta], dict[str, MinerPoolShareStats]]:
     """Aggregate per-order share deltas from miner counters.
@@ -365,21 +365,21 @@ def _aggregate_per_order_ticks(
 
     Args:
         miners: Current miner snapshots with share counts
-        prev_miner_counters: Previous tick's counter records (from Redis)
+        prev_miner_share_stats: Previous tick's counter records (from Redis)
         default_labels: Labels that are not marketplace orders (e.g., "normal")
 
     Returns:
         Tuple of:
             - per_order: Dict mapping order_id -> PoolHealthDelta with aggregated deltas
-            - miner_counters: Dict mapping worker_ip -> MinerPoolShareStats (current counters)
+            - miner_share_stats: Dict mapping miner_id -> MinerPoolShareStats (current counters)
     """
     per_order: dict[str, PoolHealthDelta] = {}
-    miner_counters: dict[str, MinerPoolShareStats] = {}
+    miner_share_stats: dict[str, MinerPoolShareStats] = {}
 
     for miner in miners:
-        worker_ip = str(miner.worker_ip)
+        miner_id = str(miner.miner_id)
         current = MinerPoolShareStats.from_snapshot(miner)
-        miner_counters[worker_ip] = current
+        miner_share_stats[miner_id] = current
 
         label = str(miner.pool_label or "unknown")
         if label in default_labels:
@@ -388,7 +388,7 @@ def _aggregate_per_order_ticks(
         tick = per_order.setdefault(label, PoolHealthDelta())
         tick.observe_notify_age(miner.last_notify_age_s)
 
-        prev = prev_miner_counters.get(worker_ip)
+        prev = prev_miner_share_stats.get(miner_id)
         if prev is None or str(prev.pool_label) != label:
             # No history or miner moved pools => skip deltas this tick
             continue
@@ -411,7 +411,7 @@ def _aggregate_per_order_ticks(
         tick.delta_other_rejected += int(max(0, delta_other))
         tick.delta_total += int(delta_total)
 
-    return per_order, miner_counters
+    return per_order, miner_share_stats
 
 
 def _emit_event(
@@ -483,7 +483,7 @@ def evaluate_pool_health(
     now: datetime,
     miners: list[MinerSnapshot],
     prev_order_health: dict[str, PoolHealthRecord],
-    prev_miner_counters: dict[str, MinerPoolShareStats],
+    prev_miner_share_stats: dict[str, MinerPoolShareStats],
     config: AllocatorConfig,
 ) -> PoolHealthDecision:
     """Evaluate upstream pool health and update health records.
@@ -504,7 +504,7 @@ def evaluate_pool_health(
         now: Current timestamp for health evaluation
         miners: Current miner snapshots with share counts and pool assignments
         prev_order_health: Previous tick's health records (from Redis)
-        prev_miner_counters: Previous tick's miner counters (from Redis)
+        prev_miner_share_stats: Previous tick's miner counters (from Redis)
         config: Allocator configuration with health thresholds and settings
 
     Returns:
@@ -512,12 +512,12 @@ def evaluate_pool_health(
         If pool health is disabled, returns previous health unchanged.
     """
     if not config.enable_pool_health:
-        miner_counters = {
-            m.worker_ip: MinerPoolShareStats.from_snapshot(m) for m in miners
+        miner_share_stats = {
+            m.miner_id: MinerPoolShareStats.from_snapshot(m) for m in miners
         }
         return PoolHealthDecision(
             order_health=dict(prev_order_health),
-            miner_counters=miner_counters,
+            miner_share_stats=miner_share_stats,
             events=[],
         )
 
@@ -528,9 +528,9 @@ def evaluate_pool_health(
     # ------------------------------------------------------------------
     # 1) Aggregate per-order ticks and build current miner counters
     # ------------------------------------------------------------------
-    per_order_tick, miner_counters = _aggregate_per_order_ticks(
+    per_order_tick, miner_share_stats = _aggregate_per_order_ticks(
         miners=miners,
-        prev_miner_counters=prev_miner_counters,
+        prev_miner_share_stats=prev_miner_share_stats,
         default_labels=default_labels,
     )
 
@@ -546,6 +546,16 @@ def evaluate_pool_health(
         record = updated.get(order_id) or PoolHealthRecord()
         tick = per_order_tick.get(order_id) or PoolHealthDelta()
 
+        # Track whether we *just* exited backoff during this tick.
+        #
+        # This matters for warmup behavior: when an order returns from BACKOFF
+        # we want a warmup window to allow the upstream pool to stabilize.
+        #
+        # IMPORTANT: we intentionally do *not* start warmup on every tick with
+        # activity; otherwise an order with continuous hashrate would repeatedly
+        # re-enter WARMUP and never be evaluated by share-based heuristics.
+        backoff_just_expired = False
+
         # ---- Backoff handling ----
         if record.status == PoolHealthState.BACKOFF and record.backoff_until_ts > 0:
             if now_ts < record.backoff_until_ts:
@@ -559,14 +569,28 @@ def evaluate_pool_health(
             record.backoff_until_ts = 0.0
             record.warmup_until_ts = 0.0
             # Keep backoff_level so repeated failures escalate.
+            backoff_just_expired = True
 
         # ---- Warmup handling ----
         has_activity = (tick.min_last_notify_age_s is not None) or (
             tick.delta_total > 0
         )
 
-        # Start warmup when we first see activity and we don't already have a warmup window.
-        if has_activity and record.warmup_until_ts <= 0:
+        # Start warmup:
+        #   - for *new* orders (first time we see the order_id), or
+        #   - when an order returns from BACKOFF.
+        #
+        # We purposely avoid starting warmup for orders that are already
+        # HEALTHY and receiving continuous hashpower, otherwise the warmup
+        # window would restart every time it expires.
+        #
+        # NOTE: we detect "new order" via the presence of order_id in
+        # prev_order_health (not via record.last_update_ts) because older
+        # persisted records may not carry last_update_ts across restarts.
+        is_new_order = order_id not in prev_order_health
+        if has_activity and record.warmup_until_ts <= 0 and (
+            is_new_order or backoff_just_expired
+        ):
             record.status = PoolHealthState.WARMUP
             record.warmup_until_ts = now_ts + float(config.pool_health_warmup_seconds)
             record.reason = "warmup"
@@ -688,6 +712,6 @@ def evaluate_pool_health(
 
     return PoolHealthDecision(
         order_health=updated,
-        miner_counters=miner_counters,
+        miner_share_stats=miner_share_stats,
         events=events,
     )
