@@ -22,7 +22,7 @@ def _diag_to_dict(diag: TickDiagnostics) -> dict:
     return {
         "tick_ts": diag.tick_ts.isoformat(),
         "dt_seconds": diag.dt_seconds,
-        "alpha": diag.alpha,
+        "damping_factor": diag.damping_factor,
         "supply_eh_s": diag.supply_eh_s,
         "miner_count": diag.miner_count,
         "eligible_order_count": diag.eligible_order_count,

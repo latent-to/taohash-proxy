@@ -2,7 +2,7 @@
 
 The allocator stores its state across ticks:
   * per-miner cooldown (don't move the same miner too frequently)
-  * last-tick timestamp (for dt/alpha computations)
+  * last-tick timestamp (for dt/damping_factor computations)
 
 Storing this in Redis keeps behavior stable across restarts.
 """
@@ -49,14 +49,14 @@ def _from_unix_seconds(value: float) -> datetime:
 
 # Runtime view used by planner/rules
 @dataclass(frozen=True)
-class RuntimeStateView:
+class RuntimeStateSnapshot:
     """Snapshot of allocator runtime state loaded from Redis.
 
-    Loaded at the start of each tick via AllocatorRuntimeState.load_view() and
-    passed to PlanningContext for use by the rules pipeline and planner.
+    Loaded at the start of each tick via RuntimeStateStore.load_view() and
+    passed to PlanningInput for use by the rules pipeline and planner.
 
     Provides:
-        - last_tick_ts: Previous tick timestamp (for computing dt/alpha damping)
+        - last_tick_ts: Previous tick timestamp (for computing dt/damping_factor damping)
         - miner_last_move_at: Cooldown timestamps (prevents thrashing)
         - miner_counters: Cumulative share stats (for pool health evaluation)
         - order_health: Health status per order (HEALTHY/WARMUP/DEGRADED/BACKOFF)
@@ -78,7 +78,7 @@ class RuntimeStateView:
 
 
 # Redis-backed persistence implementation
-class AllocatorRuntimeState:
+class RuntimeStateStore:
     """Redis-backed persistence layer for allocator runtime state.
 
     Manages state that persists across allocator ticks and service restarts,
@@ -91,7 +91,7 @@ class AllocatorRuntimeState:
     Maintains four types of state in Redis:
         - Miner cooldowns: Timestamps of last miner moves (prevents thrashing
           by enforcing cooldown periods between moves)
-        - Last tick timestamp: Previous tick time (for computing dt/alpha in
+        - Last tick timestamp: Previous tick time (for computing dt/damping_factor in
           exponential damping formula)
         - Miner counters: Cumulative share statistics per miner (accepted/rejected
           counts used for pool health evaluation)
@@ -113,12 +113,12 @@ class AllocatorRuntimeState:
         self,
         worker_ips: list[str],
         order_ids: Optional[list[str]] = None,
-    ) -> RuntimeStateView:
+    ) -> RuntimeStateSnapshot:
         """Load runtime state from Redis for the current allocator tick.
 
         Called at the start of each tick to retrieve persisted state needed for
-        planning decisions. Returns an immutable RuntimeStateView that is passed
-        to PlanningContext for use by the rules pipeline and planner.
+        planning decisions. Returns an immutable RuntimeStateSnapshot that is passed
+        to PlanningInput for use by the rules pipeline and planner.
 
         Args:
             worker_ips: List of miner worker IPs to load cooldown timestamps and
@@ -128,8 +128,8 @@ class AllocatorRuntimeState:
                     active orders plus any orders currently being mined.
 
         Returns:
-            RuntimeStateView: Immutable snapshot containing:
-                - last_tick_ts: Previous tick timestamp (for dt/alpha damping)
+            RuntimeStateSnapshot: Immutable snapshot containing:
+                - last_tick_ts: Previous tick timestamp (for dt/damping_factor damping)
                 - miner_last_move_at: Cooldown timestamps per miner
                 - miner_counters: Cumulative share stats per miner
                 - order_health: Health status per order
@@ -146,7 +146,7 @@ class AllocatorRuntimeState:
             miner_counters = await self._load_miner_share_stats(worker_ips)
             order_health = await self._load_order_health(order_ids)
 
-            return RuntimeStateView(
+            return RuntimeStateSnapshot(
                 last_tick_ts=last_tick_ts,
                 miner_last_move_at=miner_last_move_at,
                 miner_counters=miner_counters,
@@ -156,8 +156,8 @@ class AllocatorRuntimeState:
             logger.error(f"Failed to load allocator runtime state: {e}")
             return self._empty_view()
 
-    def _empty_view(self) -> RuntimeStateView:
-        return RuntimeStateView(
+    def _empty_view(self) -> RuntimeStateSnapshot:
+        return RuntimeStateSnapshot(
             last_tick_ts=None,
             miner_last_move_at={},
             miner_counters={},
@@ -318,7 +318,7 @@ class AllocatorRuntimeState:
 
         Stores the timestamp of the current allocator tick in Redis. Used in the
         next tick to compute dt (time delta) for the exponential damping formula
-        (alpha = 1 - (1 - rate)^(dt/interval)).
+        (damping_factor = 1 - (1 - rate)^(dt/interval)).
 
         Args:
             now: Current timestamp to store as last tick time
