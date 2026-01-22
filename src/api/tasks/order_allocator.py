@@ -60,8 +60,21 @@ async def _run_once(
     runtime_state: RuntimeStateStore,
     executor: PlanExecutor,
 ) -> None:
+    """Execute a single allocator tick.
+
+    Pipeline stages:
+        1. Fetch active orders from DB and miner stats from Redis
+        2. Fetch hashprice if floor enforcement is enabled
+        3. Build AllocationSnapshot from collected data
+        4. Load runtime state and evaluate pool health
+        5. Apply allocation rules to planning input
+        6. Generate allocation plan via planner
+        7. Execute plan (DB updates + proxy switch commands)
+        8. Publish telemetry diagnostics
+    """
     now = datetime.now(timezone.utc)
 
+    # 1)
     marketplace_orders = await get_orders(marketplace_db.pool, status="active")
     active_orders: list[OrderSnapshot] = []
     for order in marketplace_orders:
@@ -80,6 +93,7 @@ async def _run_once(
             logger.error(f"Failed to parse miner snapshot: {e}")
             continue
 
+    # 2)
     hashprice_btc_eh_day: Optional[Decimal] = None
     if config.enforce_hashprice_floor:
         hashprice_payload = await redis_client.get_hashprice_cache()
@@ -92,6 +106,7 @@ async def _run_once(
                 logger.error(f"Failed to parse hashprice: {e}")
                 hashprice_btc_eh_day = None
 
+    # 3)
     current_snapshot = AllocationSnapshot(
         now=now,
         orders=active_orders,
@@ -99,17 +114,17 @@ async def _run_once(
         hashprice_btc_eh_day=hashprice_btc_eh_day,
     )
 
-    # 4) Load runtime state (cooldowns, last_tick, pool health state)
-    miner_ids = [m.miner_id for m in active_miners]
-    order_ids: set[str] = {o.order_id for o in active_orders}
-    # Include any currently mined non-default labels so backoff/warmup state is stable
+    # 4)
+    miner_ids = [miner.miner_id for miner in active_miners]
+    order_ids: set[str] = {order.order_id for order in active_orders}
+
+    # Also include any currently mined labels that are not default labels
     for miner in active_miners:
         if miner.pool_label not in config.default_labels:
             order_ids.add(str(miner.pool_label))
 
     runtime_view = await runtime_state.load_view(miner_ids, order_ids=sorted(order_ids))
 
-    # 4b) Evaluate pool health and persist it (best effort).
     try:
         decision = evaluate_pool_health(
             now=now,
@@ -124,19 +139,18 @@ async def _run_once(
         logger.error(f"Pool health evaluation failed: {e}")
         decision = None
 
-    # 5) Apply rules
-    planning_context = PlanningInput(
+    # 5)
+    planning_input = PlanningInput(
         snapshot=current_snapshot, config=config, runtime=runtime_view
     )
     if decision is not None:
-        planning_context.order_health = decision.order_health
-        # Attach health events for telemetry
+        planning_input.order_health = decision.order_health
         for event in decision.events:
             try:
                 data = dict(event.get("data") or {})
                 if event.get("order_id"):
                     data.setdefault("order_id", event.get("order_id"))
-                planning_context.add_event(
+                planning_input.add_event(
                     event.get("level", "info"),
                     event.get("code", "POOL_HEALTH"),
                     event.get("message", "Pool health event"),
@@ -147,27 +161,26 @@ async def _run_once(
                 continue
 
     for rule in default_rules():
-        rule.apply(planning_context)
+        rule.apply(planning_input)
 
-    # 6) Plan
-    plan, diag = plan_tick(planning_context)
+    # 6)
+    plan, diagnostics = plan_tick(planning_input)
 
-    # 7) Execute (DB + Redis) and persist runtime state
+    # 7)
     await executor.apply(current_snapshot, plan)
 
-    # 8) Telemetry
-    await publish_last_tick(redis_client, diag)
+    # 8)
+    await publish_last_tick(redis_client, diagnostics)
 
-    # Tick summary log
-    if diag.planned_switches:
+    if diagnostics.planned_switches:
         logger.info(
             f"Allocator tick: "
-            f"miners={diag.miner_count} "
-            f"supply_eh_s={diag.supply_eh_s} "
-            f"eligible={diag.eligible_order_count} "
-            f"hard_drain={diag.hard_drain_order_count} "
-            f"moves={diag.planned_switches} "
-            f"alpha={diag.alpha:.3f}"
+            f"miners={diagnostics.miner_count} "
+            f"supply_eh_s={diagnostics.supply_eh_s} "
+            f"eligible={diagnostics.eligible_order_count} "
+            f"hard_drain={diagnostics.hard_drain_order_count} "
+            f"moves={diagnostics.planned_switches} "
+            f"damping_factor={diagnostics.damping_factor:.3f}"
         )
 
 
