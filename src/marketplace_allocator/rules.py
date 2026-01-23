@@ -6,7 +6,7 @@ plan for the allocator to execute.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import Protocol
 
@@ -17,7 +17,24 @@ from src.marketplace_allocator.types import (
     OrderSnapshot,
 )
 from src.marketplace_allocator.runtime_state import RuntimeStateSnapshot
-from src.marketplace_allocator.pool_health import PoolHealthRecord, PoolHealthState
+from src.marketplace_allocator.pool_health import PoolHealthRecord, PoolHealthStatus
+
+
+_PROBATION_CAP_ABS_EH_S = Decimal("0.0001")  # 100 TH/s
+_PROBATION_CAP_RATE = Decimal("0.10") #10% of order
+
+
+def _probation_cap_eh_s(order_limit_eh_s: Decimal | None) -> Decimal:
+    """Compute the reduced effective limit during post-BACKOFF probation."""
+    if order_limit_eh_s is None:
+        return _PROBATION_CAP_ABS_EH_S
+    try:
+        cap_by_rate = order_limit_eh_s * _PROBATION_CAP_RATE
+    except Exception:
+        return _PROBATION_CAP_ABS_EH_S
+    
+    effective_cap = min(cap_by_rate, _PROBATION_CAP_ABS_EH_S)
+    return effective_cap
 
 
 @dataclass
@@ -163,12 +180,14 @@ class EligibilityRule:
 
 
 class PoolHealthRule:
-    """Temporarily exclude orders whose upstream pool is unhealthy.
+    """Exclude orders whose upstream pool is unhealthy.
 
     When an order's pool shows signs of problems (high reject rate, no jobs,
     etc.), it enters BACKOFF state. This rule removes such orders from
     eligibility until the backoff period expires, preventing miners from
     being assigned to broken pools.
+
+    Orders in FAILED state are permanently excluded (no expiry check).
 
     The pool health state machine is evaluated outside the rule pipeline
     (in the allocator loop) and injected into ctx.order_health before this
@@ -181,10 +200,10 @@ class PoolHealthRule:
         ctx.snapshot.now - current timestamp for backoff expiry check
 
     Writes:
-        ctx.forced_ineligible_ids - adds orders in BACKOFF state
-        ctx.eligible_orders - removes orders in BACKOFF state
+        ctx.forced_ineligible_ids - adds orders in BACKOFF/FAILED state
+        ctx.eligible_orders - removes orders in BACKOFF/FAILED state
         ctx.ineligible_reason - sets "pool_health:<reason>" for affected orders
-        ctx.events - logs POOL_BACKOFF warning for each affected order
+        ctx.events - logs warning for each affected order
     """
 
     name = "pool_health"
@@ -204,8 +223,23 @@ class PoolHealthRule:
             if not record:
                 continue
 
+            if record.status == PoolHealthStatus.FAILED:
+                forced.add(order.order_id)
+                ctx.ineligible_reason[order.order_id] = (
+                    f"pool_health_failed:{record.reason or 'max_backoffs'}"
+                )
+                ctx.add_event(
+                    "warning",
+                    "POOL_FAILED",
+                    "Order is permanently ineligible due to pool health failure",
+                    order_id=order.order_id,
+                    reason=record.reason,
+                )
+                continue
+
+            # Backoff state - exclude until timer expires
             if (
-                record.status == PoolHealthState.BACKOFF
+                record.status == PoolHealthStatus.BACKOFF
                 and record.backoff_until_ts > now_ts
             ):
                 forced.add(order.order_id)
@@ -227,6 +261,67 @@ class PoolHealthRule:
             ctx.eligible_orders = [
                 o for o in ctx.eligible_orders if o.order_id not in forced
             ]
+
+
+class PoolPostBackoffProbationCapRule:
+    """Apply a probation cap to orders in PROBATION state.
+
+    When an order exits BACKOFF, it enters PROBATION state for careful
+    re-entry. During probation we keep the order eligible but reduce
+    its effective limit so the planner only allocates a small amount of
+    hashrate until the pool proves stable (RECOVERY_TICKS_REQUIRED good ticks).
+
+    This rule mutates `ctx.eligible_orders` by replacing affected
+    OrderSnapshot instances with capped copies (using dataclasses.replace).
+
+    Cap formula (EH/s):
+      min(10% of order.limit_eh_s, 0.0001)
+    Where 0.0001 EH/s == 100 TH/s.
+
+    If an order has no explicit limit, we still cap to 100 TH/s during
+    probation.
+    """
+
+    name = "pool_post_backoff_probation_cap"
+
+    def apply(self, ctx: PlanningInput) -> None:
+        if not ctx.config.enable_pool_health:
+            return
+        if not ctx.order_health or not ctx.eligible_orders:
+            return
+
+        capped_orders: list[OrderSnapshot] = []
+        for order in ctx.eligible_orders:
+            record = ctx.order_health.get(order.order_id)
+            if not record:
+                capped_orders.append(order)
+                continue
+
+            if record.status != PoolHealthStatus.PROBATION:
+                capped_orders.append(order)
+                continue
+
+            cap = _probation_cap_eh_s(order.limit_eh_s)
+
+            # Replace with a capped copy. (Never increase the limit.)
+            if order.limit_eh_s is None or cap < order.limit_eh_s:
+                capped_orders.append(replace(order, limit_eh_s=cap))
+            else:
+                capped_orders.append(order)
+
+            ctx.add_event(
+                "info",
+                "POOL_PROBATION_CAP",
+                "Applied post-backoff probation cap to order",
+                order_id=order.order_id,
+                probation_cap_eh_s=float(cap),
+                original_limit_eh_s=(
+                    str(order.limit_eh_s) if order.limit_eh_s is not None else None
+                ),
+                good_tick_count=record.good_tick_count,
+            )
+
+        ctx.eligible_orders = capped_orders
 
 
 class HardDrainRule:
@@ -286,5 +381,6 @@ def default_rules() -> list[Rule]:
         TickTimingRule(),
         EligibilityRule(),
         PoolHealthRule(),
+        PoolPostBackoffProbationCapRule(),
         HardDrainRule(),
     ]
