@@ -79,6 +79,37 @@ services:
     networks:
       - taohash-network
 
+  market:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: taohash-market
+    command: [ "python", "-m", "src.market.main" ]
+    ports:
+      - "${MARKET_HEALTH_PORT:-8001}:8001"
+    volumes:
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      LOG_FILE: /app/logs/market.log
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - taohash-network
+
   redis:
     image: redis:7-alpine
     container_name: taohash-redis
