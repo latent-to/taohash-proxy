@@ -8,12 +8,19 @@ Key Features:
   * Monitors pool health via proxy heartbeats (share counts, reject breakdown,
     last_notify_age_s) to detect when upstream pools are failing
   * Applies hysteresis via EMA smoothing, warmup windows, and exponential backoff
-  * Produces per-order health status (HEALTHY/WARMUP/DEGRADED/BACKOFF) used by
-    the allocator to temporarily exclude unhealthy orders
+  * Produces per-order health status used by the allocator to exclude unhealthy orders
+
+Health States:
+  * HEALTHY: Pool functioning normally, can receive hashrate
+  * WARMUP: Just started receiving hashrate, waiting for initial samples
+  * DEGRADED: High reject rate but still receiving hashrate
+  * BACKOFF: Unhealthy (no jobs, high unknown rejects), temporarily excluded
+  * PROBATION: Careful re-entry after backoff, limited hashrate allowed
+  * FAILED: Permanent failure after max backoffs, excluded indefinitely
 
 Used by:
   * Allocator loop: Evaluates health before each planning cycle
-  * Rules pipeline: PoolHealthRule uses BACKOFF status to exclude orders
+  * Rules pipeline: PoolHealthRule uses BACKOFF/FAILED status to exclude orders
   * Planner: Hard-drains orders in BACKOFF state
 """
 
@@ -27,7 +34,7 @@ from typing import Optional
 from src.marketplace_allocator.types import AllocatorConfig, MinerSnapshot
 
 
-class PoolHealthState(str, Enum):
+class PoolHealthStatus(str, Enum):
     """Health status of an upstream mining pool.
 
     Used to determine whether an order can receive hashrate. Orders in BACKOFF
@@ -38,12 +45,50 @@ class PoolHealthState(str, Enum):
         WARMUP: Pool just started receiving hashrate (waiting for initial samples)
         DEGRADED: Pool has high reject rate but still receiving hashrate
         BACKOFF: Pool is unhealthy (no jobs, high unknown rejects) - miners drained
+        PROBATION: Careful re-entry after backoff, limited hashrate allowed
+        FAILED: Permanent failure after max backoffs - order excluded indefinitely
     """
 
     HEALTHY = "HEALTHY"
     WARMUP = "WARMUP"
     DEGRADED = "DEGRADED"
     BACKOFF = "BACKOFF"
+    PROBATION = "PROBATION"
+    FAILED = "FAILED"
+
+
+PoolHealthState = PoolHealthStatus
+
+
+class SignalType(str, Enum):
+    """Classified signal type for state machine transitions.
+
+    Represents the discrete signal derived from tick data that drives
+    state transitions. Signals are prioritized: hard signals (NO_JOBS,
+    HIGH_OTHER_REJECTS) override soft signals.
+    """
+
+    GOOD = "GOOD"  # Healthy metrics, all thresholds passed
+    NO_DATA = "NO_DATA"  # Not enough samples this tick
+    NO_JOBS = "NO_JOBS"  # Pool not sending jobs (hard signal)
+    HIGH_REJECTS = "HIGH_REJECTS"  # High overall reject rate
+    HIGH_OTHER_REJECTS = "HIGH_OTHER_REJECTS"  # High unknown rejects (hard signal)
+    TIMER_EXPIRED = "TIMER_EXPIRED"  # Warmup or backoff timer completed
+
+
+@dataclass(frozen=True)
+class HealthSignal:
+    """Classified input signal for state machine transition.
+
+    Produced by classify_signal() from tick data. Contains both the
+    discrete signal type and the raw metrics for diagnostics/logging.
+    """
+
+    signal_type: SignalType
+    reject_rate: float = 0.0
+    other_reject_rate: float = 0.0
+    job_gap_s: float = 0.0
+    sample_count: int = 0
 
 
 def _utc_now_ts(now: datetime) -> float:
@@ -96,7 +141,9 @@ def _ema_update(prev_ema: float, damping_factor: float, sample: float) -> float:
     """
     if prev_ema <= 0:
         return float(sample)
-    return (1.0 - float(damping_factor)) * float(prev_ema) + float(damping_factor) * float(sample)
+    return (1.0 - float(damping_factor)) * float(prev_ema) + float(
+        damping_factor
+    ) * float(sample)
 
 
 def _compute_backoff_seconds(
@@ -218,21 +265,22 @@ class PoolHealthRecord:
     in BACKOFF are temporarily excluded from allocation until backoff expires.
 
     Stored in Redis and persisted across allocator restarts. Health state
-    transitions through: HEALTHY -> WARMUP -> HEALTHY/DEGRADED/BACKOFF.
+    transitions through: HEALTHY -> WARMUP -> HEALTHY/DEGRADED/BACKOFF/PROBATION/FAILED.
 
     Attributes:
-        status: Current health status (HEALTHY/WARMUP/DEGRADED/BACKOFF)
+        status: Current health status (HEALTHY/WARMUP/DEGRADED/BACKOFF/PROBATION/FAILED)
         reason: Human-readable reason for the current status
         warmup_until_ts: Unix timestamp when warmup period ends (0 = no warmup)
         backoff_until_ts: Unix timestamp when backoff period expires (0 = no backoff)
         backoff_level: Exponential backoff level (0-10, increments on repeated failures)
+        good_tick_count: Consecutive good ticks (for recovery hysteresis)
         ema_reject_rate: Smoothed reject rate (0-1) via exponential moving average
         ema_other_reject_rate: Smoothed unknown/other reject rate (0-1)
         ema_job_gap_s: Smoothed job gap in seconds (time since last job notification)
         last_update_ts: Unix timestamp of last health evaluation
     """
 
-    status: PoolHealthState = PoolHealthState.HEALTHY
+    status: PoolHealthStatus = PoolHealthStatus.HEALTHY
     reason: str = ""
 
     # Unix timestamps (seconds). 0 means unset.
@@ -241,6 +289,9 @@ class PoolHealthRecord:
 
     # Backoff exponent for repeated failures.
     backoff_level: int = 0  # 0-10, 10 is max
+
+    # Recovery hysteresis counter
+    good_tick_count: int = 0
 
     # Smoothed metrics (EMA)
     ema_reject_rate: float = 0.0
@@ -265,22 +316,28 @@ class PoolHealthRecord:
         Returns:
             PoolHealthRecord with values from the dictionary
         """
-        status_raw = str(data.get("status") or PoolHealthState.HEALTHY.value)
+        status_raw = str(data.get("status") or PoolHealthStatus.HEALTHY.value)
         try:
-            status = PoolHealthState(status_raw)
+            status = PoolHealthStatus(status_raw)
         except Exception:
-            status = PoolHealthState.HEALTHY
+            status = PoolHealthStatus.HEALTHY
         return cls(
             status=status,
             reason=str(data.get("reason") or ""),
             warmup_until_ts=float(data.get("warmup_until_ts") or 0.0),
             backoff_until_ts=float(data.get("backoff_until_ts") or 0.0),
             backoff_level=int(data.get("backoff_level") or 0),
+            good_tick_count=int(data.get("good_tick_count") or 0),
             ema_reject_rate=float(data.get("ema_reject_rate") or 0.0),
             ema_other_reject_rate=float(data.get("ema_other_reject_rate") or 0.0),
             ema_job_gap_s=float(data.get("ema_job_gap_s") or 0.0),
             last_update_ts=float(data.get("last_update_ts") or 0.0),
         )
+
+
+# Constants for state machine
+MAX_BACKOFF_LEVEL = 5  # After this many backoffs, transition to FAILED
+RECOVERY_TICKS_REQUIRED = 3  # Consecutive good ticks needed to recover
 
 
 @dataclass
@@ -343,6 +400,222 @@ class PoolHealthDecision:
     order_health: dict[str, PoolHealthRecord]
     miner_share_stats: dict[str, MinerPoolShareStats]
     events: list[dict]
+
+
+def classify_signal(
+    tick: PoolHealthDelta,
+    record: PoolHealthRecord,
+    config: AllocatorConfig,
+    now_ts: float,
+) -> HealthSignal:
+    """Classify tick data into a discrete signal type for state transitions.
+
+    This function examines the current tick's metrics and the record's
+    EMA values to produce a single HealthSignal that drives the state machine.
+
+    IMPORTANT: _update_record_emas() must be called BEFORE this function so that
+    record.ema_* values are up-to-date. This ensures we use smoothed (EMA) values
+    for reject rate comparisons, providing hysteresis against single-tick spikes.
+
+    Signal priority (highest to lowest):
+        1. TIMER_EXPIRED - warmup or backoff timer completed
+        2. NO_JOBS - pool not sending jobs (hard signal, uses instant value)
+        3. NO_DATA - not enough samples to evaluate
+        4. HIGH_OTHER_REJECTS - high unknown reject rate (uses EMA, hard signal)
+        5. HIGH_REJECTS - high overall reject rate (uses EMA)
+        6. GOOD - all metrics within thresholds
+
+    Args:
+        tick: Aggregated share deltas for this order this tick
+        record: Current health record with EMA values (must be updated first!)
+        config: Allocator config with thresholds
+        now_ts: Current Unix timestamp
+
+    Returns:
+        HealthSignal with classified type and metrics for diagnostics
+    """
+    # We treat missing/invalid timestamps (<=0) as expired to prevent stuck states.
+    if record.status == PoolHealthStatus.WARMUP:
+        if record.warmup_until_ts <= 0 or now_ts >= record.warmup_until_ts:
+            return HealthSignal(SignalType.TIMER_EXPIRED)
+
+    if record.status == PoolHealthStatus.BACKOFF:
+        if record.backoff_until_ts <= 0 or now_ts >= record.backoff_until_ts:
+            return HealthSignal(SignalType.TIMER_EXPIRED)
+
+    # No jobs signal (highest priority hard signal) - uses instant value
+    if tick.min_last_notify_age_s is not None:
+        if tick.min_last_notify_age_s >= float(config.pool_health_no_notify_seconds):
+            return HealthSignal(
+                SignalType.NO_JOBS,
+                job_gap_s=float(tick.min_last_notify_age_s),
+            )
+
+    # Not enough samples to evaluate
+    if tick.delta_total < int(config.pool_health_min_samples):
+        return HealthSignal(
+            SignalType.NO_DATA,
+            sample_count=tick.delta_total,
+        )
+
+    # Use EMA values for reject rate comparisons (provides hysteresis)
+    ema_reject_rate = record.ema_reject_rate
+    ema_other_rate = record.ema_other_reject_rate
+
+    # High unknown rejects (hard signal) - uses EMA
+    if ema_other_rate >= float(config.pool_health_other_reject_threshold):
+        return HealthSignal(
+            SignalType.HIGH_OTHER_REJECTS,
+            reject_rate=ema_reject_rate,
+            other_reject_rate=ema_other_rate,
+            sample_count=tick.delta_total,
+        )
+
+    # High overall reject rate - uses EMA
+    if ema_reject_rate >= float(config.pool_health_reject_threshold):
+        return HealthSignal(
+            SignalType.HIGH_REJECTS,
+            reject_rate=ema_reject_rate,
+            other_reject_rate=ema_other_rate,
+            sample_count=tick.delta_total,
+        )
+
+    return HealthSignal(
+        SignalType.GOOD,
+        reject_rate=ema_reject_rate,
+        other_reject_rate=ema_other_rate,
+        sample_count=tick.delta_total,
+    )
+
+
+def compute_transition(
+    record: PoolHealthRecord,
+    signal: HealthSignal,
+    config: AllocatorConfig,
+    now_ts: float,
+) -> tuple[PoolHealthRecord, Optional[str]]:
+    """Compute the next state from current state and classified signal.
+
+    This pure function implements the state machine transition logic. It takes
+    the current record and signal, and returns a new record with updated state
+    plus an optional event code for logging.
+
+    Transition rules:
+        - FAILED is terminal (no transitions out)
+        - Hard signals (NO_JOBS, HIGH_OTHER_REJECTS) trigger BACKOFF from any state
+        - After MAX_BACKOFF_LEVEL backoffs, transition to FAILED
+        - Recovery from DEGRADED/PROBATION requires RECOVERY_TICKS_REQUIRED good ticks
+        - BACKOFF timer expiry goes to PROBATION (not directly to HEALTHY)
+
+    Args:
+        record: Current health record
+        signal: Classified signal from classify_signal()
+        config: Allocator config for backoff calculation
+        now_ts: Current Unix timestamp
+
+    Returns:
+        Tuple of (new_record, event_code_or_none). Event codes:
+            - POOL_FAILED: Transitioned to terminal FAILED state
+            - POOL_BACKOFF: Entered or re-entered BACKOFF
+            - POOL_DEGRADED: Transitioned to DEGRADED
+            - POOL_WARMUP_COMPLETE: Warmup timer expired
+            - POOL_PROBATION: Entered probation after backoff
+            - POOL_RECOVERED: Successfully recovered to HEALTHY
+    """
+    # Create mutable copy with updated timestamp
+    new = PoolHealthRecord(
+        status=record.status,
+        reason=record.reason,
+        warmup_until_ts=record.warmup_until_ts,
+        backoff_until_ts=record.backoff_until_ts,
+        backoff_level=record.backoff_level,
+        good_tick_count=record.good_tick_count,
+        ema_reject_rate=record.ema_reject_rate,
+        ema_other_reject_rate=record.ema_other_reject_rate,
+        ema_job_gap_s=record.ema_job_gap_s,
+        last_update_ts=now_ts,
+    )
+
+    # Terminal state - no transitions out
+    if record.status == PoolHealthStatus.FAILED:
+        return new, None
+
+    # Hard signals override everything (except FAILED)
+    if signal.signal_type in (SignalType.NO_JOBS, SignalType.HIGH_OTHER_REJECTS):
+        if record.backoff_level >= MAX_BACKOFF_LEVEL:
+            new.status = PoolHealthStatus.FAILED
+            new.reason = f"max_backoffs_exceeded_{signal.signal_type.value.lower()}"
+            return new, "POOL_FAILED"
+
+        # Enter backoff
+        backoff_seconds = _compute_backoff_seconds(record, config)
+        new.status = PoolHealthStatus.BACKOFF
+        new.reason = signal.signal_type.value.lower()
+        new.backoff_until_ts = now_ts + float(backoff_seconds)
+        new.backoff_level = min(record.backoff_level + 1, 10)
+        new.good_tick_count = 0
+        new.warmup_until_ts = 0.0
+        return new, "POOL_BACKOFF"
+
+    if record.status == PoolHealthStatus.HEALTHY:
+        if signal.signal_type == SignalType.HIGH_REJECTS:
+            new.status = PoolHealthStatus.DEGRADED
+            new.reason = "high_reject_rate"
+            new.good_tick_count = 0
+            return new, "POOL_DEGRADED"
+
+    elif record.status == PoolHealthStatus.WARMUP:
+        if signal.signal_type == SignalType.TIMER_EXPIRED:
+            new.status = PoolHealthStatus.HEALTHY
+            new.reason = ""
+            new.warmup_until_ts = 0.0
+            return new, "POOL_WARMUP_COMPLETE"
+
+    elif record.status == PoolHealthStatus.DEGRADED:
+        if signal.signal_type == SignalType.GOOD:
+            new.good_tick_count = record.good_tick_count + 1
+            if new.good_tick_count >= RECOVERY_TICKS_REQUIRED:
+                new.status = PoolHealthStatus.HEALTHY
+                new.reason = ""
+                new.good_tick_count = 0
+                return new, "POOL_RECOVERED"
+        elif signal.signal_type == SignalType.HIGH_REJECTS:
+            # Reset recovery counter on bad tick
+            new.good_tick_count = 0
+
+    elif record.status == PoolHealthStatus.BACKOFF:
+        if signal.signal_type == SignalType.TIMER_EXPIRED:
+            new.status = PoolHealthStatus.PROBATION
+            new.reason = "probation_after_backoff"
+            new.backoff_until_ts = 0.0
+            new.good_tick_count = 0
+            return new, "POOL_PROBATION"
+
+    elif record.status == PoolHealthStatus.PROBATION:
+        if signal.signal_type == SignalType.GOOD:
+            new.good_tick_count = record.good_tick_count + 1
+            if new.good_tick_count >= RECOVERY_TICKS_REQUIRED:
+                # Full recovery
+                new.status = PoolHealthStatus.HEALTHY
+                new.reason = ""
+                new.backoff_level = 0
+                new.good_tick_count = 0
+                return new, "POOL_RECOVERED"
+
+        elif signal.signal_type == SignalType.HIGH_REJECTS:
+            # High rejects during probation = back to backoff
+            backoff_seconds = _compute_backoff_seconds(record, config)
+            new.status = PoolHealthStatus.BACKOFF
+            new.reason = f"probation_failed_{signal.signal_type.value.lower()}"
+            new.backoff_until_ts = now_ts + float(backoff_seconds)
+            new.backoff_level = min(record.backoff_level + 1, 10)
+            new.good_tick_count = 0
+            return new, "POOL_BACKOFF"
+        # NO_DATA during probation: Stay in probation, wait for miners to be assigned.
+        # This prevents an infinite loop where orders bounce between BACKOFF and PROBATION
+        # when the allocator hasn't assigned miners yet.
+
+    return new, None
 
 
 def _aggregate_per_order_ticks(
@@ -447,34 +720,80 @@ def _emit_event(
     )
 
 
-def _apply_backoff(
-    *,
-    record: PoolHealthRecord,
-    now_ts: float,
-    backoff_seconds: int,
-    reason: str,
-) -> None:
-    """Place an order in BACKOFF state due to pool health issues.
-
-    Sets the order status to BACKOFF and increments the backoff level for
-    exponential backoff. The order will be excluded from allocation until
-    backoff_until_ts expires.
+def _event_level(event_code: str) -> str:
+    """Determine event severity level from event code.
 
     Args:
-        record: Health record to update (modified in place)
-        now_ts: Current Unix timestamp
-        backoff_seconds: Backoff duration in seconds (computed via _compute_backoff_seconds)
-        reason: Human-readable reason for the backoff
+        event_code: Event code from compute_transition()
 
-    Note:
-        Backoff level increments (capped at 10) to increase wait time after
-        repeated failures. Warmup is NOT cleared here (caller must clear if needed).
+    Returns:
+        Event level: "warning" for failures/backoffs, "info" otherwise
     """
-    level = max(0, int(record.backoff_level))
-    record.status = PoolHealthState.BACKOFF
-    record.reason = str(reason)
-    record.backoff_until_ts = now_ts + float(backoff_seconds)
-    record.backoff_level = min(level + 1, 10)
+    if event_code in ("POOL_FAILED", "POOL_BACKOFF"):
+        return "warning"
+    return "info"
+
+
+def _event_message(event_code: str) -> str:
+    """Get human-readable message for event code.
+
+    Args:
+        event_code: Event code from compute_transition()
+
+    Returns:
+        Human-readable message describing the state transition
+    """
+    messages = {
+        "POOL_FAILED": "Pool has failed too many times; permanently excluded",
+        "POOL_BACKOFF": "Pool is unhealthy; placing order in backoff",
+        "POOL_DEGRADED": "Pool is degraded (high reject rate)",
+        "POOL_WARMUP_COMPLETE": "Pool warmup completed",
+        "POOL_PROBATION": "Pool entering probation after backoff",
+        "POOL_RECOVERED": "Pool has recovered to healthy state",
+    }
+    return messages.get(event_code, f"Pool health event: {event_code}")
+
+
+def _update_record_emas(
+    record: PoolHealthRecord,
+    tick: PoolHealthDelta,
+    damping_factor: float,
+) -> PoolHealthRecord:
+    """Update EMA metrics on the record.
+
+    Always updates EMAs when we have data, regardless of state transitions.
+    This keeps metrics accurate for monitoring even during warmup/backoff.
+
+    Must be called BEFORE classify_signal so that signal classification
+    uses smoothed (EMA) values rather than instant values.
+
+    Args:
+        record: Current health record
+        tick: Tick delta data
+        damping_factor: EMA smoothing factor (0-1)
+
+    Returns:
+        Updated record with new EMA values
+    """
+    # Job gap EMA
+    if tick.min_last_notify_age_s is not None:
+        record.ema_job_gap_s = _ema_update(
+            record.ema_job_gap_s, damping_factor, float(tick.min_last_notify_age_s)
+        )
+
+    # Reject rate EMAs (only when we have samples)
+    if tick.delta_total > 0:
+        reject_rate = float(tick.delta_rejected) / float(max(1, tick.delta_total))
+        other_rate = float(tick.delta_other_rejected) / float(max(1, tick.delta_total))
+
+        record.ema_reject_rate = _ema_update(
+            record.ema_reject_rate, damping_factor, reject_rate
+        )
+        record.ema_other_reject_rate = _ema_update(
+            record.ema_other_reject_rate, damping_factor, other_rate
+        )
+
+    return record
 
 
 def evaluate_pool_health(
@@ -487,17 +806,15 @@ def evaluate_pool_health(
 ) -> PoolHealthDecision:
     """Evaluate upstream pool health and update health records.
 
-    Analyzes miner share statistics to detect pool health issues. Uses
-    exponential moving averages (EMA) to smooth metrics and prevent false
-    positives. Applies warmup windows and exponential backoff for hysteresis.
+    Uses an explicit state machine pattern with:
+        - classify_signal(): Classifies tick data into discrete signal types
+        - compute_transition(): Computes next state from current state + signal
+        - _update_record_emas(): Updates EMA metrics for monitoring
 
-    Health evaluation steps:
-        1. Aggregate per-order share deltas from miner counters
-        2. Update health records with state transitions:
-           - BACKOFF: Check if expired, clear if so
-           - WARMUP: Start warmup on first activity, complete after window
-           - Job gap: Update EMA, trigger backoff if no jobs for too long
-           - Reject rates: Update EMAs, trigger DEGRADED/BACKOFF if thresholds exceeded
+    State machine features:
+        - Recovery hysteresis: Requires RECOVERY_TICKS_REQUIRED good ticks
+        - Bounded failure: After MAX_BACKOFF_LEVEL backoffs, enters FAILED state
+        - Probation: After backoff expires, enters PROBATION before HEALTHY
 
     Args:
         now: Current timestamp for health evaluation
@@ -534,180 +851,57 @@ def evaluate_pool_health(
     )
 
     # ------------------------------------------------------------------
-    # 2) Update per-order health records
+    # 2) Update per-order health records using state machine
     # ------------------------------------------------------------------
-    updated: dict[str, PoolHealthRecord] = dict(prev_order_health)
+    updated: dict[str, PoolHealthRecord] = {}
     events: list[dict] = []
 
-    relevant_order_ids = set(updated.keys()) | set(per_order_tick.keys())
+    relevant_order_ids = set(prev_order_health.keys()) | set(per_order_tick.keys())
 
     for order_id in relevant_order_ids:
-        record = updated.get(order_id) or PoolHealthRecord()
+        record = prev_order_health.get(order_id) or PoolHealthRecord()
         tick = per_order_tick.get(order_id) or PoolHealthDelta()
 
-        # Track whether we *just* exited backoff during this tick.
-        #
-        # This matters for warmup behavior: when an order returns from BACKOFF
-        # we want a warmup window to allow the upstream pool to stabilize.
-        #
-        # IMPORTANT: we intentionally do *not* start warmup on every tick with
-        # activity; otherwise an order with continuous hashrate would repeatedly
-        # re-enter WARMUP and never be evaluated by share-based heuristics.
-        backoff_just_expired = False
-
-        # ---- Backoff handling ----
-        if record.status == PoolHealthState.BACKOFF and record.backoff_until_ts > 0:
-            if now_ts < record.backoff_until_ts:
-                record.last_update_ts = now_ts
-                updated[order_id] = record
-                continue
-
-            # Backoff expired; clear and allow allocation again.
-            record.status = PoolHealthState.HEALTHY
-            record.reason = ""
-            record.backoff_until_ts = 0.0
-            record.warmup_until_ts = 0.0
-            # Keep backoff_level so repeated failures escalate.
-            backoff_just_expired = True
-
-        # ---- Warmup handling ----
+        # Handle new orders: start in WARMUP if we have activity
+        is_new_order = order_id not in prev_order_health
         has_activity = (tick.min_last_notify_age_s is not None) or (
             tick.delta_total > 0
         )
 
-        # Start warmup:
-        #   - for *new* orders (first time we see the order_id), or
-        #   - when an order returns from BACKOFF.
-        #
-        # We purposely avoid starting warmup for orders that are already
-        # HEALTHY and receiving continuous hashpower, otherwise the warmup
-        # window would restart every time it expires.
-        #
-        # NOTE: we detect "new order" via the presence of order_id in
-        # prev_order_health (not via record.last_update_ts) because older
-        # persisted records may not carry last_update_ts across restarts.
-        is_new_order = order_id not in prev_order_health
-        if has_activity and record.warmup_until_ts <= 0 and (
-            is_new_order or backoff_just_expired
-        ):
-            record.status = PoolHealthState.WARMUP
+        if is_new_order and has_activity:
+            record.status = PoolHealthStatus.WARMUP
             record.warmup_until_ts = now_ts + float(config.pool_health_warmup_seconds)
             record.reason = "warmup"
 
-        # Warmup completion
-        if record.status == PoolHealthState.WARMUP:
-            if record.warmup_until_ts > 0 and now_ts >= record.warmup_until_ts:
-                record.status = PoolHealthState.HEALTHY
-                record.reason = ""
-                record.warmup_until_ts = 0.0
+        # 1. Update EMAs FIRST (so classify_signal uses smoothed values)
+        record = _update_record_emas(record, tick, damping_factor)
 
-        # ---- Job-gap EMA (always updated when we have notify ages) ----
-        if tick.min_last_notify_age_s is not None:
-            record.ema_job_gap_s = _ema_update(
-                record.ema_job_gap_s, damping_factor, float(tick.min_last_notify_age_s)
-            )
+        # 2. Classify the current tick into a signal (uses EMA values)
+        signal = classify_signal(tick, record, config, now_ts)
 
-        # ---- Hard unhealthy signal: no jobs for too long ----
-        if tick.min_last_notify_age_s is not None and float(
-            tick.min_last_notify_age_s
-        ) >= float(config.pool_health_no_notify_seconds):
-            backoff_seconds = _compute_backoff_seconds(record, config)
-            _apply_backoff(
-                record=record,
-                now_ts=now_ts,
-                backoff_seconds=backoff_seconds,
-                reason=f"no_jobs_for_{int(tick.min_last_notify_age_s)}s",
-            )
-            record.warmup_until_ts = 0.0
+        # 3. Compute state transition
+        new_record, event_code = compute_transition(record, signal, config, now_ts)
 
-            record.last_update_ts = now_ts
-            updated[order_id] = record
-
+        # 4. Emit event if state changed
+        if event_code:
             _emit_event(
                 events,
-                level="warning",
-                code="POOL_NO_JOBS",
+                level=_event_level(event_code),
+                code=event_code,
                 order_id=order_id,
-                message="Pool appears to be not sending jobs; placing order in backoff",
+                message=_event_message(event_code),
                 data={
-                    "min_last_notify_age_s": tick.min_last_notify_age_s,
-                    "backoff_seconds": backoff_seconds,
-                    "backoff_level": record.backoff_level,
+                    "signal_type": signal.signal_type.value,
+                    "reject_rate": signal.reject_rate,
+                    "other_reject_rate": signal.other_reject_rate,
+                    "sample_count": signal.sample_count,
+                    "job_gap_s": signal.job_gap_s,
+                    "backoff_level": new_record.backoff_level,
+                    "good_tick_count": new_record.good_tick_count,
                 },
             )
-            continue
 
-        # ---- Shares-based evaluation (skip during warmup) ----
-        if record.status != PoolHealthState.WARMUP and tick.delta_total >= int(
-            config.pool_health_min_samples
-        ):
-            reject_rate = float(tick.delta_rejected) / float(max(1, tick.delta_total))
-            other_rate = float(tick.delta_other_rejected) / float(
-                max(1, tick.delta_total)
-            )
-
-            record.ema_reject_rate = _ema_update(
-                record.ema_reject_rate, damping_factor, reject_rate
-            )
-            record.ema_other_reject_rate = _ema_update(
-                record.ema_other_reject_rate, damping_factor, other_rate
-            )
-
-            # If unknown/other rejects are consistently high, treat as unhealthy.
-            if record.ema_other_reject_rate >= float(
-                config.pool_health_other_reject_threshold
-            ):
-                backoff_seconds = _compute_backoff_seconds(record, config)
-                _apply_backoff(
-                    record=record,
-                    now_ts=now_ts,
-                    backoff_seconds=backoff_seconds,
-                    reason="high_unknown_rejects",
-                )
-
-                _emit_event(
-                    events,
-                    level="warning",
-                    code="POOL_UNHEALTHY_REJECTS",
-                    order_id=order_id,
-                    message="Pool appears unhealthy (high other rejects); placing order in backoff",
-                    data={
-                        "delta_total": tick.delta_total,
-                        "delta_rejected": tick.delta_rejected,
-                        "delta_other_rejected": tick.delta_other_rejected,
-                        "ema_other_reject_rate": record.ema_other_reject_rate,
-                        "threshold": config.pool_health_other_reject_threshold,
-                        "backoff_seconds": backoff_seconds,
-                        "backoff_level": record.backoff_level,
-                    },
-                )
-
-            elif record.ema_reject_rate >= float(config.pool_health_reject_threshold):
-                # Degraded but not drained by default.
-                if record.status != PoolHealthState.DEGRADED:
-                    record.status = PoolHealthState.DEGRADED
-                    record.reason = "high_reject_rate"
-
-                    _emit_event(
-                        events,
-                        level="info",
-                        code="POOL_DEGRADED",
-                        order_id=order_id,
-                        message="Pool appears degraded (high reject rate)",
-                        data={
-                            "delta_total": tick.delta_total,
-                            "ema_reject_rate": record.ema_reject_rate,
-                            "threshold": config.pool_health_reject_threshold,
-                        },
-                    )
-            else:
-                # Recovery
-                if record.status == PoolHealthState.DEGRADED:
-                    record.status = PoolHealthState.HEALTHY
-                    record.reason = ""
-
-        record.last_update_ts = now_ts
-        updated[order_id] = record
+        updated[order_id] = new_record
 
     return PoolHealthDecision(
         order_health=updated,
