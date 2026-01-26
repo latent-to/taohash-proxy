@@ -400,8 +400,6 @@ class PoolHealthDecision:
     order_health: dict[str, PoolHealthRecord]
     miner_share_stats: dict[str, MinerPoolShareStats]
     events: list[dict]
-
-
 def classify_signal(
     tick: PoolHealthDelta,
     record: PoolHealthRecord,
@@ -418,23 +416,58 @@ def classify_signal(
     for reject rate comparisons, providing hysteresis against single-tick spikes.
 
     Signal priority (highest to lowest):
-        1. TIMER_EXPIRED - warmup or backoff timer completed
-        2. NO_JOBS - pool not sending jobs (hard signal, uses instant value)
-        3. NO_DATA - not enough samples to evaluate
-        4. HIGH_OTHER_REJECTS - high unknown reject rate (uses EMA, hard signal)
-        5. HIGH_REJECTS - high overall reject rate (uses EMA)
-        6. GOOD - all metrics within thresholds
+
+      1) Hard signals
+         - NO_JOBS: pool is not sending jobs (uses instantaneous job-gap signal)
+         - HIGH_OTHER_REJECTS: unknown/other rejects above threshold (EMA + min samples)
+
+      2) Timer-driven transitions
+         - TIMER_EXPIRED: warmup/backoff deadline reached (inclusive boundary)
+
+      3) Soft/diagnostic signals
+         - NO_DATA: not enough samples this tick to evaluate reject-rate thresholds
+         - HIGH_REJECTS: overall reject rate above threshold (EMA + min samples)
+         - GOOD: all thresholds passed
+
+    Rationale:
+      - Hard signals must win to avoid "immunity windows" where a pool transitions
+        out of BACKOFF/WARMUP even though it is still clearly unhealthy.
+      - Timer expiry is evaluated before NO_DATA so that WARMUP/BACKOFF cannot
+        get stuck waiting for samples.
 
     Args:
-        tick: Aggregated share deltas for this order this tick
-        record: Current health record with EMA values (must be updated first!)
-        config: Allocator config with thresholds
-        now_ts: Current Unix timestamp
+        tick: Aggregated share deltas for this order this tick.
+        record: Current health record with EMA values (must be updated first).
+        config: Allocator config with thresholds.
+        now_ts: Current Unix timestamp.
 
     Returns:
-        HealthSignal with classified type and metrics for diagnostics
+        HealthSignal with classified type and metrics for diagnostics.
     """
-    # We treat missing/invalid timestamps (<=0) as expired to prevent stuck states.
+
+    # 1) Hard signal: pool not sending jobs (independent of share samples).
+    if tick.min_last_notify_age_s is not None:
+        if tick.min_last_notify_age_s >= float(config.pool_health_no_notify_seconds):
+            return HealthSignal(
+                SignalType.NO_JOBS,
+                job_gap_s=float(tick.min_last_notify_age_s),
+            )
+
+    # 2) Hard signal: high "other/unknown" reject rate (requires samples).
+    min_samples = int(config.pool_health_min_samples)
+    if tick.delta_total >= min_samples:
+        ema_other_rate = record.ema_other_reject_rate
+        ema_reject_rate = record.ema_reject_rate
+        if ema_other_rate >= float(config.pool_health_other_reject_threshold):
+            return HealthSignal(
+                SignalType.HIGH_OTHER_REJECTS,
+                reject_rate=float(ema_reject_rate),
+                other_reject_rate=float(ema_other_rate),
+                sample_count=int(tick.delta_total),
+            )
+
+    # 3) Timer transitions (soft), evaluated after hard signals.
+    # Missing/invalid timestamps (<=0) as expired to prevent stuck states.
     if record.status == PoolHealthStatus.WARMUP:
         if record.warmup_until_ts <= 0 or now_ts >= record.warmup_until_ts:
             return HealthSignal(SignalType.TIMER_EXPIRED)
@@ -443,49 +476,31 @@ def classify_signal(
         if record.backoff_until_ts <= 0 or now_ts >= record.backoff_until_ts:
             return HealthSignal(SignalType.TIMER_EXPIRED)
 
-    # No jobs signal (highest priority hard signal) - uses instant value
-    if tick.min_last_notify_age_s is not None:
-        if tick.min_last_notify_age_s >= float(config.pool_health_no_notify_seconds):
-            return HealthSignal(
-                SignalType.NO_JOBS,
-                job_gap_s=float(tick.min_last_notify_age_s),
-            )
-
-    # Not enough samples to evaluate
-    if tick.delta_total < int(config.pool_health_min_samples):
+    # 4) Not enough samples to evaluate reject-rate thresholds.
+    if tick.delta_total < min_samples:
         return HealthSignal(
             SignalType.NO_DATA,
-            sample_count=tick.delta_total,
+            sample_count=int(tick.delta_total),
         )
 
-    # Use EMA values for reject rate comparisons (provides hysteresis)
+    # 5) Soft signal: high overall reject rate (EMA + min samples).
     ema_reject_rate = record.ema_reject_rate
     ema_other_rate = record.ema_other_reject_rate
-
-    # High unknown rejects (hard signal) - uses EMA
-    if ema_other_rate >= float(config.pool_health_other_reject_threshold):
-        return HealthSignal(
-            SignalType.HIGH_OTHER_REJECTS,
-            reject_rate=ema_reject_rate,
-            other_reject_rate=ema_other_rate,
-            sample_count=tick.delta_total,
-        )
-
-    # High overall reject rate - uses EMA
     if ema_reject_rate >= float(config.pool_health_reject_threshold):
         return HealthSignal(
             SignalType.HIGH_REJECTS,
-            reject_rate=ema_reject_rate,
-            other_reject_rate=ema_other_rate,
-            sample_count=tick.delta_total,
+            reject_rate=float(ema_reject_rate),
+            other_reject_rate=float(ema_other_rate),
+            sample_count=int(tick.delta_total),
         )
 
     return HealthSignal(
         SignalType.GOOD,
-        reject_rate=ema_reject_rate,
-        other_reject_rate=ema_other_rate,
-        sample_count=tick.delta_total,
+        reject_rate=float(ema_reject_rate),
+        other_reject_rate=float(ema_other_rate),
+        sample_count=int(tick.delta_total),
     )
+
 
 
 def compute_transition(
@@ -752,37 +767,40 @@ def _event_message(event_code: str) -> str:
         "POOL_RECOVERED": "Pool has recovered to healthy state",
     }
     return messages.get(event_code, f"Pool health event: {event_code}")
-
-
 def _update_record_emas(
     record: PoolHealthRecord,
     tick: PoolHealthDelta,
     damping_factor: float,
+    *,
+    min_samples: int,
 ) -> PoolHealthRecord:
     """Update EMA metrics on the record.
 
-    Always updates EMAs when we have data, regardless of state transitions.
-    This keeps metrics accurate for monitoring even during warmup/backoff.
+    EMA metrics are used for smoothing reject-rate and job-gap signals.
 
-    Must be called BEFORE classify_signal so that signal classification
-    uses smoothed (EMA) values rather than instant values.
+    Always update the *job gap* EMA whenever there is a job-age observation,
+    because it is not based on share sample counts.
+
+    To be called before classify_signal() so that signal classification uses
+    the updated EMA values.
 
     Args:
-        record: Current health record
-        tick: Tick delta data
-        damping_factor: EMA smoothing factor (0-1)
+        record: Current health record.
+        tick: Tick delta data.
+        damping_factor: EMA smoothing factor (0-1).
+        min_samples: Minimum samples required to treat a reject-rate observation as valid.
 
     Returns:
-        Updated record with new EMA values
+        The same record instance (mutated) with updated EMA fields.
     """
-    # Job gap EMA
+    # Job gap EMA.
     if tick.min_last_notify_age_s is not None:
         record.ema_job_gap_s = _ema_update(
             record.ema_job_gap_s, damping_factor, float(tick.min_last_notify_age_s)
         )
 
-    # Reject rate EMAs (only when we have samples)
-    if tick.delta_total > 0:
+    # Reject-rate EMAs (when we have enough samples).
+    if tick.delta_total >= int(min_samples) and tick.delta_total > 0:
         reject_rate = float(tick.delta_rejected) / float(max(1, tick.delta_total))
         other_rate = float(tick.delta_other_rejected) / float(max(1, tick.delta_total))
 
@@ -794,6 +812,7 @@ def _update_record_emas(
         )
 
     return record
+
 
 
 def evaluate_pool_health(
@@ -839,6 +858,7 @@ def evaluate_pool_health(
 
     now_ts = _utc_now_ts(now)
     damping_factor = _clamp01(float(config.pool_health_ema_alpha))
+    min_samples = int(config.pool_health_min_samples)
     default_labels = set(config.default_labels)
 
     # ------------------------------------------------------------------
@@ -874,7 +894,7 @@ def evaluate_pool_health(
             record.reason = "warmup"
 
         # 1. Update EMAs FIRST (so classify_signal uses smoothed values)
-        record = _update_record_emas(record, tick, damping_factor)
+        record = _update_record_emas(record, tick, damping_factor, min_samples=min_samples)
 
         # 2. Classify the current tick into a signal (uses EMA values)
         signal = classify_signal(tick, record, config, now_ts)
