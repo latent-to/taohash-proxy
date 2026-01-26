@@ -263,23 +263,33 @@ class PoolHealthRule:
             ]
 
 
+
+# TODO: Revisit the rule again for miner granularity
 class PoolPostBackoffProbationCapRule:
     """Apply a probation cap to orders in PROBATION state.
 
-    When an order exits BACKOFF, it enters PROBATION state for careful
-    re-entry. During probation we keep the order eligible but reduce
-    its effective limit so the planner only allocates a small amount of
-    hashrate until the pool proves stable (RECOVERY_TICKS_REQUIRED good ticks).
+    When an order exits BACKOFF, it enters PROBATION state for careful re-entry.
+    During probation we keep the order eligible but reduce its effective limit so
+    the planner only allocates a small amount of hashrate until the pool proves
+    stable (RECOVERY_TICKS_REQUIRED consecutive GOOD ticks).
 
-    This rule mutates `ctx.eligible_orders` by replacing affected
-    OrderSnapshot instances with capped copies (using dataclasses.replace).
+    This rule mutates `ctx.eligible_orders` by replacing affected OrderSnapshot
+    instances with capped copies (using dataclasses.replace).
 
-    Cap formula (EH/s):
+    Base cap formula (EH/s):
       min(10% of order.limit_eh_s, 0.0001)
     Where 0.0001 EH/s == 100 TH/s.
 
-    If an order has no explicit limit, we still cap to 100 TH/s during
-    probation.
+    Practical note (miner granularity):
+      Orders are allocated in whole-miner units. If the strict probation cap is
+      smaller than the smallest miner in the fleet, the planner would be unable
+      to allocate *any* hashrate to the probation order, leaving it stuck in
+      PROBATION forever.
+
+      To avoid that, we raise the probation cap to the smallest miner's hashrate
+      (still never exceeding the order's original limit when it exists). This
+      keeps the "canary" semantics (at most one miner) while ensuring the order
+      can actually collect samples and recover.
     """
 
     name = "pool_post_backoff_probation_cap"
@@ -290,22 +300,52 @@ class PoolPostBackoffProbationCapRule:
         if not ctx.order_health or not ctx.eligible_orders:
             return
 
+        # Compute the smallest miner hashrate
+        # Used as a guardrail to avoid a probation cap that is too small
+        smallest_miner_eh_s: Decimal | None = None
+        for miner in ctx.snapshot.miners:
+            try:
+                hashrate = Decimal(str(miner.hashrate_eh_s))
+            except Exception:
+                continue
+            if hashrate <= 0:
+                continue
+            if smallest_miner_eh_s is None or hashrate < smallest_miner_eh_s:
+                smallest_miner_eh_s = hashrate
+
         capped_orders: list[OrderSnapshot] = []
         for order in ctx.eligible_orders:
             record = ctx.order_health.get(order.order_id)
-            if not record:
+            if not record or record.status != PoolHealthStatus.PROBATION:
                 capped_orders.append(order)
                 continue
 
-            if record.status != PoolHealthStatus.PROBATION:
-                capped_orders.append(order)
-                continue
+            base_cap = _probation_cap_eh_s(order.limit_eh_s)
+            effective_cap = base_cap
 
-            cap = _probation_cap_eh_s(order.limit_eh_s)
+            if smallest_miner_eh_s is not None and smallest_miner_eh_s > effective_cap:
+                if order.limit_eh_s is None:
+                    effective_cap = smallest_miner_eh_s
+                else:
+                    effective_cap = min(order.limit_eh_s, smallest_miner_eh_s)
 
-            # Replace with a capped copy. (Never increase the limit.)
-            if order.limit_eh_s is None or cap < order.limit_eh_s:
-                capped_orders.append(replace(order, limit_eh_s=cap))
+                if effective_cap > base_cap:
+                    ctx.add_event(
+                        "info",
+                        "POOL_PROBATION_CAP_ADJUSTED_FOR_GRANULARITY",
+                        "Raised probation cap so at least one miner can be allocated",
+                        order_id=order.order_id,
+                        base_probation_cap_eh_s=float(base_cap),
+                        adjusted_probation_cap_eh_s=float(effective_cap),
+                        smallest_miner_eh_s=str(smallest_miner_eh_s),
+                        original_limit_eh_s=(
+                            str(order.limit_eh_s) if order.limit_eh_s is not None else None
+                        ),
+                    )
+
+            # Replace with a capped copy (never increase the original limit)
+            if order.limit_eh_s is None or effective_cap < order.limit_eh_s:
+                capped_orders.append(replace(order, limit_eh_s=effective_cap))
             else:
                 capped_orders.append(order)
 
@@ -314,7 +354,8 @@ class PoolPostBackoffProbationCapRule:
                 "POOL_PROBATION_CAP",
                 "Applied post-backoff probation cap to order",
                 order_id=order.order_id,
-                probation_cap_eh_s=float(cap),
+                probation_cap_eh_s=float(effective_cap),
+                base_probation_cap_eh_s=float(base_cap),
                 original_limit_eh_s=(
                     str(order.limit_eh_s) if order.limit_eh_s is not None else None
                 ),
@@ -322,8 +363,6 @@ class PoolPostBackoffProbationCapRule:
             )
 
         ctx.eligible_orders = capped_orders
-
-
 class HardDrainRule:
     """Compute the set of orders that need immediate miner evacuation.
 
