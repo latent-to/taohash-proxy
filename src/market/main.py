@@ -1,8 +1,7 @@
 """
-Standalone marketplace service.
+Marketplace service.
 
-Runs the allocator, share processing, and hashprice monitoring loops
-independently from the API server.
+Runs the allocator, share processing, and hashprice monitoring loops.
 """
 
 import asyncio
@@ -23,7 +22,6 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Module-level references for health check
 _marketplace_db = None
 _redis_client = None
 _worker_tasks: list[asyncio.Task] = []
@@ -33,7 +31,6 @@ async def health_handler(request: web.Request) -> web.Response:
     """Health check endpoint for market service."""
     tasks_running = all(not t.done() for t in _worker_tasks) if _worker_tasks else False
 
-    # Provide task-level status to make debugging deploy issues easy.
     task_details = []
     for task in _worker_tasks:
         exc_str = None
@@ -53,9 +50,11 @@ async def health_handler(request: web.Request) -> web.Response:
             }
         )
 
-    # Check DB connectivity with a cheap round-trip.
     db_ok = False
-    if _marketplace_db is not None and getattr(_marketplace_db, "pool", None) is not None:
+    if (
+        _marketplace_db is not None
+        and getattr(_marketplace_db, "pool", None) is not None
+    ):
         try:
             async with _marketplace_db.pool.acquire() as conn:
                 await conn.execute("SELECT 1")
@@ -63,7 +62,6 @@ async def health_handler(request: web.Request) -> web.Response:
         except Exception:
             db_ok = False
 
-    # Check Redis connectivity with a ping.
     redis_ok = False
     if _redis_client is not None and getattr(_redis_client, "redis", None) is not None:
         try:
@@ -74,15 +72,18 @@ async def health_handler(request: web.Request) -> web.Response:
 
     all_ok = tasks_running and db_ok and redis_ok
     status = "ok" if all_ok else "degraded"
+    http_status = 200 if all_ok else 503
 
     return web.json_response(
         {
             "status": status,
+            "all_ok": all_ok,
             "tasks_running": tasks_running,
             "tasks": task_details,
             "database": "connected" if db_ok else "disconnected",
             "redis": "connected" if redis_ok else "disconnected",
-        }
+        },
+        status=http_status,
     )
 
 
@@ -107,18 +108,17 @@ async def main() -> None:
 
     poll_seconds = env_int("ORDER_BILLING_POLL_SECONDS", 30)
 
-    # Initialize connections
     logger.info("Initializing connections...")
     _marketplace_db = await create_marketplace_db()
     _redis_client = await create_redis_client()
     redis_publisher = await create_redis_publisher()
 
-    # Start health server
+    logger.info("Starting health server...")
     health_runner, _ = await start_health_server()
 
     logger.info("Starting market service tasks...")
 
-    # Create worker tasks
+    logger.info("Creating worker tasks...")
     _worker_tasks = [
         asyncio.create_task(
             order_share_processing_loop(
@@ -143,7 +143,6 @@ async def main() -> None:
         f"(poll_seconds={poll_seconds})"
     )
 
-    # Graceful shutdown handler
     shutdown_event = asyncio.Event()
 
     def handle_signal() -> None:
@@ -155,19 +154,15 @@ async def main() -> None:
         loop.add_signal_handler(sig, handle_signal)
 
     try:
-        # Wait until shutdown signal
         await shutdown_event.wait()
     finally:
-        # Cancel all tasks
         logger.info("Cancelling market tasks...")
         for task in _worker_tasks:
             task.cancel()
         await asyncio.gather(*_worker_tasks, return_exceptions=True)
 
-        # Cleanup health server
         await health_runner.cleanup()
 
-        # Close connections
         logger.info("Closing connections...")
         await redis_publisher.close()
         await _redis_client.close()
