@@ -107,9 +107,7 @@ class PlanExecutor:
                 result.moved += 1
 
             except Exception as e:
-                logger.error(
-                    f"Allocator executor error for miner {move.miner_id}: {e}"
-                )
+                logger.error(f"Allocator executor error for miner {move.miner_id}: {e}")
                 result.failed += 1
 
         # Persist runtime state

@@ -64,7 +64,9 @@ class _AvailableMiners:
 # Utility functions
 
 
-def _compute_damping_factor(rate: float, dt_seconds: float, interval_seconds: float) -> float:
+def _compute_damping_factor(
+    rate: float, dt_seconds: float, interval_seconds: float
+) -> float:
     """Compute exponential smoothing coefficient for movement damping.
 
     Calculates the damping factor used to limit how much hashrate can
@@ -432,7 +434,8 @@ def _build_donor_pools(
     soft_donor_order_ids = [
         order_id
         for order_id in eligible_orders
-        if current_allocation.get(order_id, 0.0) > targets.get(order_id, 0.0) + rebalance_threshold
+        if current_allocation.get(order_id, 0.0)
+        > targets.get(order_id, 0.0) + rebalance_threshold
     ]
     soft_donor_order_ids.sort(
         key=lambda order_id: rank_index.get(order_id, 10**9), reverse=True
@@ -813,7 +816,11 @@ def _shed_excess(
         # Get smallest miners first (prevent overshooting excess)
         pool = list(reversed(pool))
 
-        while pool and shed_budget > rebalance_threshold and len(recorder.moves) < max_switches:
+        while (
+            pool
+            and shed_budget > rebalance_threshold
+            and len(recorder.moves) < max_switches
+        ):
             miner = pool.pop(0)
 
             if miner.miner_id in moved_ids:
@@ -992,7 +999,9 @@ def plan_tick(
     )
 
     # Step 8: Identify Receivers
-    receivers = _identify_receivers(ranked_orders, targets, current_allocation, rebalance_threshold)
+    receivers = _identify_receivers(
+        ranked_orders, targets, current_allocation, rebalance_threshold
+    )
 
     # Step 9: Execute Moves
     moved_ids: set[str] = set()

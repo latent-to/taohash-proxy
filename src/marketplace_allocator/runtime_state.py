@@ -69,7 +69,9 @@ class RuntimeStateSnapshot:
     miner_share_stats: dict[str, "MinerPoolShareStats"]
     order_health: dict[str, "PoolHealthRecord"]
 
-    def miner_in_cooldown(self, miner_id: str, now: datetime, cooldown_seconds: int) -> bool:
+    def miner_in_cooldown(
+        self, miner_id: str, now: datetime, cooldown_seconds: int
+    ) -> bool:
         last = self.miner_last_move_at.get(miner_id)
         if not last:
             return False

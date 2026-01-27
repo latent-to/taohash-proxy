@@ -400,6 +400,8 @@ class PoolHealthDecision:
     order_health: dict[str, PoolHealthRecord]
     miner_share_stats: dict[str, MinerPoolShareStats]
     events: list[dict]
+
+
 def classify_signal(
     tick: PoolHealthDelta,
     record: PoolHealthRecord,
@@ -500,7 +502,6 @@ def classify_signal(
         other_reject_rate=float(ema_other_rate),
         sample_count=int(tick.delta_total),
     )
-
 
 
 def compute_transition(
@@ -767,6 +768,8 @@ def _event_message(event_code: str) -> str:
         "POOL_RECOVERED": "Pool has recovered to healthy state",
     }
     return messages.get(event_code, f"Pool health event: {event_code}")
+
+
 def _update_record_emas(
     record: PoolHealthRecord,
     tick: PoolHealthDelta,
@@ -812,7 +815,6 @@ def _update_record_emas(
         )
 
     return record
-
 
 
 def evaluate_pool_health(
@@ -894,7 +896,9 @@ def evaluate_pool_health(
             record.reason = "warmup"
 
         # 1. Update EMAs FIRST (so classify_signal uses smoothed values)
-        record = _update_record_emas(record, tick, damping_factor, min_samples=min_samples)
+        record = _update_record_emas(
+            record, tick, damping_factor, min_samples=min_samples
+        )
 
         # 2. Classify the current tick into a signal (uses EMA values)
         signal = classify_signal(tick, record, config, now_ts)

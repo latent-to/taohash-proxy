@@ -33,7 +33,9 @@ def load_config(poll_seconds_default: int) -> AllocatorConfig:
         enforce_hashprice_floor=env_bool(
             "ORDER_ALLOCATOR_ENFORCE_HASHPRICE_FLOOR", default=True
         ),
-        rebalance_threshold_eh_s=env_float("ORDER_ALLOCATOR_REBALANCE_THRESHOLD_EH_S", 0.0),
+        rebalance_threshold_eh_s=env_float(
+            "ORDER_ALLOCATOR_REBALANCE_THRESHOLD_EH_S", 0.0
+        ),
         enable_pool_health=env_bool("ORDER_ALLOCATOR_ENABLE_POOL_HEALTH", default=True),
         pool_health_warmup_seconds=env_int(
             "ORDER_ALLOCATOR_POOL_HEALTH_WARMUP_SECONDS", 120

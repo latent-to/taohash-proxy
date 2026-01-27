@@ -21,7 +21,7 @@ from src.marketplace_allocator.pool_health import PoolHealthRecord, PoolHealthSt
 
 
 _PROBATION_CAP_ABS_EH_S = Decimal("0.0001")  # 100 TH/s
-_PROBATION_CAP_RATE = Decimal("0.10") #10% of order
+_PROBATION_CAP_RATE = Decimal("0.10")  # 10% of order
 
 
 def _probation_cap_eh_s(order_limit_eh_s: Decimal | None) -> Decimal:
@@ -32,7 +32,7 @@ def _probation_cap_eh_s(order_limit_eh_s: Decimal | None) -> Decimal:
         cap_by_rate = order_limit_eh_s * _PROBATION_CAP_RATE
     except Exception:
         return _PROBATION_CAP_ABS_EH_S
-    
+
     effective_cap = min(cap_by_rate, _PROBATION_CAP_ABS_EH_S)
     return effective_cap
 
@@ -263,7 +263,6 @@ class PoolHealthRule:
             ]
 
 
-
 # TODO: Revisit the rule again for miner granularity
 class PoolPostBackoffProbationCapRule:
     """Apply a probation cap to orders in PROBATION state.
@@ -339,7 +338,9 @@ class PoolPostBackoffProbationCapRule:
                         adjusted_probation_cap_eh_s=float(effective_cap),
                         smallest_miner_eh_s=str(smallest_miner_eh_s),
                         original_limit_eh_s=(
-                            str(order.limit_eh_s) if order.limit_eh_s is not None else None
+                            str(order.limit_eh_s)
+                            if order.limit_eh_s is not None
+                            else None
                         ),
                     )
 
@@ -363,6 +364,8 @@ class PoolPostBackoffProbationCapRule:
             )
 
         ctx.eligible_orders = capped_orders
+
+
 class HardDrainRule:
     """Compute the set of orders that need immediate miner evacuation.
 
