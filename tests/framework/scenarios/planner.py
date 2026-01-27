@@ -91,3 +91,74 @@ class PlannerScenario:
     def advance(self, *, seconds: float) -> "PlannerScenario":
         self.clock.advance(seconds=float(seconds))
         return self
+
+    def tick(self) -> PlannerTickResult:
+        now = self.clock.now()
+        snapshot = AllocationSnapshot(
+            now=now,
+            orders=[o.to_snapshot(now=now) for o in self.orders.values()],
+            miners=[m.to_snapshot() for m in self.miners.values()],
+        )
+        runtime = RuntimeStateSnapshot(
+            last_tick_ts=self.last_tick_ts,
+            miner_last_move_at=dict(self.miner_last_move_at),
+            miner_share_stats={},
+            order_health=dict(self.order_health),
+        )
+
+        ctx = PlanningInput(snapshot=snapshot, config=self.config, runtime=runtime)
+        ctx.order_health = dict(self.order_health)
+
+        for rule in default_rules():
+            rule.apply(ctx)
+
+        plan, diag = plan_tick(ctx)
+        self.last_result = PlannerTickResult(now=now, plan=plan, diagnostics=diag)
+        return self.last_result
+
+    def expect_moves(self, expected: list[dict[str, Any]]) -> "PlannerScenario":
+        if not self.last_result:
+            raise AssertionError("No tick has been run yet")
+
+        actual = [
+            {
+                "miner_id": m.miner_id,
+                "from": m.from_label,
+                "to": m.to_order_id,
+                "reason": m.reason.value if hasattr(m.reason, "value") else str(m.reason),
+            }
+            for m in self.last_result.plan.moves
+        ]
+        actual_sorted = sorted(actual, key=lambda move: move["miner_id"])
+
+        expected_norm = [
+            {
+                "miner_id": str(e["miner_id"]),
+                "from": str(e.get("from")),
+                "to": e.get("to"),
+                "reason": (
+                    e["reason"].value
+                    if isinstance(e.get("reason"), MoveReason)
+                    else str(e.get("reason"))
+                ),
+            }
+            for e in expected
+        ]
+        expected_sorted = sorted(expected_norm, key=lambda move: move["miner_id"])
+
+        assert_equal(
+            actual_sorted,
+            expected_sorted,
+            message=f"[{self.name}] planned moves mismatch",
+        )
+        return self
+
+    def expect_planned_switches(self, expected: int) -> "PlannerScenario":
+        if not self.last_result:
+            raise AssertionError("No tick has been run yet")
+        assert_equal(
+            int(self.last_result.diagnostics.planned_switches),
+            int(expected),
+            message=f"[{self.name}] planned_switches mismatch",
+        )
+        return self
