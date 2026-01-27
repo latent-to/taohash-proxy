@@ -33,17 +33,16 @@ Signals are classified from tick data in priority order:
 
 | Priority | Signal | Trigger Condition | Type |
 |----------|--------|-------------------|------|
-| 1 | `TIMER_EXPIRED` | WARMUP/BACKOFF timer done | Soft |
-| 2 | `NO_JOBS` | `min_last_notify_age_s >= threshold` | **Hard** |
-| 3 | `NO_DATA` | `delta_total < min_samples` | Soft |
-| 4 | `HIGH_OTHER_REJECTS` | `ema_other_reject_rate >= threshold` | **Hard** |
-| 5 | `HIGH_REJECTS` | `ema_reject_rate >= threshold` | Soft |
+| 1 | `NO_JOBS` | `min_last_notify_age_s >= threshold` | **Hard** |
+| 2 | `HIGH_OTHER_REJECTS` | `ema_other_reject_rate >= threshold` **and** `delta_total >= min_samples` | **Hard** |
+| 3 | `TIMER_EXPIRED` | WARMUP/BACKOFF timer done (inclusive boundary) | Soft |
+| 4 | `NO_DATA` | `delta_total < min_samples` | Soft |
+| 5 | `HIGH_REJECTS` | `ema_reject_rate >= threshold` **and** `delta_total >= min_samples` | Soft |
 | 6 | `GOOD` | All thresholds passed | Soft |
 
-**Hard signals** (NO_JOBS, HIGH_OTHER_REJECTS) always trigger BACKOFF from any state except FAILED.
+**Hard signals** (`NO_JOBS`, `HIGH_OTHER_REJECTS`) always trigger BACKOFF from any state except FAILED.
 
 ---
-
 ## State Diagram
 
 ```
